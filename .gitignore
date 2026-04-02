@@ -7,3 +7,5 @@ dist
 .vercel
 uploads
 *.tsbuildinfo
+
+.vercel

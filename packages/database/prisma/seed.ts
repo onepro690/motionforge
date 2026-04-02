@@ -1,12 +1,12 @@
 import { PrismaClient } from "@prisma/client";
-import bcrypt from "bcryptjs";
+import { hashPassword } from "better-auth/crypto";
 
 const prisma = new PrismaClient();
 
 async function main() {
   console.log("Seeding database...");
 
-  const passwordHash = await bcrypt.hash("12345678", 12);
+  const passwordHash = await hashPassword("12345678");
 
   const user = await prisma.user.upsert({
     where: { email: "progerio690@gmail.com" },

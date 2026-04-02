@@ -1,10 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
 import { auth } from "@/lib/auth";
 import { headers } from "next/headers";
-import { getStorage } from "@/lib/storage";
 import { prisma } from "@/lib/db";
 import path from "path";
 import { nanoid } from "nanoid";
+import { put } from "@vercel/blob";
 
 const ALLOWED_VIDEO_TYPES = ["video/mp4", "video/quicktime", "video/webm"];
 const ALLOWED_IMAGE_TYPES = [
@@ -62,21 +62,19 @@ export async function POST(request: NextRequest) {
     const ext = path.extname(file.name) || (isVideo ? ".mp4" : ".jpg");
     const key = `uploads/${session.user.id}/${type}/${nanoid()}${ext}`;
 
-    const buffer = Buffer.from(await file.arrayBuffer());
-    const storage = getStorage();
-    const uploaded = await storage.upload({ key, buffer, mimeType: file.type });
+    const blob = await put(key, file, { access: "public" });
 
     await prisma.asset.create({
       data: {
         userId: session.user.id,
         type,
-        url: uploaded.url,
+        url: blob.url,
         mimeType: file.type,
         size: file.size,
       },
     });
 
-    return NextResponse.json({ url: uploaded.url, key });
+    return NextResponse.json({ url: blob.url, key });
   } catch (error) {
     console.error("Upload error:", error);
     return NextResponse.json({ error: "Upload failed" }, { status: 500 });
