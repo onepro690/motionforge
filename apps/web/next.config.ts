@@ -5,6 +5,14 @@ const productionHost = process.env.NEXT_PUBLIC_APP_URL
   : null;
 
 const nextConfig: NextConfig = {
+  serverExternalPackages: [
+    "bullmq",
+    "ioredis",
+    "replicate",
+    "@prisma/client",
+    "prisma",
+    "bcryptjs",
+  ],
   experimental: {
     serverActions: {
       allowedOrigins: [
