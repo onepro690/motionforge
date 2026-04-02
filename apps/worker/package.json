@@ -11,9 +11,10 @@
     "@motion/database": "*",
     "@motion/queue": "*",
     "@motion/storage": "*",
+    "@vercel/blob": "^2.3.3",
     "bullmq": "^5.0.0",
-    "ioredis": "^5.0.0",
-    "dotenv": "^16.0.0"
+    "dotenv": "^16.0.0",
+    "ioredis": "^5.0.0"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",

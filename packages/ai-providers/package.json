@@ -3,6 +3,7 @@
   "version": "0.0.1",
   "main": "./src/index.ts",
   "dependencies": {
+    "@vercel/blob": "^2.3.3",
     "replicate": "^0.32.0"
   },
   "devDependencies": {

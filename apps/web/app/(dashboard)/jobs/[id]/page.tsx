@@ -20,6 +20,7 @@ import {
 } from "@/components/ui/card";
 import { JobStatusBadge } from "@/components/jobs/status-badge";
 import { JobStatusPoller } from "@/components/jobs/status-poller";
+import { CancelButton } from "@/components/jobs/cancel-button";
 import { formatRelativeTime, getStatusLabel } from "@/lib/utils";
 
 interface PageProps {
@@ -88,7 +89,10 @@ export default async function JobDetailPage({ params }: PageProps) {
           </p>
         </div>
         {isActive && (
-          <JobStatusPoller jobId={job.id} initialStatus={job.status} />
+          <div className="flex items-center gap-2">
+            <JobStatusPoller jobId={job.id} initialStatus={job.status} />
+            <CancelButton jobId={job.id} />
+          </div>
         )}
       </div>
 

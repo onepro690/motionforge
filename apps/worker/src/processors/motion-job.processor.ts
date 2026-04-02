@@ -3,7 +3,7 @@ import path from "path";
 import fs from "fs/promises";
 import { prisma } from "@motion/database";
 import { createMotionProvider } from "@motion/ai-providers";
-import { createStorageProvider } from "@motion/storage";
+import { put } from "@vercel/blob";
 import type { MotionJobData } from "@motion/queue";
 import { preprocessInputs } from "../pipeline/preprocess";
 import { validateInputs } from "../pipeline/validate";
@@ -11,7 +11,6 @@ import { validateInputs } from "../pipeline/validate";
 export async function processMotionJob(job: Job<MotionJobData>): Promise<void> {
   const { jobId, userId, inputVideoUrl, inputImageUrl, config } = job.data;
   const aiProvider = createMotionProvider();
-  const storage = createStorageProvider();
 
   console.log(`[Worker] Starting job ${jobId} with provider ${aiProvider.name}`);
 
@@ -85,27 +84,25 @@ export async function processMotionJob(job: Job<MotionJobData>): Promise<void> {
 
     await job.updateProgress(85);
 
-    // Upload outputs to storage
+    // Upload outputs to Vercel Blob
     console.log(`[Worker] Uploading outputs for job ${jobId}`);
     const videoKey = `outputs/${userId}/${jobId}/video.mp4`;
     const thumbKey = `outputs/${userId}/${jobId}/thumbnail.jpg`;
 
     const videoBuffer = await fs.readFile(result.videoPath);
-    const videoFile = await storage.upload({
-      key: videoKey,
-      buffer: videoBuffer,
-      mimeType: "video/mp4",
+    const videoBlob = await put(videoKey, videoBuffer, {
+      access: "public",
+      contentType: "video/mp4",
     });
 
     let thumbnailUrl: string | undefined;
     try {
       const thumbBuffer = await fs.readFile(result.thumbnailPath);
-      const thumbFile = await storage.upload({
-        key: thumbKey,
-        buffer: thumbBuffer,
-        mimeType: "image/jpeg",
+      const thumbBlob = await put(thumbKey, thumbBuffer, {
+        access: "public",
+        contentType: "image/jpeg",
       });
-      thumbnailUrl = thumbFile.url;
+      thumbnailUrl = thumbBlob.url;
     } catch {
       // thumbnail is optional
     }
@@ -117,7 +114,7 @@ export async function processMotionJob(job: Job<MotionJobData>): Promise<void> {
       where: { id: jobId },
       data: {
         status: "COMPLETED",
-        outputVideoUrl: videoFile.url,
+        outputVideoUrl: videoBlob.url,
         outputThumbnailUrl: thumbnailUrl,
         completedAt: new Date(),
       },
