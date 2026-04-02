@@ -1,0 +1,6 @@
+{
+  "installCommand": "npm install",
+  "buildCommand": "(cd apps/web && ../../node_modules/.bin/prisma generate --schema=../../packages/database/prisma/schema.prisma && ../../node_modules/.bin/next build)",
+  "outputDirectory": "apps/web/.next",
+  "framework": "nextjs"
+}
