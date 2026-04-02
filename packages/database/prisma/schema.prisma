@@ -1,0 +1,165 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id            String   @id @default(cuid())
+  name          String?
+  email         String   @unique
+  emailVerified Boolean  @default(false)
+  image         String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  // Relations
+  sessions      Session[]
+  accounts      Account[]
+  jobs          GenerationJob[]
+  assets        Asset[]
+
+  @@map("users")
+}
+
+model Session {
+  id        String   @id @default(cuid())
+  userId    String
+  token     String   @unique
+  expiresAt DateTime
+  ipAddress String?
+  userAgent String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("sessions")
+}
+
+model Account {
+  id                    String    @id @default(cuid())
+  userId                String
+  accountId             String
+  providerId            String
+  accessToken           String?
+  refreshToken          String?
+  idToken               String?
+  accessTokenExpiresAt  DateTime?
+  refreshTokenExpiresAt DateTime?
+  scope                 String?
+  password              String?
+  createdAt             DateTime  @default(now())
+  updatedAt             DateTime  @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("accounts")
+}
+
+model Verification {
+  id         String   @id @default(cuid())
+  identifier String
+  value      String
+  expiresAt  DateTime
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@map("verifications")
+}
+
+enum JobStatus {
+  QUEUED
+  PROCESSING
+  RENDERING
+  COMPLETED
+  FAILED
+}
+
+enum AspectRatio {
+  RATIO_16_9
+  RATIO_9_16
+  RATIO_1_1
+  RATIO_4_3
+}
+
+enum Resolution {
+  SD_480
+  HD_720
+  FHD_1080
+}
+
+enum BackgroundMode {
+  KEEP
+  REMOVE
+  BLUR
+  REPLACE
+}
+
+model GenerationJob {
+  id                    String         @id @default(cuid())
+  userId                String
+  status                JobStatus      @default(QUEUED)
+  provider              String         @default("mock")
+
+  // Inputs
+  inputVideoUrl         String
+  inputImageUrl         String
+  inputVideoThumbnail   String?
+  inputImageThumbnail   String?
+
+  // Output
+  outputVideoUrl        String?
+  outputThumbnailUrl    String?
+
+  // Config
+  aspectRatio           AspectRatio    @default(RATIO_16_9)
+  resolution            Resolution     @default(HD_720)
+  maxDuration           Int            @default(15)
+  motionStrength        Float          @default(0.8)
+  identityStrength      Float          @default(0.9)
+  facePreserveStrength  Float          @default(0.85)
+  backgroundMode        BackgroundMode @default(KEEP)
+
+  // Metadata
+  inputVideoDuration    Float?
+  inputVideoFps         Float?
+  inputVideoWidth       Int?
+  inputVideoHeight      Int?
+
+  // Error
+  errorMessage          String?
+
+  // Timestamps
+  startedAt             DateTime?
+  completedAt           DateTime?
+  createdAt             DateTime       @default(now())
+  updatedAt             DateTime       @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([status])
+  @@map("generation_jobs")
+}
+
+model Asset {
+  id        String   @id @default(cuid())
+  userId    String
+  type      String
+  url       String
+  mimeType  String
+  size      Int
+  width     Int?
+  height    Int?
+  duration  Float?
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("assets")
+}

@@ -1,0 +1,11 @@
+{
+  "name": "@motion/ai-providers",
+  "version": "0.0.1",
+  "main": "./src/index.ts",
+  "dependencies": {
+    "replicate": "^0.32.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.0.0"
+  }
+}

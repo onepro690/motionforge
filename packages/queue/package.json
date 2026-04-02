@@ -1,0 +1,12 @@
+{
+  "name": "@motion/queue",
+  "version": "0.0.1",
+  "main": "./src/index.ts",
+  "dependencies": {
+    "bullmq": "^5.0.0",
+    "ioredis": "^5.0.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.0.0"
+  }
+}

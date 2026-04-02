@@ -1,0 +1,23 @@
+{
+  "name": "@motion/worker",
+  "version": "0.0.1",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc",
+    "start": "node dist/index.js"
+  },
+  "dependencies": {
+    "@motion/ai-providers": "*",
+    "@motion/database": "*",
+    "@motion/queue": "*",
+    "@motion/storage": "*",
+    "bullmq": "^5.0.0",
+    "ioredis": "^5.0.0",
+    "dotenv": "^16.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsx": "^4.0.0",
+    "typescript": "^5.0.0"
+  }
+}
