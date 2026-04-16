@@ -12,23 +12,21 @@ export async function GET(request: NextRequest) {
 
   const recentVideos = await prisma.ugcGeneratedVideo.findMany({
     orderBy: { createdAt: "desc" },
-    take: 3,
+    take: 10,
     select: {
       id: true,
       status: true,
       currentStep: true,
       errorMessage: true,
       createdAt: true,
-      veoPrompts: true,
       script: true,
-      copyByTake: true,
       takes: {
         orderBy: { takeIndex: "asc" },
-        select: { takeIndex: true, status: true, videoUrl: true, veoPrompt: true, errorMessage: true },
+        select: { takeIndex: true, status: true, videoUrl: true, errorMessage: true },
       },
       logs: {
         orderBy: { createdAt: "asc" },
-        select: { step: true, status: true, message: true, data: true, createdAt: true },
+        select: { step: true, status: true, message: true, createdAt: true },
       },
     },
   });
