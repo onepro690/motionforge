@@ -200,3 +200,22 @@ export async function PATCH(
     totalComments: Number(updated.totalComments),
   });
 }
+
+export async function DELETE(
+  _req: NextRequest,
+  { params }: { params: Promise<{ id: string }> }
+) {
+  const session = await auth.api.getSession({ headers: await headers() });
+  if (!session) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  const { id } = await params;
+
+  const product = await prisma.ugcTrendingProduct.findUnique({ where: { id } });
+  if (!product || product.userId !== session.user.id) {
+    return NextResponse.json({ error: "Not found" }, { status: 404 });
+  }
+
+  // Cascade delete: vídeos detectados são deletados automaticamente (onDelete: Cascade no schema)
+  await prisma.ugcTrendingProduct.delete({ where: { id } });
+
+  return NextResponse.json({ ok: true });
+}

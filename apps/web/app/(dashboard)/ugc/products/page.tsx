@@ -5,7 +5,7 @@ import Link from "next/link";
 import {
   TrendingUp, ThumbsUp, ThumbsDown, Bookmark, Eye, Loader2,
   RefreshCw, Users, Video, ArrowUpRight, ChevronLeft, ChevronRight, Filter, Sparkles,
-  UserCircle, X, Plus, Link2
+  UserCircle, X, Plus, Link2, Trash2
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
@@ -84,6 +84,7 @@ export default function ProductsPage() {
   const [newVideoUrl, setNewVideoUrl] = useState("");
   const [newProductName, setNewProductName] = useState("");
   const [addingVideo, setAddingVideo] = useState(false);
+  const [deletingProduct, setDeletingProduct] = useState<string | null>(null);
 
   // Character picker modal
   const [characters, setCharacters] = useState<Character[]>([]);
@@ -208,6 +209,23 @@ export default function ProductsPage() {
 
   const regenerate = (id: string) => {
     startGeneration(id, "regen");
+  };
+
+  const deleteProduct = async (productId: string) => {
+    if (!confirm("Tem certeza que quer apagar este produto?")) return;
+    setDeletingProduct(productId);
+    try {
+      const res = await fetch(`/api/ugc/products/${productId}`, { method: "DELETE" });
+      if (res.ok) {
+        toast.success("Produto apagado");
+        load();
+      } else {
+        const data = await res.json().catch(() => ({}));
+        toast.error(data.error ?? "Erro ao apagar produto");
+      }
+    } finally {
+      setDeletingProduct(null);
+    }
   };
 
   const handleAddVideo = async () => {
@@ -438,42 +456,22 @@ export default function ProductsPage() {
                       <Bookmark className="w-3 h-3 mr-1" />
                       Salvar
                     </Button>
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      className="border-red-500/20 text-red-400/70 hover:text-red-400 text-xs h-8 px-2"
-                      onClick={() => updateStatus(product.id, "REJECTED")}
-                      disabled={actionLoading === product.id}
-                    >
-                      <ThumbsDown className="w-3 h-3" />
-                    </Button>
                   </>
                 )}
                 {(product.status === "APPROVED" || product.status === "USED_FOR_GENERATION") && (
-                  <>
-                    <Button
-                      size="sm"
-                      className="flex-1 bg-violet-600/80 hover:bg-violet-600 text-white text-xs h-8"
-                      onClick={() => regenerate(product.id)}
-                      disabled={regenLoading === product.id}
-                    >
-                      {regenLoading === product.id ? (
-                        <Loader2 className="w-3 h-3 animate-spin mr-1" />
-                      ) : (
-                        <Sparkles className="w-3 h-3 mr-1" />
-                      )}
-                      Gerar Novamente
-                    </Button>
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      className="border-red-500/20 text-red-400/60 hover:text-red-400 text-xs h-8 px-2"
-                      onClick={() => updateStatus(product.id, "REJECTED")}
-                      disabled={actionLoading === product.id}
-                    >
-                      <ThumbsDown className="w-3 h-3" />
-                    </Button>
-                  </>
+                  <Button
+                    size="sm"
+                    className="flex-1 bg-violet-600/80 hover:bg-violet-600 text-white text-xs h-8"
+                    onClick={() => regenerate(product.id)}
+                    disabled={regenLoading === product.id}
+                  >
+                    {regenLoading === product.id ? (
+                      <Loader2 className="w-3 h-3 animate-spin mr-1" />
+                    ) : (
+                      <Sparkles className="w-3 h-3 mr-1" />
+                    )}
+                    Gerar Novamente
+                  </Button>
                 )}
                 {product.status === "REJECTED" && (
                   <Button
@@ -486,6 +484,15 @@ export default function ProductsPage() {
                     Aprovar
                   </Button>
                 )}
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="border-red-500/20 text-red-400/50 hover:text-red-400 hover:bg-red-500/10 text-xs h-8 px-2"
+                  onClick={() => deleteProduct(product.id)}
+                  disabled={deletingProduct === product.id}
+                >
+                  {deletingProduct === product.id ? <Loader2 className="w-3 h-3 animate-spin" /> : <Trash2 className="w-3 h-3" />}
+                </Button>
               </div>
             </Card>
           ))}
