@@ -437,7 +437,7 @@ export async function runVideoPipeline(
       const takeKey = `take${i + 1}` as "take1" | "take2" | "take3";
       const takeImage = perTakeImages[takeKey] ?? editedImage;
 
-      // Submit to Vertex AI
+      // Submit to Vertex AI — retry without image if Veo rejects it
       try {
         const operationName = await submitVeoTake(prompt, modelId, accessToken, takeImage);
         await prisma.generationJob.update({
@@ -449,8 +449,27 @@ export async function runVideoPipeline(
           data: { status: "PROCESSING" },
         });
       } catch (err) {
-        await prisma.generationJob.update({ where: { id: genJob.id }, data: { status: "FAILED", errorMessage: String(err) } });
-        await prisma.ugcGeneratedTake.update({ where: { id: take.id }, data: { status: "FAILED", errorMessage: String(err) } });
+        const errMsg = String(err);
+        if (takeImage && (errMsg.includes("usage guidelines") || errMsg.includes("violat"))) {
+          console.warn(`[pipeline] Veo rejected image for take ${i}, retrying text-to-video`);
+          try {
+            const operationName = await submitVeoTake(prompt, modelId, accessToken, null);
+            await prisma.generationJob.update({
+              where: { id: genJob.id },
+              data: { externalTaskId: operationName },
+            });
+            await prisma.ugcGeneratedTake.update({
+              where: { id: take.id },
+              data: { status: "PROCESSING" },
+            });
+          } catch (retryErr) {
+            await prisma.generationJob.update({ where: { id: genJob.id }, data: { status: "FAILED", errorMessage: String(retryErr) } });
+            await prisma.ugcGeneratedTake.update({ where: { id: take.id }, data: { status: "FAILED", errorMessage: `Image rejected, text-to-video also failed: ${String(retryErr)}` } });
+          }
+        } else {
+          await prisma.generationJob.update({ where: { id: genJob.id }, data: { status: "FAILED", errorMessage: errMsg } });
+          await prisma.ugcGeneratedTake.update({ where: { id: take.id }, data: { status: "FAILED", errorMessage: errMsg } });
+        }
       }
     }
 
