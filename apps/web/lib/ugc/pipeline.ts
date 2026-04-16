@@ -190,7 +190,7 @@ export async function runVideoPipeline(
     // Limite alto de takes — o pipeline decide quantos realmente precisa baseado
     // na análise do vídeo (cenas visuais + duração da fala). O max aqui é só
     // safety cap, não deve restringir o resultado normal.
-    const maxTakes = 15;
+    const maxTakes = 6;
 
     // ── Step 2: Analyze creative (or use existing brief) ───────────────────
     const t2 = Date.now();
@@ -986,7 +986,53 @@ export async function pollAndAssembleTakes(videoId: string): Promise<{
 
     // Acha o take anterior
     const prevTake = sortedTakes.find(t => t.takeIndex === take.takeIndex - 1);
-    if (!prevTake || prevTake.status !== "COMPLETED" || !prevTake.videoUrl) {
+    if (!prevTake) {
+      allCompleted = false;
+      continue;
+    }
+
+    // Se o take anterior falhou, procura o último COMPLETED antes dele
+    // para não travar a cadeia inteira por causa de 1 take falhado
+    if (prevTake.status === "FAILED") {
+      const lastCompleted = [...sortedTakes]
+        .filter(t => t.takeIndex < take.takeIndex && t.status === "COMPLETED" && t.videoUrl)
+        .pop();
+      if (lastCompleted) {
+        // Continua encadeando a partir do último completado
+        console.log(`[pollAndAssemble] Take ${prevTake.takeIndex} failed, chaining from last completed take ${lastCompleted.takeIndex}`);
+        // Substitui prevTake efetivamente — cai no fluxo normal abaixo
+        Object.assign(prevTake, lastCompleted);
+      } else {
+        // Nenhum take anterior completou — usa a imagem editada
+        const editedUrl = take.editedImageUrl || sortedTakes.find(t => t.takeIndex === 0)?.editedImageUrl;
+        if (editedUrl) {
+          console.log(`[pollAndAssemble] No completed takes before ${take.takeIndex}, using edited image`);
+          const chainImg = await imageUrlToBase64(editedUrl).catch(() => null);
+          if (chainImg) {
+            const takePrompt = take.veoPrompt ?? `Vertical 9:16 smartphone UGC video. Take ${take.takeIndex + 1}.`;
+            try {
+              const opName = await submitVeoTake(takePrompt, "veo3-fast", accessToken!, chainImg);
+              await prisma.generationJob.update({ where: { id: genJob.id }, data: { externalTaskId: opName, status: "PROCESSING" } });
+              await prisma.ugcGeneratedTake.update({ where: { id: take.id }, data: { status: "PROCESSING" } });
+              console.log(`[pollAndAssemble] Chained take ${take.takeIndex} submitted with edited image (prev failed)`);
+            } catch (err) {
+              await prisma.generationJob.update({ where: { id: genJob.id }, data: { status: "FAILED", errorMessage: String(err) } });
+              await prisma.ugcGeneratedTake.update({ where: { id: take.id }, data: { status: "FAILED", errorMessage: String(err) } });
+              failedCount++;
+            }
+            allCompleted = false;
+            break;
+          }
+        }
+        // Sem fallback — marca como falhou
+        await prisma.generationJob.update({ where: { id: genJob.id }, data: { status: "FAILED", errorMessage: "Previous take failed, no fallback" } });
+        await prisma.ugcGeneratedTake.update({ where: { id: take.id }, data: { status: "FAILED", errorMessage: "Previous take failed" } });
+        failedCount++;
+        continue;
+      }
+    }
+
+    if (prevTake.status !== "COMPLETED" || !prevTake.videoUrl) {
       allCompleted = false;
       continue; // Anterior ainda não completou
     }
