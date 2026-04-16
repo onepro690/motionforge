@@ -15,6 +15,12 @@ type VideoStatus =
   | "ASSEMBLING" | "AWAITING_REVIEW" | "APPROVED" | "REJECTED"
   | "REMAKE_REQUESTED" | "REGENERATING" | "COMPLETED" | "FAILED";
 
+interface TakeStatus {
+  takeIndex: number;
+  status: string;
+  durationSeconds: number | null;
+}
+
 interface GeneratedVideo {
   id: string;
   title: string | null;
@@ -28,6 +34,7 @@ interface GeneratedVideo {
   currentStep: string | null;
   product: { name: string; thumbnailUrl: string | null };
   _count: { takes: number };
+  takes: TakeStatus[];
 }
 
 const STATUS_LABELS: Record<VideoStatus, string> = {
@@ -135,16 +142,53 @@ function VideoCard({ video, onRefresh, onDeleted }: { video: GeneratedVideo; onR
         <div className={`flex items-center gap-1.5 ${color}`}>
           <Icon className={`w-3.5 h-3.5 ${isInProgress ? "animate-spin" : ""}`} />
           <span className="text-xs font-medium">{STATUS_LABELS[video.status]}</span>
-          {video.currentStep && isInProgress && (
-            <span className="text-xs text-white/30 truncate">• {video.currentStep}</span>
-          )}
         </div>
+
+        {/* Take progress */}
+        {isInProgress && video.takes && video.takes.length > 0 && (
+          <div className="space-y-1.5">
+            <div className="flex gap-1">
+              {video.takes.map((take) => {
+                const bg = take.status === "COMPLETED" ? "bg-emerald-500"
+                  : take.status === "PROCESSING" ? "bg-cyan-400 animate-pulse"
+                  : take.status === "FAILED" ? "bg-red-500"
+                  : "bg-white/10";
+                return (
+                  <div
+                    key={take.takeIndex}
+                    className={`flex-1 h-1.5 rounded-full ${bg}`}
+                    title={`Take ${take.takeIndex + 1}: ${take.status}`}
+                  />
+                );
+              })}
+            </div>
+            <p className="text-xs text-white/30">
+              {(() => {
+                const completed = video.takes.filter(t => t.status === "COMPLETED").length;
+                const processing = video.takes.filter(t => t.status === "PROCESSING").length;
+                const failed = video.takes.filter(t => t.status === "FAILED").length;
+                const total = video.takes.length;
+                if (processing > 0) return `Take ${completed + 1}/${total} gerando...`;
+                if (completed === total) return `${total} takes prontos, montando...`;
+                if (failed > 0) return `${completed}/${total} prontos, ${failed} falhou`;
+                return `${completed}/${total} prontos, aguardando...`;
+              })()}
+            </p>
+          </div>
+        )}
 
         {/* Meta */}
         <div className="flex gap-3 text-xs text-white/30">
           {video.durationSeconds && <span>{Math.round(video.durationSeconds)}s</span>}
           <span>{video._count.takes} takes</span>
-          <span>{new Date(video.createdAt).toLocaleDateString("pt-BR")}</span>
+          {isInProgress ? (
+            <span>{(() => {
+              const mins = Math.floor((Date.now() - new Date(video.createdAt).getTime()) / 60000);
+              return mins < 1 ? "agora" : `${mins}min atrás`;
+            })()}</span>
+          ) : (
+            <span>{new Date(video.createdAt).toLocaleDateString("pt-BR")}</span>
+          )}
         </div>
 
         {/* Actions */}

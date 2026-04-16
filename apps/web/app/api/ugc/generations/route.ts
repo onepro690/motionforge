@@ -33,6 +33,10 @@ export async function GET(request: NextRequest) {
       include: {
         product: { select: { name: true, thumbnailUrl: true, score: true } },
         _count: { select: { takes: true } },
+        takes: {
+          select: { takeIndex: true, status: true, durationSeconds: true },
+          orderBy: { takeIndex: "asc" },
+        },
       },
     }),
     prisma.ugcGeneratedVideo.count({ where }),
