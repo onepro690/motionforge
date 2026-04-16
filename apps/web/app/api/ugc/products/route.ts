@@ -85,7 +85,52 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: "Este vídeo já está cadastrado em outro produto" }, { status: 409 });
   }
 
-  // Cria produto + vídeo em uma transação
+  // Busca metadados do TikTok via tikwm
+  let thumbnailUrl: string | null = null;
+  let description: string | null = null;
+  let views = 0;
+  let likes = 0;
+  let comments = 0;
+  let shares = 0;
+  let resolvedHandle = creatorHandle;
+
+  try {
+    const tikwmRes = await fetch("https://www.tikwm.com/api/", {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ url: videoUrl, hd: "1" }).toString(),
+      signal: AbortSignal.timeout(15000),
+    });
+    if (tikwmRes.ok) {
+      const tikwmData = await tikwmRes.json() as {
+        code?: number;
+        data?: {
+          title?: string;
+          cover?: string;
+          origin_cover?: string;
+          play_count?: number;
+          digg_count?: number;
+          comment_count?: number;
+          share_count?: number;
+          author?: { unique_id?: string; nickname?: string };
+        };
+      };
+      if (tikwmData.code === 0 && tikwmData.data) {
+        const d = tikwmData.data;
+        thumbnailUrl = d.origin_cover ?? d.cover ?? null;
+        description = d.title ?? null;
+        views = d.play_count ?? 0;
+        likes = d.digg_count ?? 0;
+        comments = d.comment_count ?? 0;
+        shares = d.share_count ?? 0;
+        if (d.author?.unique_id) resolvedHandle = d.author.unique_id;
+      }
+    }
+  } catch (e) {
+    console.error("[products/POST] tikwm fetch failed:", e);
+  }
+
+  // Cria produto + vídeo
   const product = await prisma.ugcTrendingProduct.create({
     data: {
       userId,
@@ -94,12 +139,21 @@ export async function POST(request: NextRequest) {
       score: 50,
       detectedVideoCount: 1,
       creatorCount: 1,
+      thumbnailUrl,
+      totalViews: views,
+      totalLikes: likes,
       detectedVideos: {
         create: {
           userId,
           videoId,
           videoUrl,
-          creatorHandle,
+          thumbnailUrl,
+          description,
+          creatorHandle: resolvedHandle,
+          views,
+          likes,
+          comments,
+          shares,
         },
       },
     },

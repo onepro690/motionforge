@@ -3,7 +3,6 @@ import { auth } from "@/lib/auth";
 import { headers } from "next/headers";
 import { prisma } from "@motion/database";
 import { z } from "zod";
-import { fetchTikwmDetail } from "@/lib/ugc/reference-video";
 
 const patchSchema = z.object({
   status: z.enum(["APPROVED", "REJECTED", "SAVED_FOR_LATER", "UNDER_REVIEW"]).optional(),
@@ -91,18 +90,46 @@ export async function POST(
     return NextResponse.json({ error: "Este vídeo já está cadastrado" }, { status: 409 });
   }
 
-  // Busca metadados via tikwm
+  // Busca metadados do TikTok via tikwm
   let thumbnailUrl: string | null = null;
   let description: string | null = null;
   let creatorHandle: string | null = null;
+  let views = 0, likes = 0, comments = 0, shares = 0;
   try {
-    const detail = await fetchTikwmDetail(videoUrl);
-    if (detail) {
-      description = detail.title || null;
-    }
-    // Extrai handle do URL
     const handleMatch = videoUrl.match(/@([^/]+)/);
     creatorHandle = handleMatch?.[1] ?? null;
+
+    const tikwmRes = await fetch("https://www.tikwm.com/api/", {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ url: videoUrl, hd: "1" }).toString(),
+      signal: AbortSignal.timeout(15000),
+    });
+    if (tikwmRes.ok) {
+      const tikwmData = await tikwmRes.json() as {
+        code?: number;
+        data?: {
+          title?: string;
+          cover?: string;
+          origin_cover?: string;
+          play_count?: number;
+          digg_count?: number;
+          comment_count?: number;
+          share_count?: number;
+          author?: { unique_id?: string };
+        };
+      };
+      if (tikwmData.code === 0 && tikwmData.data) {
+        const d = tikwmData.data;
+        thumbnailUrl = d.origin_cover ?? d.cover ?? null;
+        description = d.title ?? null;
+        views = d.play_count ?? 0;
+        likes = d.digg_count ?? 0;
+        comments = d.comment_count ?? 0;
+        shares = d.share_count ?? 0;
+        if (d.author?.unique_id) creatorHandle = d.author.unique_id;
+      }
+    }
   } catch { /* ok */ }
 
   const video = await prisma.ugcDetectedVideo.create({
@@ -114,6 +141,10 @@ export async function POST(
       thumbnailUrl,
       description,
       creatorHandle,
+      views,
+      likes,
+      comments,
+      shares,
     },
   });
 
