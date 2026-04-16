@@ -35,7 +35,7 @@ export async function POST(request: NextRequest) {
 
     // Check daily limit
     const settings = await prisma.ugcSystemSettings.findUnique({ where: { userId } });
-    const dailyLimit = settings?.dailyVideoLimit ?? 50;
+    const dailyLimit = settings?.dailyVideoLimit ?? 999999;
     const today = new Date(); today.setHours(0, 0, 0, 0);
     const videosToday = await prisma.ugcGeneratedVideo.count({ where: { userId, createdAt: { gte: today } } });
 
