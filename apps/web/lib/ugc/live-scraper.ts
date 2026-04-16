@@ -1,0 +1,1148 @@
+// TikTok Shop Live Scraper — bulk discovery approach
+//
+// NOVO FLUXO (sem dependência de api-live per-handle, que é WAF-limited):
+//   1. Rotaciona 30 calls para /live lobby com device_id/UA frescos —
+//      cada call retorna recomendações personalizadas diferentes.
+//   2. Parse __UNIVERSAL_DATA__ extraindo TODOS os objetos room com
+//      roomId + owner.uniqueId + hasCommerce + status já embutidos.
+//   3. Para cada roomId, chama webcast/room/info (endpoint autoritativo
+//      que dá status, has_commerce_goods, HLS URL em UMA call — e NÃO
+//      é WAF-bloqueado como api-live).
+//   4. Fallback: para seed/manual creators que não apareceram no lobby,
+//      chama api-live com rate limit pesado (30 handles max, 500ms gap).
+//   5. Filtro final: status=2 AND has_commerce_goods=true.
+
+import { TikTokWebClient } from "tiktok-live-connector";
+import { prisma } from "@motion/database";
+
+export interface LiveProduct {
+  name: string;
+  thumbnailUrl?: string;
+  priceFormatted?: string;
+}
+
+export interface ScrapedLive {
+  roomId: string;
+  title: string;
+  hostHandle: string;
+  hostNickname: string;
+  hostAvatarUrl: string;
+
+  viewerCount: number;
+  totalViewers: number;
+  likeCount: number;
+
+  estimatedOrders: number;
+  productCount: number;
+  products: LiveProduct[];
+
+  isLive: boolean;
+  startedAt?: string;
+
+  hlsUrl?: string;
+  flvUrl?: string;
+  liveUrl: string;
+  thumbnailUrl: string;
+
+  salesScore: number;
+}
+
+export interface LiveScrapeResult {
+  lives: ScrapedLive[];
+  totalFound: number;
+  scrapedAt: string;
+  debug?: {
+    keywordsSearched: string[];
+    candidatesFound: number;
+    verifiedLive: number;
+    checkErrors: number;
+    liveWithCommerce: number;
+    liveWithoutCommerce: number;
+    usedMock: boolean;
+    lobbyRoomsFound?: number;
+    lobbyRoomsWithId?: number;
+    fallbackChecked?: number;
+  };
+}
+
+// ── Helpers ──────────────────────────────────────────────────────────────────
+
+function calcSalesScore(v: { viewerCount: number; likeCount: number; isLive: boolean }): number {
+  return Math.round(
+    Math.min(v.viewerCount / 500_000, 1) * 50 +
+    Math.min(v.likeCount / 100_000, 1) * 30 +
+    (v.isLive ? 20 : 0)
+  );
+}
+
+const USER_AGENTS = [
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+  "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:122.0) Gecko/20100101 Firefox/122.0",
+  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36 Edg/119.0.0.0",
+  "Mozilla/5.0 (iPhone; CPU iPhone OS 17_2 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Mobile/15E148 Safari/604.1",
+];
+
+function randomUA(): string {
+  return USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)];
+}
+
+function randomDeviceId(): string {
+  // TikTok web device_ids são 19 dígitos iniciando em 7...
+  const base = 7_000_000_000_000_000_000;
+  const rand = Math.floor(Math.random() * 999_999_999_999_999_999);
+  return (base + rand).toString();
+}
+
+const SEED_SHOP_CREATORS = [
+  "liseleooliveira", "virginia", "gkay", "bocarosa", "rafakalimann",
+  "juliette", "camilaloures", "luanasantana", "mileidemihaile", "gessicakayane",
+  "lorrana", "any.awuada", "rafaelrochatv", "belochatto", "tatisantos",
+  "carolbuffara", "ju_ferraz", "biancaandrade", "mariamaud", "naiaraazevedo",
+];
+
+// ── Tikwm user info (pra manual add + verificação alt) ──────────────────────
+
+export interface TikwmUserInfo {
+  handle: string;
+  nickname: string;
+  avatarUrl: string;
+  bio?: string;
+  verified?: boolean;
+}
+
+export async function fetchTikwmUserInfo(handle: string): Promise<TikwmUserInfo | null> {
+  const url = `https://www.tikwm.com/api/user/info?unique_id=${encodeURIComponent(handle)}`;
+  try {
+    const res = await fetch(url, {
+      headers: { "User-Agent": randomUA() },
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (!res.ok) return null;
+    const data = (await res.json()) as {
+      code?: number;
+      data?: {
+        user?: {
+          uniqueId?: string;
+          unique_id?: string;
+          nickname?: string;
+          avatarThumb?: string;
+          avatar_thumb?: string;
+          avatarMedium?: string;
+          avatar_medium?: string;
+          signature?: string;
+          verified?: boolean;
+        };
+      };
+    };
+    if (data.code !== 0 || !data.data?.user) return null;
+    const u = data.data.user;
+    const uniqueId = u.uniqueId ?? u.unique_id ?? handle;
+    const avatar =
+      u.avatarMedium ?? u.avatar_medium ?? u.avatarThumb ?? u.avatar_thumb ?? "";
+    return {
+      handle: uniqueId,
+      nickname: u.nickname ?? uniqueId,
+      avatarUrl: avatar,
+      bio: u.signature,
+      verified: u.verified,
+    };
+  } catch {
+    return null;
+  }
+}
+
+// Exported: verificação pública usada pela rota de creators (add manual).
+// Retorna dados completos se live com commerce, senão null.
+export async function checkCreatorLiveNow(handle: string): Promise<{
+  roomId: string;
+  title?: string;
+  hlsUrl?: string;
+  flvUrl?: string;
+  coverUrl?: string;
+  userCount?: number;
+  likeCount?: number;
+  startedAt?: number;
+  hasCommerce: boolean;
+} | null> {
+  const check = await checkLiveStatus(handle);
+  if (!check.isLive || !check.roomId) return null;
+  const info = await fetchFullRoomInfo(check.roomId);
+  if (!info || info.status !== 2) return null;
+  return {
+    roomId: check.roomId,
+    title: info.title ?? check.title,
+    hlsUrl: info.hlsUrl,
+    flvUrl: info.flvUrl,
+    coverUrl: info.coverUrl ?? check.coverUrl,
+    userCount: info.userCount ?? check.userCount,
+    likeCount: info.likeCount ?? check.enterCount,
+    startedAt: info.startedAt ?? check.startedAt,
+    hasCommerce: info.hasCommerce,
+  };
+}
+
+// ── Tikwm feed search (principal) ────────────────────────────────────────────
+// Busca vídeos recentes sobre live shop BR, extrai authors.
+// Pool: ~80 queries × 3 pages = 240 calls → 500-800 handles únicos.
+
+const FEED_SEARCH_QUERIES = [
+  // Live geral + TikTok Shop
+  "live tiktok shop brasil agora", "ao vivo tiktok shop", "live shop brasil",
+  "tô ao vivo agora", "entra na live", "live vendendo agora", "live promoção",
+  "ao vivo vendendo", "live ofertas hoje", "live bazar aovivo",
+  "carrinho laranja tiktok", "achados tiktok shop", "promoção live",
+  "desconto live", "live achados",
+  // Categorias de produto
+  "live maquiagem", "live skincare", "live roupa", "live perfume",
+  "live tênis", "live bolsa", "live acessórios", "live cabelo",
+  "live casa decoração", "live eletrônicos", "live fone bluetooth",
+  "live utensílios cozinha", "live air fryer", "live fitness",
+  "live suplemento", "live moda feminina", "live moda masculina",
+  "live infantil", "live pet", "live brinquedo", "live livro",
+  "live jogo", "live informática", "live celular", "live relógio",
+  "live óculos", "live joia", "live semi joia", "live bijuteria",
+  "live calçados", "live sandália", "live chinelo", "live pijama",
+  "live lingerie", "live biquíni", "live maiô", "live vestido",
+  "live shorts", "live blusa", "live calça", "live jaqueta",
+  "live conjunto moda", "live plus size", "live moda praia",
+  // Shop + ofertas
+  "live shop achados", "live shop promoção", "live shop vendendo",
+  "oferta do dia live", "só hoje live", "live liquidação", "live queima estoque",
+  "live frete grátis", "live cupom desconto", "live imperdível",
+  "live último dia", "live final de estoque", "live atacado",
+  "live outlet", "live limpa estoque",
+  // Hashtags
+  "#tiktokshopbrasil", "#tiktokshop", "#liveshop", "#liveshopping",
+  "#achadinhos", "#achadostiktokshop", "#promocaolive", "#liveaovivo",
+  "#ofertarelampago", "#tiktokmademebuyit", "#liveshopbrasil",
+  "#aovivo", "#aovivoagora", "#estouaovivo", "#liveagora",
+  "#vempralive", "#entranalive", "#brechó", "#bazar",
+  "#maquiagemtiktokshop", "#skincaretiktokshop", "#modatiktokshop",
+  "#casaetiktokshop", "#cozinhatiktokshop", "#perfumetiktokshop",
+  "#cabelotiktokshop", "#achadotiktokshop", "#compreitiktokshop",
+  "#gasteinotiktokshop", "#shoptiktokbrasil", "#lojatiktokshop",
+  "#pettiktokshop", "#fitnesstiktokshop", "#eletronicostiktokshop",
+  "#celulartiktokshop", "#joiastiktokshop", "#relogiostiktokshop",
+  "#calcadostiktokshop", "#lingerietiktokshop",
+  // Creator / loja terms
+  "live influencer brasil", "creator shop brasil", "loja tiktok brasil",
+  "vendedora tiktok", "vendedor tiktok", "empreendedora tiktok",
+  "dropshipping brasil", "revenda brasil", "atacado tiktok",
+  "showroom online", "desapego", "brechó online", "sebo online",
+  "loja virtual brasil", "e-commerce brasil live", "seller tiktok shop",
+  "afiliado tiktok shop", "comissão tiktok shop", "top seller brasil",
+  "melhor vendedora tiktok", "top creator tiktok shop",
+  // Regional / gírias
+  "comprei e amei tiktok", "tô vendendo live", "vem comprar live",
+  "acabou de chegar live", "coleção nova live", "lançamento live",
+  "novidade live", "estreia coleção live", "live chegou novidade",
+  "loja ao vivo agora", "vendedora ao vivo", "mostrando produto live",
+  "prova social live", "depoimento live compra",
+];
+
+interface Candidate {
+  handle: string;
+  nickname: string;
+  avatarUrl: string;
+  postTitle: string;
+}
+
+// Keywords que indicam "live acontecendo agora" no título do post
+const LIVE_HINT_RE =
+  /ao\s*vivo|aovivo|live\s*agora|estou\s*(em\s*)?live|tô\s*(ao\s*vivo|em\s*live|na\s*live)|entra\s*na\s*live|vem\s*(pra|na)\s*live|live\s*acontecendo|live\s*shop|liveshop|live\s*promoção|live\s*oferta|#aovivo|#liveagora/i;
+
+async function fetchTikwmFeedPage(
+  keyword: string,
+  cursor: number,
+  sortType = 0,
+): Promise<Candidate[]> {
+  // publish_time=0 = all time. Antes estava 1 (today) que restringia demais.
+  const url = `https://www.tikwm.com/api/feed/search?keywords=${encodeURIComponent(
+    keyword,
+  )}&count=30&cursor=${cursor}&region=br&publish_time=0&sort_type=${sortType}`;
+  try {
+    const res = await fetch(url, {
+      headers: { "User-Agent": randomUA() },
+      signal: AbortSignal.timeout(12_000),
+    });
+    if (!res.ok) return [];
+    const data = (await res.json()) as {
+      code?: number;
+      data?: {
+        videos?: Array<{
+          title?: string;
+          region?: string;
+          author?: { unique_id?: string; nickname?: string; avatar?: string };
+        }>;
+      };
+    };
+    if (data.code !== 0) return [];
+    return (data.data?.videos ?? [])
+      .filter((v) => v.author?.unique_id && (v.region === "BR" || !v.region))
+      .map((v) => ({
+        handle: v.author!.unique_id!,
+        nickname: v.author?.nickname ?? v.author!.unique_id!,
+        avatarUrl: v.author?.avatar ?? "",
+        postTitle: v.title ?? "",
+      }));
+  } catch {
+    return [];
+  }
+}
+
+async function fetchTikwmFeedAll(): Promise<{
+  all: Candidate[];
+  hot: Candidate[];
+  stats: { ok: number; empty: number };
+}> {
+  // Tikwm free tier rate-limita quando >3 req/s.
+  // Embaralha queries p/ variar entre runs.
+  const shuffled = [...FEED_SEARCH_QUERIES];
+  for (let i = shuffled.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
+  }
+  // Para variar o que volta entre runs: cursor aleatório (0, 30, 60, 90, 120)
+  // e sort_type aleatório (0=time, 1=hot). Hot cacheia forte, time rotaciona
+  // muito mais. Cada run pega uma "fatia" diferente do feed.
+  //   150 keywords × 1 call @ ~4 req/s ≈ 38s. Fits in 300s.
+  const cursorOptions = [0, 30, 60, 90, 120];
+  const tasks: Array<{ keyword: string; cursor: number; sort: number }> = [];
+  for (const k of shuffled) {
+    const cursor = cursorOptions[Math.floor(Math.random() * cursorOptions.length)];
+    const sort = Math.random() < 0.5 ? 0 : 1;
+    tasks.push({ keyword: k, cursor, sort });
+  }
+  let ok = 0;
+  let empty = 0;
+  const pages = await mapConcurrent(
+    tasks,
+    3,
+    async (t) => {
+      const page = await fetchTikwmFeedPage(t.keyword, t.cursor, t.sort);
+      if (page.length > 0) ok++;
+      else empty++;
+      return page;
+    },
+    300,
+  );
+  const flat = pages.flat();
+  console.log(`[live-scraper] tikwm feed: ok=${ok} empty=${empty} videos=${flat.length}`);
+
+  // Dedup por handle, mas marca "hot" quem tem LIVE_HINT_RE no título
+  const byHandle = new Map<string, Candidate>();
+  const hotSet = new Set<string>();
+  for (const c of flat) {
+    if (!byHandle.has(c.handle)) byHandle.set(c.handle, c);
+    if (LIVE_HINT_RE.test(c.postTitle)) hotSet.add(c.handle);
+  }
+  const all = [...byHandle.values()];
+  const hot = all.filter((c) => hotSet.has(c.handle));
+  return { all, hot, stats: { ok, empty } };
+}
+
+// ── Tikwm graph expansion ────────────────────────────────────────────────────
+// Cresce o pool via followings dos seed creators. Creators que seed_creators
+// seguem tendem a ser peer streamers do mesmo nicho (BR shop live).
+
+interface TikwmUser {
+  unique_id?: string;
+  nickname?: string;
+  avatar?: string;
+}
+
+async function fetchTikwmFollowing(handle: string, cursor = 0): Promise<TikwmUser[]> {
+  const url = `https://www.tikwm.com/api/user/following?unique_id=${encodeURIComponent(handle)}&count=30&cursor=${cursor}`;
+  try {
+    const res = await fetch(url, {
+      headers: { "User-Agent": randomUA() },
+      signal: AbortSignal.timeout(12_000),
+    });
+    if (!res.ok) return [];
+    const data = (await res.json()) as {
+      code?: number;
+      data?: { followings?: TikwmUser[]; users?: TikwmUser[] };
+    };
+    if (data.code !== 0) return [];
+    return data.data?.followings ?? data.data?.users ?? [];
+  } catch {
+    return [];
+  }
+}
+
+async function fetchTikwmFollowers(handle: string, cursor = 0): Promise<TikwmUser[]> {
+  const url = `https://www.tikwm.com/api/user/followers?unique_id=${encodeURIComponent(handle)}&count=30&cursor=${cursor}`;
+  try {
+    const res = await fetch(url, {
+      headers: { "User-Agent": randomUA() },
+      signal: AbortSignal.timeout(12_000),
+    });
+    if (!res.ok) return [];
+    const data = (await res.json()) as {
+      code?: number;
+      data?: { followers?: TikwmUser[]; users?: TikwmUser[] };
+    };
+    if (data.code !== 0) return [];
+    return data.data?.followers ?? data.data?.users ?? [];
+  } catch {
+    return [];
+  }
+}
+
+// ── Webcast feed endpoints (mobile app discovery) ────────────────────────────
+// Tenta endpoints webcast.tiktok.com que NÃO são WAF-bloqueados como
+// tiktok.com/live. Mobile app do TikTok usa estes pra descobrir lives.
+
+interface WebcastFeedRoom {
+  handle: string;
+  roomId: string;
+  nickname: string;
+  avatarUrl: string;
+  hasCommerce?: boolean;
+  userCount?: number;
+  title?: string;
+  coverUrl?: string;
+}
+
+async function fetchWebcastFeed(cursor = 0): Promise<WebcastFeedRoom[]> {
+  const endpoints = [
+    `https://webcast.tiktok.com/webcast/feed/?aid=1988&count=30&region=BR&language=pt&cursor=${cursor}`,
+    `https://webcast.tiktok.com/webcast/feed/?aid=1988&count=30&cursor=${cursor}&device_platform=web`,
+    `https://webcast.tiktok.com/webcast/region/live_room/?aid=1988&region=BR&count=30`,
+    `https://webcast.tiktok.com/webcast/ranklist/room_rank/?aid=1988&region=BR`,
+  ];
+  const rooms: WebcastFeedRoom[] = [];
+  for (const url of endpoints) {
+    try {
+      const res = await fetch(url, {
+        headers: {
+          "User-Agent": randomUA(),
+          "Accept": "application/json",
+          "Accept-Language": "pt-BR,pt;q=0.9",
+        },
+        signal: AbortSignal.timeout(12_000),
+      });
+      if (!res.ok) continue;
+      const text = await res.text();
+      if (!text || text.length < 50) continue;
+      let data: unknown;
+      try {
+        data = JSON.parse(text);
+      } catch {
+        continue;
+      }
+      // Walk recursive — encontra objetos room-like no JSON
+      const seen = new Set<string>();
+      const walk = (obj: unknown): void => {
+        if (!obj || typeof obj !== "object") return;
+        if (Array.isArray(obj)) {
+          for (const it of obj) walk(it);
+          return;
+        }
+        const o = obj as Record<string, unknown>;
+        const rid = (o.room_id ?? o.roomId ?? o.id_str ?? o.id) as string | number | undefined;
+        const owner = (o.owner ?? o.ownerUser ?? o.user ?? o.author) as
+          | Record<string, unknown>
+          | undefined;
+        const uniqueId = (owner?.unique_id ?? owner?.uniqueId ?? o.unique_id ?? o.uniqueId) as
+          | string
+          | undefined;
+        const ridStr = typeof rid === "number" ? String(rid) : rid;
+        if (
+          typeof ridStr === "string" &&
+          ridStr.length >= 12 &&
+          /^\d+$/.test(ridStr) &&
+          typeof uniqueId === "string" &&
+          !seen.has(ridStr)
+        ) {
+          seen.add(ridStr);
+          const blob = JSON.stringify(o);
+          const hasCommerce =
+            /has_commerce_goods"?\s*:\s*true|goods_num"?\s*:\s*[1-9]|hasCommerce"?\s*:\s*true/.test(
+              blob,
+            );
+          rooms.push({
+            handle: uniqueId,
+            roomId: ridStr,
+            nickname: (owner?.nickname as string) ?? uniqueId,
+            avatarUrl:
+              ((owner?.avatar_thumb as Record<string, unknown>)?.url_list as string[])?.[0] ??
+              (owner?.avatarThumb as string) ??
+              "",
+            hasCommerce,
+            userCount: (o.user_count ?? o.total_user) as number | undefined,
+            title: o.title as string | undefined,
+            coverUrl: ((o.cover as Record<string, unknown>)?.url_list as string[])?.[0],
+          });
+        }
+        for (const k in o) walk(o[k]);
+      };
+      walk(data);
+    } catch {
+      // silent
+    }
+  }
+  return rooms;
+}
+
+// ── Lobby discovery (bulk) ───────────────────────────────────────────────────
+
+interface DiscoveredRoom {
+  handle: string;
+  nickname: string;
+  avatarUrl: string;
+  roomId?: string;
+  hasCommerce?: boolean;
+  status?: number;
+  userCount?: number;
+  title?: string;
+  coverUrl?: string;
+}
+
+// Extrai rooms do __UNIVERSAL_DATA_FOR_REHYDRATION__ do /live lobby.
+// Walk recursivo procurando objetos que parecem "room": têm um id +
+// owner.uniqueId. Coleta commerce flag do subtree.
+function extractRoomsFromUniversalData(data: unknown): DiscoveredRoom[] {
+  const rooms: DiscoveredRoom[] = [];
+  const seen = new Set<string>();
+  const COMMERCE_RE = /"hasCommerce"\s*:\s*true|"has_commerce_goods"\s*:\s*true|"is_commerce_live"\s*:\s*true|"commerceConfig"|"goods_num"\s*:\s*[1-9]|"shopInfo"|"commerce_live"\s*:\s*true/;
+
+  const walk = (obj: unknown): void => {
+    if (!obj || typeof obj !== "object") return;
+    if (Array.isArray(obj)) {
+      for (const it of obj) walk(it);
+      return;
+    }
+    const o = obj as Record<string, unknown>;
+
+    const rid = (o.roomId ?? o.room_id ?? o.id_str ?? o.id) as string | number | undefined;
+    const owner = (o.owner ?? o.ownerUser ?? o.user ?? o.author ?? o.ownerInfo) as
+      | Record<string, unknown>
+      | undefined;
+    const uniqueId = (owner?.uniqueId ?? owner?.unique_id ?? o.uniqueId ?? o.unique_id) as string | undefined;
+
+    const ridStr = typeof rid === "number" ? String(rid) : rid;
+    if (typeof ridStr === "string" && ridStr.length >= 12 && /^\d+$/.test(ridStr) && typeof uniqueId === "string") {
+      if (!seen.has(ridStr)) {
+        seen.add(ridStr);
+        const blob = JSON.stringify(o);
+        const hasCommerce = COMMERCE_RE.test(blob);
+        const status = (o.status as number | undefined) ?? (o.liveStatus as number | undefined);
+        rooms.push({
+          handle: uniqueId,
+          nickname:
+            (owner?.nickname as string | undefined) ??
+            (owner?.nickName as string | undefined) ??
+            uniqueId,
+          avatarUrl:
+            (owner?.avatarThumb as string | undefined) ??
+            (owner?.avatar_thumb as string | undefined) ??
+            (owner?.avatarMedium as string | undefined) ??
+            "",
+          roomId: ridStr,
+          hasCommerce,
+          status,
+          userCount: (o.userCount ?? o.user_count ?? o.total_user) as number | undefined,
+          title: o.title as string | undefined,
+          coverUrl: (o.coverUrl ?? o.cover_url) as string | undefined,
+        });
+      }
+    }
+
+    // Também coleta uniqueIds soltos (creators sem room wrapper) — entram no pool
+    if (typeof uniqueId === "string" && !seen.has("u:" + uniqueId)) {
+      seen.add("u:" + uniqueId);
+      rooms.push({
+        handle: uniqueId,
+        nickname:
+          (owner?.nickname as string | undefined) ??
+          (owner?.nickName as string | undefined) ??
+          uniqueId,
+        avatarUrl:
+          (owner?.avatarThumb as string | undefined) ??
+          (owner?.avatar_thumb as string | undefined) ??
+          "",
+      });
+    }
+
+    for (const k in o) walk(o[k]);
+  };
+  walk(data);
+  return rooms;
+}
+
+async function fetchLobbyOnce(url: string): Promise<DiscoveredRoom[]> {
+  const deviceId = randomDeviceId();
+  try {
+    const res = await fetch(url, {
+      headers: {
+        "User-Agent": randomUA(),
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        "Accept-Language": "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7",
+        "Cache-Control": "no-cache",
+        "Pragma": "no-cache",
+        "Cookie": `tt_webid=${deviceId}; tt_webid_v2=${deviceId}; tt-target-idc=useast2a; passport_csrf_token=${deviceId.slice(-16)}`,
+      },
+      signal: AbortSignal.timeout(15_000),
+    });
+    if (!res.ok) return [];
+    const html = await res.text();
+    const m = html.match(
+      /<script id="__UNIVERSAL_DATA_FOR_REHYDRATION__"[^>]*>([\s\S]*?)<\/script>/,
+    );
+    if (!m) return [];
+    try {
+      return extractRoomsFromUniversalData(JSON.parse(m[1]));
+    } catch {
+      return [];
+    }
+  } catch {
+    return [];
+  }
+}
+
+// 30 rotations × 4 URLs × device_id fresh = ~120 calls, cada uma traz
+// ~5-15 rooms personalizados diferentes. Pool esperado: 300-800 handles.
+async function fetchLobbyRotated(): Promise<DiscoveredRoom[]> {
+  const LOBBY_URLS = [
+    "https://www.tiktok.com/live",
+    "https://www.tiktok.com/live?lang=pt-BR",
+    "https://www.tiktok.com/live?lang=pt-BR&region=BR",
+    "https://www.tiktok.com/discover/live",
+  ];
+  const rounds = 30;
+  const tasks: string[] = [];
+  for (let r = 0; r < rounds; r++) {
+    for (const u of LOBBY_URLS) tasks.push(u);
+  }
+
+  const results = await mapConcurrent(tasks, 10, fetchLobbyOnce, 80);
+
+  // Dedupe por handle — prefere entrada com roomId
+  const byHandle = new Map<string, DiscoveredRoom>();
+  for (const arr of results) {
+    for (const r of arr) {
+      const existing = byHandle.get(r.handle);
+      if (!existing) {
+        byHandle.set(r.handle, r);
+      } else if (!existing.roomId && r.roomId) {
+        byHandle.set(r.handle, r);
+      } else if (existing.roomId && r.roomId && r.hasCommerce && !existing.hasCommerce) {
+        byHandle.set(r.handle, r);
+      }
+    }
+  }
+  return [...byHandle.values()];
+}
+
+// ── Webcast room info (status + commerce + HLS em uma call) ──────────────────
+
+interface FullRoomInfo {
+  status: number;
+  title?: string;
+  coverUrl?: string;
+  userCount?: number;
+  hasCommerce: boolean;
+  hlsUrl?: string;
+  flvUrl?: string;
+  startedAt?: number;
+  likeCount?: number;
+}
+
+const pickUrl = (v: unknown): string | undefined => {
+  if (!v) return undefined;
+  if (typeof v === "string") return v;
+  if (typeof v === "object") {
+    const r = v as Record<string, string>;
+    return r.FULL_HD1 || r.HD1 || r.SD1 || r.SD2 || Object.values(r)[0];
+  }
+  return undefined;
+};
+
+export async function fetchFullRoomInfo(roomId: string): Promise<FullRoomInfo | null> {
+  const url = `https://webcast.tiktok.com/webcast/room/info/?aid=1988&room_id=${roomId}`;
+  try {
+    const res = await fetch(url, {
+      headers: {
+        "User-Agent": randomUA(),
+        "Accept": "application/json",
+        "Accept-Language": "pt-BR,pt;q=0.9",
+      },
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (!res.ok) return null;
+    const data = (await res.json()) as {
+      data?: {
+        status?: number;
+        title?: string;
+        cover?: { url_list?: string[] };
+        user_count?: number;
+        total_user?: number;
+        like_count?: number;
+        goods_num?: number;
+        has_commerce_goods?: boolean;
+        create_time?: number;
+        start_time?: number;
+        stream_url?: {
+          hls_pull_url?: string | Record<string, string>;
+          rtmp_pull_url?: string | Record<string, string>;
+          flv_pull_url?: string | Record<string, string>;
+        };
+      };
+    };
+    const d = data.data;
+    if (!d) return null;
+    const s = d.stream_url;
+    const hasCommerce =
+      d.has_commerce_goods === true || (typeof d.goods_num === "number" && d.goods_num > 0);
+    return {
+      status: d.status ?? 0,
+      title: d.title,
+      coverUrl: d.cover?.url_list?.[0],
+      userCount: d.user_count ?? d.total_user,
+      likeCount: d.like_count,
+      hasCommerce,
+      hlsUrl: pickUrl(s?.hls_pull_url),
+      flvUrl: pickUrl(s?.flv_pull_url) ?? pickUrl(s?.rtmp_pull_url),
+      startedAt: d.start_time ? d.start_time * 1000 : d.create_time ? d.create_time * 1000 : undefined,
+    };
+  } catch {
+    return null;
+  }
+}
+
+// Checa se o room ainda está ao vivo (status=2). Usado pelo loop de gravação.
+export async function isLiveActive(roomId: string): Promise<boolean> {
+  const info = await fetchFullRoomInfo(roomId);
+  return info?.status === 2;
+}
+
+// Exported for recording pipeline / refresh
+export async function fetchHlsUrl(
+  roomId: string,
+): Promise<{ hlsUrl?: string; flvUrl?: string; hasCommerce?: boolean }> {
+  const info = await fetchFullRoomInfo(roomId);
+  if (!info) return {};
+  return { hlsUrl: info.hlsUrl, flvUrl: info.flvUrl, hasCommerce: info.hasCommerce };
+}
+
+// ── Fallback: api-live check para seed/manual ────────────────────────────────
+
+interface LiveCheck {
+  isLive: boolean;
+  error?: boolean;
+  roomId?: string;
+  title?: string;
+  coverUrl?: string;
+  userCount?: number;
+  enterCount?: number;
+  startedAt?: number;
+  hasCommerce?: boolean;
+}
+
+let _webClient: TikTokWebClient | null = null;
+function getWebClient(): TikTokWebClient {
+  if (!_webClient) _webClient = new TikTokWebClient();
+  return _webClient;
+}
+
+const COMMERCE_REGEX =
+  /"hasCommerce":true|"is_commerce_live":true|"commerceLive":true|"has_commerce_goods":true|"commerce_live":true|"with_commerce_entry":true|"goods_num":[1-9]|"commerceConfig"|"shopInfo"|"ecpLiveInfo"/i;
+
+interface LiveRoomShape {
+  status?: number;
+  title?: string;
+  coverUrl?: string;
+  startTime?: number;
+  liveRoomStats?: { userCount?: number; enterCount?: number };
+  roomId?: string;
+}
+
+async function checkLiveStatus(handle: string): Promise<LiveCheck> {
+  const client = getWebClient();
+  // Timeout hard em 5s: request pendurado pelo WAF não pode travar o worker
+  const withTimeout = <T>(p: Promise<T>, ms: number): Promise<T> =>
+    Promise.race([
+      p,
+      new Promise<T>((_, reject) =>
+        setTimeout(() => reject(new Error("timeout")), ms),
+      ),
+    ]);
+  try {
+    const r = await withTimeout(
+      client.fetchRoomInfoFromApiLive.call({ uniqueId: handle }),
+      5_000,
+    );
+    const rr = r as { data?: { liveRoom?: LiveRoomShape; user?: { roomId?: string } } };
+    const lr = rr?.data?.liveRoom;
+    if (!lr || lr.status !== 2) return { isLive: false };
+    const blob = JSON.stringify(rr.data ?? {});
+    return {
+      isLive: true,
+      roomId: rr.data?.user?.roomId ?? lr.roomId,
+      title: lr.title,
+      coverUrl: lr.coverUrl,
+      userCount: lr.liveRoomStats?.userCount,
+      enterCount: lr.liveRoomStats?.enterCount,
+      startedAt: lr.startTime ? lr.startTime * 1000 : undefined,
+      hasCommerce: COMMERCE_REGEX.test(blob),
+    };
+  } catch {
+    return { isLive: false, error: true };
+  }
+}
+
+// ── Concurrency helper ──────────────────────────────────────────────────────
+
+async function mapConcurrent<T, R>(
+  items: T[],
+  concurrency: number,
+  fn: (item: T) => Promise<R>,
+  delayMs = 0,
+): Promise<R[]> {
+  const results: R[] = new Array(items.length);
+  let i = 0;
+  async function worker() {
+    while (i < items.length) {
+      const idx = i++;
+      results[idx] = await fn(items[idx]);
+      if (delayMs > 0) await new Promise((r) => setTimeout(r, delayMs));
+    }
+  }
+  await Promise.all(Array.from({ length: concurrency }, worker));
+  return results;
+}
+
+// ── Main ─────────────────────────────────────────────────────────────────────
+
+export async function scrapeLiveSessions(
+  _keywords: string[],
+  _apiKey?: string,
+): Promise<LiveScrapeResult> {
+  const t0 = Date.now();
+
+  // 0. Seed pool (idempotente)
+  await prisma.ugcKnownCreator
+    .createMany({
+      data: SEED_SHOP_CREATORS.map((h) => ({ handle: h, region: "BR", source: "seed" })),
+      skipDuplicates: true,
+    })
+    .catch(() => null);
+
+  // 1a. BULK DISCOVERY — paralelo:
+  //     - webcast/feed endpoints (mobile app discovery, não WAF)
+  //     - lobby HTML rotado (pode estar bloqueado)
+  //     - graph expansion: followings dos seed + known-live (tikwm)
+  console.log("[live-scraper] discovery start...");
+
+  // Handles seed p/ graph expansion
+  const seedForGraph = await prisma.ugcKnownCreator.findMany({
+    where: {
+      region: "BR",
+      OR: [{ source: "seed" }, { source: "manual" }, { lastSeenLive: { not: null } }],
+    },
+    orderBy: [{ lastSeenLive: { sort: "desc", nulls: "last" } }],
+    take: 15,
+  });
+
+  // Pula webcast+lobby (WAF-bloqueados na Vercel IP, confirmado via debug).
+  // Só tikwm feed/search funciona como fonte de discovery.
+  const webcastRooms: WebcastFeedRoom[] = [];
+  const lobbyRooms: DiscoveredRoom[] = [];
+  const feedResult = await fetchTikwmFeedAll();
+  // Graph followings ficou desativado (API tikwm não suporta)
+  const graphCandidates: DiscoveredRoom[] = feedResult.all.map((c) => ({
+    handle: c.handle,
+    nickname: c.nickname,
+    avatarUrl: c.avatarUrl,
+  }));
+  const hotCandidates = feedResult.hot.map((c) => c.handle);
+  console.log(
+    `[live-scraper] feed: all=${feedResult.all.length} hot=${feedResult.hot.length}`,
+  );
+
+  // Merge webcast rooms into lobbyRooms shape
+  const webcastAsLobby: DiscoveredRoom[] = webcastRooms.map((w) => ({
+    handle: w.handle,
+    nickname: w.nickname,
+    avatarUrl: w.avatarUrl,
+    roomId: w.roomId,
+    hasCommerce: w.hasCommerce,
+    userCount: w.userCount,
+    title: w.title,
+    coverUrl: w.coverUrl,
+  }));
+
+  // Combina todas as fontes de discovery
+  const allDiscoveredMap = new Map<string, DiscoveredRoom>();
+  for (const r of webcastAsLobby) allDiscoveredMap.set(r.handle, r);
+  for (const r of lobbyRooms) {
+    const ex = allDiscoveredMap.get(r.handle);
+    if (!ex || (!ex.roomId && r.roomId)) allDiscoveredMap.set(r.handle, r);
+  }
+  for (const r of graphCandidates) {
+    if (!allDiscoveredMap.has(r.handle)) allDiscoveredMap.set(r.handle, r);
+  }
+  const allDiscovered = [...allDiscoveredMap.values()];
+  const lobbyWithRoomId = allDiscovered.filter((r) => r.roomId);
+  console.log(
+    `[live-scraper] discovery: webcast=${webcastRooms.length} lobby=${lobbyRooms.length} graph=${graphCandidates.length} total=${allDiscovered.length} withRoomId=${lobbyWithRoomId.length} (elapsed=${Date.now() - t0}ms)`,
+  );
+
+  // Alias para manter nome usado abaixo
+  const lobbyRoomsAll = allDiscovered;
+
+  // 2. Persiste todos os handles descobertos
+  if (lobbyRoomsAll.length > 0) {
+    await prisma.ugcKnownCreator
+      .createMany({
+        data: lobbyRoomsAll.map((r) => ({
+          handle: r.handle,
+          nickname: r.nickname,
+          avatarUrl: r.avatarUrl,
+          region: "BR",
+          source: r.roomId ? "lobby" : "feed_search",
+        })),
+        skipDuplicates: true,
+      })
+      .catch(() => null);
+  }
+
+  // 3. Para cada roomId do lobby → chama webcast/room/info (autoritativo)
+  const t1 = Date.now();
+  const roomInfos = await mapConcurrent(
+    lobbyWithRoomId,
+    10,
+    async (r) => {
+      const info = await fetchFullRoomInfo(r.roomId!);
+      return { room: r, info };
+    },
+    50,
+  );
+  console.log(
+    `[live-scraper] fetched ${roomInfos.length} room infos (elapsed=${Date.now() - t1}ms)`,
+  );
+
+  // 4. FALLBACK: seed + manual + visto-live recentemente que NÃO apareceram
+  //    no lobby — tenta via api-live com rate limit pesado.
+  // Fallback com ORDEM EMBARALHADA pra variar quem é checado entre runs:
+  //  1. HOT candidates (post title com "ao vivo agora" etc) — prioritário
+  //  2. Seed/manual/seenLive — sempre incluídos, embaralhados
+  //  3. Resto do feed search — embaralhado
+  //  Cap 150 handles. WAF deixa ~30% passar = ~45 checks = ~5-10 lives.
+  const foundWithRoomId = new Set(lobbyWithRoomId.map((r) => r.handle));
+  const shuffle = <T>(arr: T[]): T[] => {
+    const a = [...arr];
+    for (let i = a.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [a[i], a[j]] = [a[j], a[i]];
+    }
+    return a;
+  };
+
+  // Pool COMPLETO do DB: seed + manual + seen + feed_search + lobby accumulated
+  //  → cresce ao longo de runs, permite shuffling de um pool cada vez maior.
+  const highPriority = await prisma.ugcKnownCreator.findMany({
+    where: {
+      region: "BR",
+      OR: [
+        { source: "seed" },
+        { source: "manual" },
+        { lastSeenLive: { not: null } },
+      ],
+    },
+    take: 500,
+  });
+
+  const dbPool = await prisma.ugcKnownCreator.findMany({
+    where: { region: "BR" },
+    take: 2000,
+    orderBy: [{ lastChecked: "asc" }],
+  });
+
+  const hotShuffled = shuffle(hotCandidates.filter((h) => !foundWithRoomId.has(h)));
+  const seedShuffled = shuffle(
+    highPriority.map((h) => h.handle).filter((h) => !foundWithRoomId.has(h)),
+  );
+  const feedShuffled = shuffle(
+    graphCandidates
+      .map((g) => g.handle)
+      .filter((h) => !foundWithRoomId.has(h) && !hotCandidates.includes(h)),
+  );
+  const dbShuffled = shuffle(
+    dbPool.map((p) => p.handle).filter((h) => !foundWithRoomId.has(h)),
+  );
+
+  // Ordem: hot (mais prováveis de live) → DB pool (LRU, rotaciona entre runs)
+  //        → seed priority → resto do feed novo
+  //  DB pool vem antes do feed pois o feed tende a cachear mesmos handles.
+  // Cap 400: com WAF rejeitando ~97%, volume alto só consome budget.
+  //   400 / 6 × 1.7s ≈ 113s. Feed + fallback ≈ 180s total, fits em 300s.
+  const fallbackHandles = [
+    ...new Set([...hotShuffled, ...dbShuffled, ...seedShuffled, ...feedShuffled]),
+  ].slice(0, 400);
+  console.log(
+    `[live-scraper] fallback: hot=${hotShuffled.length} seed=${seedShuffled.length} feed=${feedShuffled.length} db=${dbShuffled.length} -> ${fallbackHandles.length}`,
+  );
+  console.log(`[live-scraper] fallback api-live checks: ${fallbackHandles.length}`);
+
+  // Concorrência 6 + gap 200ms é suave o suficiente pra WAF deixar mais passar.
+  const fallbackChecks = await mapConcurrent(
+    fallbackHandles,
+    6,
+    async (handle) => {
+      const check = await checkLiveStatus(handle);
+      let info: FullRoomInfo | null = null;
+      if (check.isLive && check.roomId) {
+        info = await fetchFullRoomInfo(check.roomId);
+      }
+      return { handle, check, info };
+    },
+    200,
+  );
+
+  // 5. Merge + filtro commerce estrito
+  const finals = new Map<string, ScrapedLive & { __hasCommerce: boolean }>();
+  let liveWithCommerce = 0;
+  let liveWithoutCommerce = 0;
+  let checkErrors = 0;
+
+  for (const { room, info } of roomInfos) {
+    if (!info) continue;
+    if (info.status !== 2) continue;
+    if (info.hasCommerce) {
+      liveWithCommerce++;
+    } else {
+      liveWithoutCommerce++;
+      continue;
+    }
+    const viewerCount = info.userCount ?? room.userCount ?? 0;
+    const likeCount = info.likeCount ?? 0;
+    finals.set(room.handle, {
+      roomId: room.roomId!,
+      title: info.title ?? room.title ?? "",
+      hostHandle: room.handle,
+      hostNickname: room.nickname,
+      hostAvatarUrl: room.avatarUrl,
+      viewerCount,
+      totalViewers: viewerCount,
+      likeCount,
+      estimatedOrders: 0,
+      productCount: 1,
+      products: [],
+      isLive: true,
+      startedAt: info.startedAt ? new Date(info.startedAt).toISOString() : undefined,
+      hlsUrl: info.hlsUrl,
+      flvUrl: info.flvUrl,
+      liveUrl: `https://www.tiktok.com/@${room.handle}/live`,
+      thumbnailUrl: info.coverUrl ?? room.coverUrl ?? room.avatarUrl,
+      salesScore: calcSalesScore({ viewerCount, likeCount, isLive: true }),
+      __hasCommerce: true,
+    });
+  }
+
+  for (const { handle, check, info } of fallbackChecks) {
+    if (check.error) checkErrors++;
+    if (!check.isLive) continue;
+    const hasCommerce = info?.hasCommerce ?? check.hasCommerce ?? false;
+    if (!hasCommerce) {
+      liveWithoutCommerce++;
+      continue;
+    }
+    if (finals.has(handle)) continue;
+    liveWithCommerce++;
+    const viewerCount = info?.userCount ?? check.userCount ?? 0;
+    const likeCount = info?.likeCount ?? check.enterCount ?? 0;
+    finals.set(handle, {
+      roomId: check.roomId ?? `live_${handle}_${Date.now()}`,
+      title: check.title ?? info?.title ?? "",
+      hostHandle: handle,
+      hostNickname: handle,
+      hostAvatarUrl: "",
+      viewerCount,
+      totalViewers: viewerCount,
+      likeCount,
+      estimatedOrders: 0,
+      productCount: 1,
+      products: [],
+      isLive: true,
+      startedAt: check.startedAt ? new Date(check.startedAt).toISOString() : undefined,
+      hlsUrl: info?.hlsUrl,
+      flvUrl: info?.flvUrl,
+      liveUrl: `https://www.tiktok.com/@${handle}/live`,
+      thumbnailUrl: info?.coverUrl ?? check.coverUrl ?? "",
+      salesScore: calcSalesScore({ viewerCount, likeCount, isLive: true }),
+      __hasCommerce: true,
+    });
+  }
+
+  const finalLives = [...finals.values()]
+    .map(({ __hasCommerce: _, ...rest }) => rest)
+    .sort((a, b) => b.viewerCount - a.viewerCount);
+
+  // 6. Update pool: lastChecked para tudo, lastSeenLive para os live
+  const now = new Date();
+  const allChecked = [
+    ...lobbyWithRoomId.map((r) => r.handle),
+    ...fallbackHandles,
+  ];
+  if (allChecked.length > 0) {
+    await prisma.ugcKnownCreator
+      .updateMany({
+        where: { handle: { in: allChecked } },
+        data: { lastChecked: now },
+      })
+      .catch(() => null);
+  }
+  // Atualiza o histórico do creator (peak, último início, título, etc).
+  // updateMany não faz per-row, então fazemos um por live (N pequeno).
+  for (const l of finalLives) {
+    await prisma.ugcKnownCreator
+      .update({
+        where: { handle: l.hostHandle },
+        data: {
+          lastSeenLive: now,
+          liveCount: { increment: 1 },
+          lastLiveStartedAt: l.startedAt ? new Date(l.startedAt) : now,
+          lastLiveTitle: l.title?.slice(0, 200) ?? null,
+          hasCommerce: true,
+        },
+      })
+      .catch(() => null);
+    // peak: set apenas se maior
+    await prisma.$executeRaw`
+      UPDATE ugc_known_creators
+      SET "peakViewers" = GREATEST("peakViewers", ${l.viewerCount})
+      WHERE handle = ${l.hostHandle}
+    `.catch(() => null);
+  }
+
+  console.log(
+    `[live-scraper] DONE in ${Date.now() - t0}ms: total=${lobbyRoomsAll.length}, withId=${lobbyWithRoomId.length}, withCommerce=${liveWithCommerce}, final=${finalLives.length}`,
+  );
+
+  return {
+    lives: finalLives,
+    totalFound: finalLives.length,
+    scrapedAt: new Date().toISOString(),
+    debug: {
+      keywordsSearched: [
+        `webcast=${webcastRooms.length}`,
+        `lobby=${lobbyRooms.length}`,
+        `feed=${feedResult.all.length}`,
+        `hot=${feedResult.hot.length}`,
+      ],
+      candidatesFound: lobbyRoomsAll.length,
+      verifiedLive: finalLives.length + liveWithoutCommerce,
+      checkErrors,
+      liveWithCommerce,
+      liveWithoutCommerce,
+      usedMock: false,
+      lobbyRoomsFound: lobbyRoomsAll.length,
+      lobbyRoomsWithId: lobbyWithRoomId.length,
+      fallbackChecked: fallbackHandles.length,
+    },
+  };
+}

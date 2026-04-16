@@ -1,0 +1,345 @@
+"use client";
+import { useEffect, useState, useCallback } from "react";
+import { useSearchParams } from "next/navigation";
+import Link from "next/link";
+import {
+  TrendingUp, ThumbsUp, ThumbsDown, Bookmark, Eye, Loader2,
+  RefreshCw, Users, Video, ArrowUpRight, ChevronLeft, ChevronRight, Filter
+} from "lucide-react";
+import { Button } from "@/components/ui/button";
+import { Card } from "@/components/ui/card";
+import { Badge } from "@/components/ui/badge";
+import { toast } from "sonner";
+
+type ProductStatus = "DETECTED" | "UNDER_REVIEW" | "APPROVED" | "REJECTED" | "SAVED_FOR_LATER" | "USED_FOR_GENERATION";
+
+interface Product {
+  id: string;
+  name: string;
+  category: string | null;
+  thumbnailUrl: string | null;
+  score: number;
+  status: ProductStatus;
+  detectedVideoCount: number;
+  totalViews: number;
+  creatorCount: number;
+  viewGrowthRate: number;
+  engagementRate: number;
+  firstDetectedAt: string;
+  trendSummary: string | null;
+  detectedVideos: Array<{ thumbnailUrl: string | null; creatorHandle: string | null; views: number }>;
+  _count: { detectedVideos: number; generatedVideos: number };
+  totalLikes: number;
+}
+
+const STATUS_LABELS: Record<ProductStatus, string> = {
+  DETECTED: "Detectado",
+  UNDER_REVIEW: "Em Revisão",
+  APPROVED: "Aprovado",
+  REJECTED: "Rejeitado",
+  SAVED_FOR_LATER: "Salvo",
+  USED_FOR_GENERATION: "Em Uso",
+};
+
+const STATUS_COLORS: Record<ProductStatus, string> = {
+  DETECTED: "bg-blue-500/10 text-blue-300 border-blue-500/20",
+  UNDER_REVIEW: "bg-yellow-500/10 text-yellow-300 border-yellow-500/20",
+  APPROVED: "bg-emerald-500/10 text-emerald-300 border-emerald-500/20",
+  REJECTED: "bg-red-500/10 text-red-300 border-red-500/20",
+  SAVED_FOR_LATER: "bg-slate-500/10 text-slate-300 border-slate-500/20",
+  USED_FOR_GENERATION: "bg-violet-500/10 text-violet-300 border-violet-500/20",
+};
+
+function formatViews(n: number): string {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+  if (n >= 1_000) return `${(n / 1_000).toFixed(0)}K`;
+  return String(n);
+}
+
+function ScoreBadge({ score }: { score: number }) {
+  const color = score >= 70 ? "text-emerald-400" : score >= 40 ? "text-yellow-400" : "text-white/40";
+  return <span className={`text-lg font-bold ${color}`}>{score}</span>;
+}
+
+export default function ProductsPage() {
+  const searchParams = useSearchParams();
+  const [products, setProducts] = useState<Product[]>([]);
+  const [total, setTotal] = useState(0);
+  const [page, setPage] = useState(1);
+  const [loading, setLoading] = useState(true);
+  const [scraping, setScraping] = useState(false);
+  const [actionLoading, setActionLoading] = useState<string | null>(null);
+  const [statusFilter, setStatusFilter] = useState<string>(searchParams.get("status") ?? "");
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      const params = new URLSearchParams({ page: String(page), limit: "12" });
+      if (statusFilter) params.set("status", statusFilter);
+      const res = await fetch(`/api/ugc/products?${params}`);
+      if (res.ok) {
+        const data = await res.json();
+        setProducts(data.products);
+        setTotal(data.total);
+      }
+    } finally {
+      setLoading(false);
+    }
+  }, [page, statusFilter]);
+
+  useEffect(() => { load(); }, [load]);
+
+  const updateStatus = async (id: string, status: ProductStatus) => {
+    setActionLoading(id);
+    try {
+      const res = await fetch(`/api/ugc/products/${id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ status }),
+      });
+      if (!res.ok) {
+        toast.error("Erro ao atualizar status");
+        return;
+      }
+
+      // Ao aprovar, dispara geração de vídeo imediatamente. O pipeline roda
+      // em background (Veo3 + TTS + assembly) e deposita o resultado na
+      // aba Review quando pronto.
+      if (status === "APPROVED") {
+        toast.success("Produto aprovado! Iniciando geração do vídeo…");
+        const genRes = await fetch("/api/ugc/generate", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ productIds: [id], count: 1 }),
+        });
+        const genJson = (await genRes.json().catch(() => ({}))) as {
+          videosCreated?: number;
+          error?: string;
+        };
+        if (genRes.ok && (genJson.videosCreated ?? 0) > 0) {
+          toast.success("Vídeo em geração — aparecerá em Review quando pronto", {
+            duration: 6000,
+          });
+        } else {
+          toast.error(genJson.error ?? "Falha ao disparar geração");
+        }
+      } else {
+        toast.success(status === "REJECTED" ? "Produto rejeitado" : "Status atualizado");
+      }
+      load();
+    } finally {
+      setActionLoading(null);
+    }
+  };
+
+  const handleScrape = async () => {
+    setScraping(true);
+    try {
+      const res = await fetch("/api/ugc/scrape", { method: "POST" });
+      const json = await res.json();
+      if (res.ok) {
+        toast.success(`${json.newProducts} novos produtos detectados`);
+        load();
+      } else {
+        toast.error(json.error ?? "Erro");
+      }
+    } finally {
+      setScraping(false);
+    }
+  };
+
+  const filters = [
+    { label: "Todos", value: "" },
+    { label: "Detectados", value: "DETECTED" },
+    { label: "Aprovados", value: "APPROVED" },
+    { label: "Salvos", value: "SAVED_FOR_LATER" },
+    { label: "Rejeitados", value: "REJECTED" },
+  ];
+
+  return (
+    <div className="space-y-6">
+      <div className="flex items-center justify-between">
+        <div>
+          <h1 className="text-xl font-bold text-white flex items-center gap-2">
+            <TrendingUp className="w-5 h-5 text-violet-400" />
+            Produtos em Alta
+          </h1>
+          <p className="text-sm text-white/40 mt-1">
+            {total} produto{total !== 1 ? "s" : ""} detectado{total !== 1 ? "s" : ""}
+          </p>
+        </div>
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={handleScrape}
+          disabled={scraping}
+          className="border-white/10 text-white/70 hover:text-white"
+        >
+          {scraping ? <Loader2 className="w-4 h-4 animate-spin mr-2" /> : <RefreshCw className="w-4 h-4 mr-2" />}
+          Atualizar Tendências
+        </Button>
+      </div>
+
+      {/* Filters */}
+      <div className="flex gap-2 flex-wrap">
+        {filters.map((f) => (
+          <button
+            key={f.value}
+            onClick={() => { setStatusFilter(f.value); setPage(1); }}
+            className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-colors ${
+              statusFilter === f.value
+                ? "bg-violet-500/20 text-violet-300 border border-violet-500/30"
+                : "text-white/40 hover:text-white hover:bg-white/[0.05] border border-transparent"
+            }`}
+          >
+            {f.label}
+          </button>
+        ))}
+      </div>
+
+      {loading ? (
+        <div className="flex justify-center py-16">
+          <Loader2 className="w-6 h-6 text-violet-400 animate-spin" />
+        </div>
+      ) : products.length === 0 ? (
+        <Card className="bg-white/[0.02] border-white/[0.06] p-12 text-center">
+          <TrendingUp className="w-10 h-10 text-white/20 mx-auto mb-3" />
+          <p className="text-white/40 text-sm">Nenhum produto encontrado</p>
+          <p className="text-white/20 text-xs mt-1">Clique em "Atualizar Tendências" para detectar novos produtos</p>
+        </Card>
+      ) : (
+        <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
+          {products.map((product) => (
+            <Card key={product.id} className="bg-white/[0.03] border-white/[0.06] p-4 flex flex-col gap-3 hover:bg-white/[0.05] transition-colors">
+              {/* Header — clicking navigates to detail */}
+              <Link href={`/ugc/products/${product.id}`} className="block">
+              <div className="flex items-start justify-between gap-2">
+                <div className="flex gap-3">
+                  {product.thumbnailUrl ? (
+                    <img src={product.thumbnailUrl} alt={product.name} className="w-12 h-12 rounded-lg object-cover shrink-0" />
+                  ) : (
+                    <div className="w-12 h-12 rounded-lg bg-violet-500/10 flex items-center justify-center shrink-0">
+                      <TrendingUp className="w-5 h-5 text-violet-400" />
+                    </div>
+                  )}
+                  <div className="min-w-0">
+                    <p className="text-sm font-semibold text-white leading-tight line-clamp-2">{product.name}</p>
+                    {product.category && (
+                      <p className="text-xs text-white/40 mt-0.5">{product.category}</p>
+                    )}
+                  </div>
+                </div>
+                <div className="text-right shrink-0">
+                  <ScoreBadge score={product.score} />
+                  <p className="text-xs text-white/30">score</p>
+                </div>
+              </div>
+
+              {/* Status */}
+              <div className="flex items-center justify-between">
+                <span className={`inline-flex px-2 py-0.5 rounded-md text-xs font-medium border ${STATUS_COLORS[product.status]}`}>
+                  {STATUS_LABELS[product.status]}
+                </span>
+                <span className="text-xs text-white/30">
+                  {new Date(product.firstDetectedAt).toLocaleDateString("pt-BR")}
+                </span>
+              </div>
+
+              {/* Metrics */}
+              <div className="grid grid-cols-3 gap-2 text-xs">
+                <div className="text-center">
+                  <p className="text-white/40">Views</p>
+                  <p className="text-white font-medium">{formatViews(Number(product.totalViews))}</p>
+                </div>
+                <div className="text-center">
+                  <p className="text-white/40">Creators</p>
+                  <p className="text-white font-medium">{product.creatorCount}</p>
+                </div>
+                <div className="text-center">
+                  <p className="text-white/40">Vídeos</p>
+                  <p className="text-white font-medium">{product._count.detectedVideos}</p>
+                </div>
+              </div>
+
+              </Link>
+
+              {/* Actions */}
+              <div className="flex gap-2 pt-1">
+                {product.status !== "APPROVED" && product.status !== "REJECTED" && (
+                  <>
+                    <Button
+                      size="sm"
+                      className="flex-1 bg-emerald-600/80 hover:bg-emerald-600 text-white text-xs h-8"
+                      onClick={() => updateStatus(product.id, "APPROVED")}
+                      disabled={actionLoading === product.id}
+                    >
+                      {actionLoading === product.id ? <Loader2 className="w-3 h-3 animate-spin" /> : <ThumbsUp className="w-3 h-3 mr-1" />}
+                      Aprovar
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="flex-1 border-white/10 text-white/50 hover:text-white text-xs h-8"
+                      onClick={() => updateStatus(product.id, "SAVED_FOR_LATER")}
+                      disabled={actionLoading === product.id}
+                    >
+                      <Bookmark className="w-3 h-3 mr-1" />
+                      Salvar
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="border-red-500/20 text-red-400/70 hover:text-red-400 text-xs h-8 px-2"
+                      onClick={() => updateStatus(product.id, "REJECTED")}
+                      disabled={actionLoading === product.id}
+                    >
+                      <ThumbsDown className="w-3 h-3" />
+                    </Button>
+                  </>
+                )}
+                {product.status === "APPROVED" && (
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="flex-1 border-red-500/20 text-red-400/60 hover:text-red-400 text-xs h-8"
+                    onClick={() => updateStatus(product.id, "REJECTED")}
+                    disabled={actionLoading === product.id}
+                  >
+                    <ThumbsDown className="w-3 h-3 mr-1" />
+                    Rejeitar
+                  </Button>
+                )}
+                {product.status === "REJECTED" && (
+                  <Button
+                    size="sm"
+                    className="flex-1 bg-emerald-600/80 hover:bg-emerald-600 text-white text-xs h-8"
+                    onClick={() => updateStatus(product.id, "APPROVED")}
+                    disabled={actionLoading === product.id}
+                  >
+                    <ThumbsUp className="w-3 h-3 mr-1" />
+                    Aprovar
+                  </Button>
+                )}
+              </div>
+            </Card>
+          ))}
+        </div>
+      )}
+
+      {/* Pagination */}
+      {total > 12 && (
+        <div className="flex items-center justify-between">
+          <p className="text-xs text-white/40">Mostrando {Math.min((page - 1) * 12 + 1, total)}–{Math.min(page * 12, total)} de {total}</p>
+          <div className="flex gap-2">
+            <Button size="sm" variant="outline" className="border-white/10 text-white/60" onClick={() => setPage((p) => Math.max(1, p - 1))} disabled={page === 1}>
+              <ChevronLeft className="w-4 h-4" />
+            </Button>
+            <Button size="sm" variant="outline" className="border-white/10 text-white/60" onClick={() => setPage((p) => p + 1)} disabled={page * 12 >= total}>
+              <ChevronRight className="w-4 h-4" />
+            </Button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
