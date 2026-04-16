@@ -11,7 +11,7 @@ import { generateNarration } from "./tts";
 import { assembleTakes } from "./assembler";
 import { getAntiRepeatContext, recordUsedElements, getNegativePatterns } from "./anti-repeat";
 import { DEFAULT_PROMPT_TEMPLATES } from "./defaults";
-import { ensureReferenceTranscript } from "./reference-video";
+import { ensureReferenceTranscript, fetchTikwmDetail, extractKeyFrames } from "./reference-video";
 import { swapReferencePerson, imageUrlToBase64 } from "./nano-banana";
 
 const PROJECT_ID = "gen-lang-client-0466084510";
@@ -231,12 +231,10 @@ export async function runVideoPipeline(
       await log(videoId, "analyze_reference_scene", "completed", undefined, referenceScene);
     }
 
-    // Transcreve o áudio do vídeo de referência (Whisper). Se tiver fala,
-    // a gente copia exatamente — TTS gera essa fala na voz do avatar novo.
-    // Se for silencioso, força voiceover_narrator SEM áudio (só movimento).
-    let referenceTranscript: { transcript: string; hasSpeech: boolean } | null = null;
+    // Transcreve o áudio do vídeo de referência (Whisper).
+    let referenceTranscript: { transcript: string; hasSpeech: boolean; playUrl: string | null } | null = null;
     if (bestReference?.id) {
-      referenceTranscript = await ensureReferenceTranscript(bestReference.id).catch(() => null);
+      referenceTranscript = await ensureReferenceTranscript(bestReference.id).catch((e) => { console.error("[pipeline] ensureReferenceTranscript failed:", e); return null; });
       if (referenceTranscript) {
         await log(videoId, "transcribe_reference", "completed", referenceTranscript.hasSpeech ? "has_speech" : "silent", {
           chars: referenceTranscript.transcript.length,
@@ -244,24 +242,23 @@ export async function runVideoPipeline(
       }
     }
 
-    // Override do roteiro: se a referência tem fala, copia EXATAMENTE. Split
-    // por palavra em 3 partes iguais pros takes. Se não tem fala, zera o
-    // roteiro pra pular TTS e deixar só ambient sound.
-    if (referenceTranscript) {
-      if (referenceTranscript.hasSpeech) {
-        const words = referenceTranscript.transcript.trim().split(/\s+/);
-        const third = Math.ceil(words.length / 3);
-        script.fullScript = referenceTranscript.transcript.trim();
-        script.takeScripts = {
-          take1: words.slice(0, third).join(" "),
-          take2: words.slice(third, third * 2).join(" "),
-          take3: words.slice(third * 2).join(" "),
-        };
-      } else {
-        script.fullScript = "";
-        script.takeScripts = { take1: "", take2: "", take3: "" };
-        brief.narrationMode = "voiceover_narrator";
-      }
+    // Decide narração: usa a heurística do Whisper (hasSpeech).
+    const hasNarration = referenceTranscript?.hasSpeech ?? false;
+
+    if (!hasNarration) {
+      script.fullScript = "";
+      script.takeScripts = { take1: "", take2: "", take3: "" };
+      brief.narrationMode = "voiceover_narrator";
+    } else if (referenceTranscript?.hasSpeech && referenceTranscript.transcript.trim()) {
+      const words = referenceTranscript.transcript.trim().split(/\s+/);
+      const third = Math.ceil(words.length / 3);
+      script.fullScript = referenceTranscript.transcript.trim();
+      script.takeScripts = {
+        take1: words.slice(0, third).join(" "),
+        take2: words.slice(third, third * 2).join(" "),
+        take3: words.slice(third * 2).join(" "),
+      };
+      brief.narrationMode = "creator_speaking";
     }
 
     await prisma.ugcGeneratedVideo.update({
@@ -289,20 +286,75 @@ export async function runVideoPipeline(
       data: { veoPrompts: veoPrompts as object },
     });
 
-    // ── Nano Banana: edita a thumbnail trocando SÓ a pessoa ────────────────
-    // Pega o frame do vídeo que está vendendo, envia pro Gemini image model
-    // com instrução de manter cenário/roupa/objetos/pose idênticos e trocar
-    // apenas a identidade pela persona sorteada. O resultado vira input do
-    // Veo em modo image-to-video — garante fidelidade visual máxima.
+    // ── Extrai keyframes do vídeo de referência via ffmpeg scene detect ────
+    // ffmpeg detecta automaticamente quando a imagem muda significativamente
+    // (corte, troca de roupa, mudança de cor). Extrai 1 frame por take nos
+    // pontos de mudança. Cada frame vai pro Nano Banana (troca SÓ a pessoa,
+    // mantém cenário + roupa + cor exata daquele momento). O resultado vira
+    // input image-to-video do Veo POR TAKE.
+    let perTakeImages: Record<string, { data: string; mimeType: string } | null> = {};
     let editedImage: { data: string; mimeType: string } | null = null;
-    if (bestReference?.thumbnailUrl) {
-      await log(videoId, "nano_banana_edit", "started");
-      const edited = await swapReferencePerson(bestReference.thumbnailUrl, persona);
+
+    const refPlayUrl = referenceTranscript?.playUrl
+      ?? (bestReference?.videoUrl ? (await fetchTikwmDetail(bestReference.videoUrl).catch((e) => { console.error("[pipeline] tikwm fallback failed:", e); return null; }))?.playUrl ?? null : null);
+
+    if (!refPlayUrl) {
+      await log(videoId, "extract_keyframes", "failed", `no play URL — bestRef.videoUrl=${bestReference?.videoUrl ?? "null"}, transcript.playUrl=${referenceTranscript?.playUrl ?? "null"}`);
+    }
+
+    if (refPlayUrl) {
+      await log(videoId, "extract_keyframes", "started");
+      const keyframes = await extractKeyFrames(refPlayUrl, videoId, takeCount).catch(async (e) => {
+        const msg = e instanceof Error ? e.message : String(e);
+        console.error("[pipeline] extractKeyFrames error:", msg);
+        await log(videoId, "extract_keyframes", "failed", `ERROR: ${msg.slice(0, 500)}`);
+        return null;
+      });
+
+      if (keyframes && keyframes.frames.length >= takeCount) {
+        const frameUrls = keyframes.frames.map((f) => f.url);
+        await log(videoId, "extract_keyframes", "completed", `${keyframes.frames.length} frames: ${frameUrls.join(", ")}`);
+
+        for (let i = 0; i < takeCount; i++) {
+          const key = `take${i + 1}`;
+          await log(videoId, `nano_banana_${key}`, "started");
+          const edited = await swapReferencePerson(keyframes.frames[i].url, persona).catch((e) => {
+            console.error(`[pipeline] nano_banana ${key} error:`, e);
+            return null;
+          });
+          if (edited) {
+            perTakeImages[key] = await imageUrlToBase64(edited.url);
+            await log(videoId, `nano_banana_${key}`, "completed", edited.url);
+          } else {
+            // Nano Banana falhou → usa o frame original como image-to-video.
+            // Melhor que text-to-video puro — pelo menos o cenário/roupa/cor
+            // está correto, mesmo que a pessoa seja a original.
+            const rawFrame = await imageUrlToBase64(keyframes.frames[i].url);
+            if (rawFrame) {
+              perTakeImages[key] = rawFrame;
+              await log(videoId, `nano_banana_${key}`, "failed", `using raw frame as fallback: ${keyframes.frames[i].url}`);
+            } else {
+              perTakeImages[key] = null;
+              await log(videoId, `nano_banana_${key}`, "failed", "both nano banana and raw frame failed");
+            }
+          }
+        }
+      } else {
+        await log(videoId, "extract_keyframes", "failed", `got ${keyframes?.frames.length ?? 0} frames, need ${takeCount}`);
+      }
+    }
+
+    // Fallback: se não extraiu frames por take, tenta a thumbnail original
+    if (!perTakeImages.take1 && bestReference?.thumbnailUrl) {
+      await log(videoId, "nano_banana_edit", "started", "fallback — single thumbnail");
+      const edited = await swapReferencePerson(bestReference.thumbnailUrl, persona).catch(() => null);
       if (edited) {
         editedImage = await imageUrlToBase64(edited.url);
         await log(videoId, "nano_banana_edit", "completed", edited.url);
       } else {
-        await log(videoId, "nano_banana_edit", "failed", "falling back to text-to-video");
+        // Usa a thumbnail original como fallback final
+        editedImage = await imageUrlToBase64(bestReference.thumbnailUrl).catch(() => null);
+        await log(videoId, "nano_banana_edit", "failed", editedImage ? "using raw thumbnail" : "all image methods failed, text-to-video");
       }
     }
 
@@ -367,9 +419,14 @@ export async function runVideoPipeline(
         },
       });
 
+      // Escolhe a imagem certa pro take: per-take frame editado (ideal) →
+      // thumbnail editada (fallback) → text-to-video puro (último recurso).
+      const takeKey = `take${i + 1}` as "take1" | "take2" | "take3";
+      const takeImage = perTakeImages[takeKey] ?? editedImage;
+
       // Submit to Vertex AI
       try {
-        const operationName = await submitVeoTake(prompt, modelId, accessToken, editedImage);
+        const operationName = await submitVeoTake(prompt, modelId, accessToken, takeImage);
         await prisma.generationJob.update({
           where: { id: genJob.id },
           data: { externalTaskId: operationName },

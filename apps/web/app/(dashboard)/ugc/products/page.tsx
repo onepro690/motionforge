@@ -4,7 +4,7 @@ import { useSearchParams } from "next/navigation";
 import Link from "next/link";
 import {
   TrendingUp, ThumbsUp, ThumbsDown, Bookmark, Eye, Loader2,
-  RefreshCw, Users, Video, ArrowUpRight, ChevronLeft, ChevronRight, Filter
+  RefreshCw, Users, Video, ArrowUpRight, ChevronLeft, ChevronRight, Filter, Sparkles
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
@@ -69,6 +69,7 @@ export default function ProductsPage() {
   const [loading, setLoading] = useState(true);
   const [scraping, setScraping] = useState(false);
   const [actionLoading, setActionLoading] = useState<string | null>(null);
+  const [regenLoading, setRegenLoading] = useState<string | null>(null);
   const [statusFilter, setStatusFilter] = useState<string>(searchParams.get("status") ?? "");
 
   const load = useCallback(async () => {
@@ -129,6 +130,28 @@ export default function ProductsPage() {
       load();
     } finally {
       setActionLoading(null);
+    }
+  };
+
+  const regenerate = async (id: string) => {
+    setRegenLoading(id);
+    try {
+      const res = await fetch("/api/ugc/generate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ productIds: [id], count: 1 }),
+      });
+      const json = (await res.json().catch(() => ({}))) as {
+        videosCreated?: number;
+        error?: string;
+      };
+      if (res.ok && (json.videosCreated ?? 0) > 0) {
+        toast.success("Novo vídeo em geração — aparecerá em Review quando pronto", { duration: 6000 });
+      } else {
+        toast.error(json.error ?? "Falha ao disparar geração");
+      }
+    } finally {
+      setRegenLoading(null);
     }
   };
 
@@ -298,16 +321,30 @@ export default function ProductsPage() {
                   </>
                 )}
                 {(product.status === "APPROVED" || product.status === "USED_FOR_GENERATION") && (
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    className="flex-1 border-red-500/20 text-red-400/60 hover:text-red-400 text-xs h-8"
-                    onClick={() => updateStatus(product.id, "REJECTED")}
-                    disabled={actionLoading === product.id}
-                  >
-                    <ThumbsDown className="w-3 h-3 mr-1" />
-                    Rejeitar
-                  </Button>
+                  <>
+                    <Button
+                      size="sm"
+                      className="flex-1 bg-violet-600/80 hover:bg-violet-600 text-white text-xs h-8"
+                      onClick={() => regenerate(product.id)}
+                      disabled={regenLoading === product.id}
+                    >
+                      {regenLoading === product.id ? (
+                        <Loader2 className="w-3 h-3 animate-spin mr-1" />
+                      ) : (
+                        <Sparkles className="w-3 h-3 mr-1" />
+                      )}
+                      Gerar Novamente
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="border-red-500/20 text-red-400/60 hover:text-red-400 text-xs h-8 px-2"
+                      onClick={() => updateStatus(product.id, "REJECTED")}
+                      disabled={actionLoading === product.id}
+                    >
+                      <ThumbsDown className="w-3 h-3" />
+                    </Button>
+                  </>
                 )}
                 {product.status === "REJECTED" && (
                   <Button

@@ -145,14 +145,17 @@ Retorne APENAS um JSON:
 REGRAS CRÍTICAS (OBEDEÇA LITERALMENTE):
 - Os 3 takes REPLICAM o cenário da referência: MESMO ambiente, MESMA roupa, MESMOS objetos, MESMA iluminação, MESMO enquadramento, MESMA paleta. NÃO invente cenário novo. NÃO mude roupa. NÃO mude background. Use literalmente os valores dos campos de reference_scene no prompt.
 - A ÚNICA coisa que muda em relação à referência é a identidade física da pessoa: use a persona nova. NÃO copie face, etnia ou cabelo do vídeo original.
-- Dentro do vídeo gerado, a pessoa tem que ser CONSISTENTE entre os 3 takes (mesma persona, mesma roupa, mesmo ambiente) — como se fosse um único vídeo cortado em 3 momentos.
-- Cada take descreve explicitamente: a persona nova + o setting/outfit/objects/lighting/framing/cameraAngle da receita visual + o produto visível.
+- SIGA EXATAMENTE a sequência temporal do vídeo original. Se o campo "takeBreakdown" existe em reference_scene, cada take do vídeo gerado DEVE replicar a action + visuals do take correspondente — take1 do gerado = takeBreakdown.take1 da referência, etc.
+- Se "hasMultipleVariants" for true, o vídeo gerado TAMBÉM tem que mostrar essas variantes na mesma sequência descrita em "variantDescription" (ex: se a referência mostra 3 cores do vestido, o gerado mostra as mesmas 3 cores, na mesma ordem).
+- Dentro do vídeo gerado, a pessoa tem que ser CONSISTENTE entre os 3 takes (mesma persona, mesmo ambiente) — como se fosse um único vídeo cortado em 3 momentos. A roupa pode variar SE a referência variar (ex: trocando cores do produto), nunca arbitrariamente.
+- Cada take descreve explicitamente: a persona nova + o setting/outfit/objects/lighting/framing/cameraAngle da receita visual + a ação específica daquele take + o produto visível.
 - Se narration_mode == "creator_speaking": a pessoa fala direto pra câmera com lip-sync natural. Inclua a fala literal entre aspas no prompt.
-- Se narration_mode == "voiceover_narrator": a pessoa NÃO fala na câmera, só usa/mostra o produto; "ambient sound only, no dialogue, no lip-sync".
+- Se narration_mode == "voiceover_narrator" E existe roteiro: a pessoa NÃO fala na câmera, só usa/mostra o produto; "ambient sound only, no dialogue, no lip-sync, narration will be added in post".
+- Se narration_mode == "voiceover_narrator" E o roteiro está vazio: SEM narração nenhuma — "ambient sound only, no dialogue, no lip-sync, no voiceover, person is silent and demonstrates the product visually". Replique o áudio/música ambiente do vídeo original.
 - Formato: vertical 9:16, estética UGC autêntica (não comercial polido).
 - O produto ({{product_name}}) aparece visivelmente em cada take.
 - NÃO mencione texto na tela, legendas, logos.
-- Cada prompt: 5-7 frases descritivas cobrindo persona, cenário (replicado), roupa (replicada), ação, câmera, luz.
+- Cada prompt: 5-7 frases descritivas cobrindo persona, cenário (replicado), roupa (replicada), AÇÃO ESPECÍFICA do take conforme takeBreakdown, câmera, luz.
 - Retorne APENAS o JSON.`,
   },
 

@@ -294,28 +294,44 @@ export async function generateVeoPrompts(
   });
 
   const { text } = await generateText({
-    model: openai("gpt-4o-mini"),
+    model: openai("gpt-4o"),
     prompt,
-    temperature: 0.8,
+    temperature: 0.7,
   });
 
   const raw = parseJson<{ take1?: string; take2?: string; take3?: string }>(text, {});
 
   const speaks = narrationMode === "creator_speaking";
-  const lipSync = speaks
-    ? "Person speaks directly to camera with natural lip-sync to the dialogue."
-    : "No dialogue on screen, no lip-sync; ambient sound only — narration is added in post as voice-over.";
+  const hasScript = Object.values(copyByTake).some((s) => s && s.trim().length > 0);
+  const silentClause = !speaks && !hasScript
+    ? " SILENT TAKE — no dialogue, no speech, no lip-sync, person's mouth stays closed, no voiceover, ambient sound only. Person must NOT speak or mouth any words."
+    : !speaks
+      ? " No lip-sync on camera; ambient sound only — narration will be added in post as voice-over. Person does not speak directly to camera."
+      : "";
 
   const sceneDesc = referenceScene
     ? `Setting: ${referenceScene.setting}. Outfit: ${referenceScene.outfit}. Objects visible: ${referenceScene.objects.join(", ")}. Lighting: ${referenceScene.lighting}. Framing: ${referenceScene.framing}. Camera angle: ${referenceScene.cameraAngle}. Mood: ${referenceScene.mood}. Color palette: ${referenceScene.colorPalette}.`
     : `Setting: ${brief.visualStyle}`;
 
-  const baseScene = `Vertical 9:16 smartphone UGC video, handheld selfie feel. REPLICATE EXACTLY this reference scene: ${sceneDesc} ONLY the person changes — use this persona: ${personaDesc}. Keep the same outfit, same room, same objects, same lighting, same framing as the reference scene described above. ${lipSync}`;
+  // Cada take agora recebe sua própria imagem de referência (frame extraído
+  // do vídeo original naquele momento + Nano Banana). O prompt de texto é
+  // complementar: descreve a cena e a persona, mas a fidelidade visual
+  // vem do image-to-video. A cláusula de silêncio é a parte mais crítica
+  // porque o Veo tende a gerar fala se não for explicitamente proibido.
+  const baseScene = `Vertical 9:16 smartphone UGC video, handheld selfie feel. Animate this reference image. The person is: ${personaDesc}. Scene: ${sceneDesc} Keep the same outfit, objects, lighting, and framing shown in the input image.${silentClause}`;
+
+  const enforce = (s: string): string => {
+    let out = s;
+    if (silentClause && !/\b(no dialogue|silent|no speech|no voiceover|mouth stays closed)\b/i.test(out)) {
+      out += silentClause;
+    }
+    return out;
+  };
 
   return {
-    take1: raw.take1 ?? `${baseScene} Take 1 — ${referenceScene?.action ?? "intro shot"}, close framing.`,
-    take2: raw.take2 ?? `${baseScene} Take 2 — ${referenceScene?.action ?? "demonstration"}, same location.`,
-    take3: raw.take3 ?? `${baseScene} Take 3 — same person, same outfit, same room, closing beat with ${productName} visible.`,
+    take1: enforce(raw.take1 ?? `${baseScene} Take 1 — ${referenceScene?.action ?? "intro shot"}, person interacts with the product naturally.`),
+    take2: enforce(raw.take2 ?? `${baseScene} Take 2 — continue from previous take, ${referenceScene?.action ?? "demonstration"}, same person same location.`),
+    take3: enforce(raw.take3 ?? `${baseScene} Take 3 — same person, same room, closing beat with ${productName} visible.`),
   };
 }
 

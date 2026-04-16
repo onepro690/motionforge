@@ -41,17 +41,19 @@ export async function swapReferencePerson(
   referenceImageUrl: string,
   persona: UgcPersona
 ): Promise<{ url: string; mimeType: string } | null> {
-  const apiKey = process.env.GOOGLE_AI_API_KEY;
+  const apiKey = process.env.GOOGLE_AI_API_KEY?.trim();
   if (!apiKey) {
     console.warn("[nano-banana] GOOGLE_AI_API_KEY not set — skipping image edit");
     return null;
   }
 
+  console.log(`[nano-banana] downloading reference image: ${referenceImageUrl.substring(0, 80)}...`);
   const ref = await fetchBase64(referenceImageUrl);
   if (!ref) {
-    console.error("[nano-banana] failed to download reference image");
+    console.error("[nano-banana] failed to download reference image from URL:", referenceImageUrl.substring(0, 120));
     return null;
   }
+  console.log(`[nano-banana] image downloaded: ${ref.data.length} base64 chars, type=${ref.mimeType}`);
 
   const personaDesc = personaToDescription(persona);
   const instruction =

@@ -20,6 +20,44 @@ export async function POST() {
     ? settings.searchKeywords.split(",").map((k) => k.trim()).filter(Boolean)
     : TIKTOK_SEARCH_KEYWORDS;
 
+  // Dedup existente: agrupa produtos pelo nome normalizado e mantém o
+  // canônico (o que tem mais vídeos gerados, desempata pelo maior score).
+  // Os duplicados têm seus detectedVideos/generatedVideos re-apontados pro
+  // canônico antes de serem apagados. Roda sempre — é barato e garante que
+  // a lista nunca mostra o mesmo produto duas vezes.
+  const allProducts = await prisma.ugcTrendingProduct.findMany({
+    where: { userId },
+    include: { _count: { select: { generatedVideos: true } } },
+  });
+  const byKey = new Map<string, typeof allProducts>();
+  for (const p of allProducts) {
+    const key = p.name.trim().toLowerCase();
+    const arr = byKey.get(key) ?? [];
+    arr.push(p);
+    byKey.set(key, arr);
+  }
+  for (const group of byKey.values()) {
+    if (group.length < 2) continue;
+    group.sort((a, b) => {
+      if (b._count.generatedVideos !== a._count.generatedVideos) {
+        return b._count.generatedVideos - a._count.generatedVideos;
+      }
+      return b.score - a.score;
+    });
+    const [canonical, ...dups] = group;
+    for (const dup of dups) {
+      await prisma.ugcDetectedVideo.updateMany({
+        where: { productId: dup.id },
+        data: { productId: canonical.id },
+      }).catch(() => {});
+      await prisma.ugcGeneratedVideo.updateMany({
+        where: { productId: dup.id },
+        data: { productId: canonical.id },
+      }).catch(() => {});
+      await prisma.ugcTrendingProduct.delete({ where: { id: dup.id } }).catch(() => {});
+    }
+  }
+
   const result = await scrapeTrendingProducts(keywords, apiKey ?? undefined);
 
   let newCount = 0;
@@ -29,8 +67,15 @@ export async function POST() {
     const score = scoreProduct(scrapedProduct, weights);
     if (score.score < 5) continue;
 
+    // Dedup por nome case-insensitive — evita criar dois cards pro mesmo
+    // produto quando o scraper retorna variações de capitalização/espaço.
+    // Inclui REJECTED: se o user já rejeitou, a gente só atualiza métricas,
+    // nunca ressuscita o card.
     const existing = await prisma.ugcTrendingProduct.findFirst({
-      where: { userId, name: scrapedProduct.name, status: { not: "REJECTED" } },
+      where: {
+        userId,
+        name: { equals: scrapedProduct.name.trim(), mode: "insensitive" },
+      },
     });
 
     const totalViews = scrapedProduct.videos.reduce((s, v) => s + v.views, 0);
