@@ -307,13 +307,18 @@ export async function runVideoPipeline(
     }
 
     // ── Step 6: Generate audio narration ──────────────────────────────────
+    // Só geramos TTS pro modo voiceover_narrator. No creator_speaking o Veo
+    // já entrega lip-sync com voz própria — se a gente mandasse TTS por cima,
+    // a voz do Veo e a voz do TTS apareceriam ao mesmo tempo (voz dupla).
     const t6 = Date.now();
     await setStep(videoId, "generating_audio");
     await log(videoId, "generate_audio", "started");
 
-    const audioUrl = await generateNarration(script.fullScript, voice, videoId);
+    const audioUrl = brief.narrationMode === "voiceover_narrator"
+      ? await generateNarration(script.fullScript, voice, videoId)
+      : null;
     await prisma.ugcGeneratedVideo.update({ where: { id: videoId }, data: { audioUrl } });
-    await log(videoId, "generate_audio", "completed", audioUrl ? "Audio generated" : "Skipped (no API key)", undefined, Date.now() - t6);
+    await log(videoId, "generate_audio", "completed", audioUrl ? "Audio generated" : "Skipped (creator_speaking or empty)", undefined, Date.now() - t6);
 
     // ── Step 7: Submit Veo3 takes ──────────────────────────────────────────
     const t7 = Date.now();

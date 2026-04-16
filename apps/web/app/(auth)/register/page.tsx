@@ -47,13 +47,13 @@ export default function RegisterPage() {
         email: data.email,
         password: data.password,
         name: data.name,
-        callbackURL: "/dashboard",
+        callbackURL: "/hub",
       });
       if (result.error) {
         toast.error(result.error.message ?? "Erro ao criar conta");
       } else {
         toast.success("Conta criada com sucesso!");
-        router.push("/dashboard");
+        router.push("/hub");
         router.refresh();
       }
     } catch {

@@ -47,13 +47,25 @@ interface VideoDetail {
   creativeBriefSnapshot: Record<string, unknown> | null;
   audioUrl: string | null;
   createdAt: string;
-  product: { name: string; thumbnailUrl: string | null; category: string | null };
+  product: {
+    name: string;
+    thumbnailUrl: string | null;
+    category: string | null;
+    detectedVideos?: Array<{
+      videoId: string;
+      videoUrl: string | null;
+      thumbnailUrl: string | null;
+      creatorHandle: string | null;
+      description: string | null;
+      views: number;
+    }>;
+  };
   takes: Take[];
   logs: LogEntry[];
   reviews: Review[];
 }
 
-type Tab = "video" | "script" | "prompts" | "brief" | "takes" | "logs";
+type Tab = "video" | "reference" | "script" | "prompts" | "brief" | "takes" | "logs";
 
 function VideoPlayer({ src }: { src: string }) {
   const [playing, setPlaying] = useState(false);
@@ -232,6 +244,7 @@ export default function ReviewPage() {
 
   const tabs: { id: Tab; label: string; icon: React.ElementType }[] = [
     { id: "video", label: "Vídeo", icon: Video },
+    { id: "reference", label: "Referência", icon: Video },
     { id: "script", label: "Roteiro", icon: FileText },
     { id: "prompts", label: "Prompts Veo", icon: Code },
     { id: "brief", label: "Brief", icon: Activity },
@@ -342,6 +355,36 @@ export default function ReviewPage() {
                           Ver versão anterior
                         </button>
                       )}
+                    </div>
+                  )}
+
+                  {tab === "reference" && (
+                    <div className="flex flex-col items-center gap-3">
+                      {(() => {
+                        const ref = video.product.detectedVideos?.[0];
+                        if (!ref) return <p className="text-white/30 text-sm">Sem vídeo de referência.</p>;
+                        const tiktokUrl = ref.videoUrl ?? (ref.creatorHandle && ref.videoId ? `https://www.tiktok.com/@${ref.creatorHandle}/video/${ref.videoId}` : null);
+                        return (
+                          <>
+                            <p className="text-xs text-white/40 text-center">Vídeo de referência usado pra gerar este UGC</p>
+                            {ref.thumbnailUrl && (
+                              <img src={ref.thumbnailUrl} alt="Referência" className="max-w-[280px] rounded-xl aspect-[9/16] object-cover" />
+                            )}
+                            <div className="text-center space-y-1">
+                              {ref.creatorHandle && <p className="text-sm text-white">@{ref.creatorHandle}</p>}
+                              <p className="text-xs text-white/40">{Number(ref.views).toLocaleString("pt-BR")} views</p>
+                              {ref.description && <p className="text-xs text-white/50 max-w-sm mx-auto">{ref.description}</p>}
+                            </div>
+                            {tiktokUrl && (
+                              <a href={tiktokUrl} target="_blank" rel="noopener noreferrer">
+                                <Button size="sm" variant="outline" className="border-white/10 text-white/70 hover:text-white">
+                                  Abrir no TikTok
+                                </Button>
+                              </a>
+                            )}
+                          </>
+                        );
+                      })()}
                     </div>
                   )}
 

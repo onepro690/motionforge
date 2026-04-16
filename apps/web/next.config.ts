@@ -12,6 +12,15 @@ const nextConfig: NextConfig = {
     "@prisma/client",
     "prisma",
     "bcryptjs",
+    "@motion/ai-providers",
+    "@motion/storage",
+    "@motion/queue",
+    "@motion/database",
+    "@anthropic-ai/sdk",
+    "fluent-ffmpeg",
+    "@ffmpeg-installer/ffmpeg",
+    "google-auth-library",
+    "tiktok-live-connector",
   ],
   experimental: {
     serverActions: {
@@ -26,14 +35,6 @@ const nextConfig: NextConfig = {
       { protocol: "http", hostname: "localhost" },
       { protocol: "https", hostname: "**" },
     ],
-  },
-  async rewrites() {
-    return [
-      {
-        source: "/api/uploads/:path*",
-        destination: "/api/serve-upload/:path*",
-      },
-    ];
   },
 };
 

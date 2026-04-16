@@ -187,7 +187,7 @@ export default async function JobDetailPage({ params }: PageProps) {
               </p>
               <div className="aspect-video rounded-lg bg-white/[0.03] border border-white/[0.06] overflow-hidden">
                 <video
-                  src={job.inputVideoUrl}
+                  src={job.inputVideoUrl ?? undefined}
                   controls
                   className="w-full h-full object-cover"
                 />

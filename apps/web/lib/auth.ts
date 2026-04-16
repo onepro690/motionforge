@@ -11,11 +11,17 @@ export const auth = betterAuth({
     minPasswordLength: 8,
   },
   session: {
-    expiresIn: 60 * 60 * 24 * 7, // 7 days
-    updateAge: 60 * 60 * 24, // Update session every day
+    expiresIn: 60 * 60 * 24 * 30, // 30 days
+    updateAge: 60 * 60 * 24, // Atualiza token uma vez por dia
+    cookieCache: {
+      enabled: true,
+      maxAge: 60 * 5, // Cache do cookie por 5 minutos (evita DB a cada request)
+    },
   },
   trustedOrigins: [
     process.env.NEXT_PUBLIC_APP_URL ?? "http://localhost:3000",
+    "https://motion-transfer-saas.vercel.app",
+    "http://localhost:3000",
   ],
 });
 

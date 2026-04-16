@@ -6,11 +6,14 @@ import { getMotionQueue } from "@/lib/queue";
 import { z } from "zod";
 
 const createJobSchema = z.object({
-  inputVideoUrl: z.string(),
+  inputVideoUrl: z.string().optional(),
   inputImageUrl: z.string(),
+  // text-to-video mode (SeedDance)
+  promptText: z.string().optional(),
+  generatedPrompt: z.string().optional(),
   aspectRatio: z
     .enum(["RATIO_16_9", "RATIO_9_16", "RATIO_1_1", "RATIO_4_3"])
-    .default("RATIO_16_9"),
+    .default("RATIO_9_16"),
   resolution: z
     .enum(["SD_480", "HD_720", "FHD_1080"])
     .default("HD_720"),
@@ -79,7 +82,8 @@ export async function POST(request: NextRequest) {
     }
 
     const data = parsed.data;
-    const provider = process.env.AI_PROVIDER ?? "mock";
+    const isTextToVideo = !!data.promptText;
+    const provider = isTextToVideo ? "seeddance" : (process.env.AI_PROVIDER ?? "mock");
 
     const job = await prisma.generationJob.create({
       data: {
@@ -88,6 +92,8 @@ export async function POST(request: NextRequest) {
         provider,
         inputVideoUrl: data.inputVideoUrl,
         inputImageUrl: data.inputImageUrl,
+        promptText: data.promptText,
+        generatedPrompt: data.generatedPrompt,
         aspectRatio: data.aspectRatio,
         resolution: data.resolution,
         maxDuration: data.maxDuration,
@@ -107,6 +113,8 @@ export async function POST(request: NextRequest) {
         inputVideoUrl: data.inputVideoUrl,
         inputImageUrl: data.inputImageUrl,
         provider,
+        promptText: data.promptText,
+        generatedPrompt: data.generatedPrompt,
         config: {
           aspectRatio: data.aspectRatio,
           resolution: data.resolution,

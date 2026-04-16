@@ -2,15 +2,17 @@ import { auth } from "@/lib/auth";
 import { headers } from "next/headers";
 import { prisma } from "@/lib/db";
 import Link from "next/link";
-import { Video, Download } from "lucide-react";
+import { Video, Image as ImageIcon } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent } from "@/components/ui/card";
 import { JobStatusBadge } from "@/components/jobs/status-badge";
 import { formatRelativeTime } from "@/lib/utils";
+import { VideoCard } from "@/components/history/video-card";
+import { ImageCard } from "@/components/history/image-card";
 
 interface SearchParams {
   status?: string;
   page?: string;
+  tab?: string;
 }
 
 interface PageProps {
@@ -19,15 +21,30 @@ interface PageProps {
 
 const PAGE_SIZE = 12;
 
+const statuses = ["QUEUED", "PROCESSING", "RENDERING", "COMPLETED", "FAILED"];
+const statusLabels: Record<string, string> = {
+  QUEUED: "Na Fila",
+  PROCESSING: "Processando",
+  RENDERING: "Renderizando",
+  COMPLETED: "Concluídos",
+  FAILED: "Falhas",
+};
+
 export default async function HistoryPage({ searchParams }: PageProps) {
   const params = await searchParams;
   const session = await auth.api.getSession({ headers: await headers() });
   const userId = session!.user.id;
   const page = parseInt(params.page ?? "1");
   const status = params.status;
+  const tab = params.tab === "images" ? "images" : "videos";
+
+  const isImages = tab === "images";
 
   const where = {
     userId,
+    ...(isImages
+      ? { provider: "nanobanana" }
+      : { NOT: { provider: "nanobanana" } }),
     ...(status ? { status: status as "QUEUED" | "PROCESSING" | "RENDERING" | "COMPLETED" | "FAILED" } : {}),
   };
 
@@ -43,117 +60,108 @@ export default async function HistoryPage({ searchParams }: PageProps) {
 
   const totalPages = Math.ceil(total / PAGE_SIZE);
 
-  const statuses = [
-    "QUEUED",
-    "PROCESSING",
-    "RENDERING",
-    "COMPLETED",
-    "FAILED",
-  ];
-
-  const statusLabels: Record<string, string> = {
-    QUEUED: "Na Fila",
-    PROCESSING: "Processando",
-    RENDERING: "Renderizando",
-    COMPLETED: "Concluídos",
-    FAILED: "Falhas",
-  };
+  const statusHref = (s?: string) =>
+    s ? `/history?tab=${tab}&status=${s}` : `/history?tab=${tab}`;
 
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-bold text-white">Histórico</h1>
-          <p className="text-white/50 mt-1">{total} gerações no total</p>
+          <p className="text-white/50 mt-1">
+            {total} {isImages ? "imagens" : "vídeos"} no total
+          </p>
         </div>
-        <Link href="/generate">
+        <Link href={isImages ? "/nanobanana" : "/generate"}>
           <Button className="bg-violet-600 hover:bg-violet-700 text-white">
-            Nova Geração
+            {isImages ? "Nova Imagem" : "Nova Geração"}
           </Button>
         </Link>
       </div>
 
-      {/* Filters */}
-      <div className="flex flex-wrap gap-2">
-        <Link href="/history">
-          <Button
-            variant={!status ? "default" : "ghost"}
-            size="sm"
-            className={
-              !status
-                ? "bg-violet-600 text-white"
+      {/* Tabs: Vídeos | Imagens */}
+      <div className="flex gap-1 p-1 rounded-lg bg-white/[0.04] border border-white/[0.06] w-fit">
+        <Link href="/history?tab=videos">
+          <button
+            className={`flex items-center gap-2 px-4 py-2 rounded-md text-sm font-medium transition-all ${
+              !isImages
+                ? "bg-violet-600 text-white shadow"
                 : "text-white/50 hover:text-white"
-            }
+            }`}
           >
-            Todos
-          </Button>
+            <Video className="w-4 h-4" />
+            Vídeos
+          </button>
         </Link>
-        {statuses.map((s) => (
-          <Link key={s} href={`/history?status=${s}`}>
+        <Link href="/history?tab=images">
+          <button
+            className={`flex items-center gap-2 px-4 py-2 rounded-md text-sm font-medium transition-all ${
+              isImages
+                ? "bg-violet-600 text-white shadow"
+                : "text-white/50 hover:text-white"
+            }`}
+          >
+            <ImageIcon className="w-4 h-4" />
+            Imagens
+          </button>
+        </Link>
+      </div>
+
+      {/* Status filters — videos only */}
+      {!isImages && (
+        <div className="flex flex-wrap gap-2">
+          <Link href={statusHref()}>
             <Button
-              variant={status === s ? "default" : "ghost"}
+              variant={!status ? "default" : "ghost"}
               size="sm"
-              className={
-                status === s
-                  ? "bg-violet-600 text-white"
-                  : "text-white/50 hover:text-white"
-              }
+              className={!status ? "bg-violet-600 text-white" : "text-white/50 hover:text-white"}
             >
-              {statusLabels[s]}
+              Todos
             </Button>
           </Link>
-        ))}
-      </div>
+          {statuses.map((s) => (
+            <Link key={s} href={statusHref(s)}>
+              <Button
+                variant={status === s ? "default" : "ghost"}
+                size="sm"
+                className={status === s ? "bg-violet-600 text-white" : "text-white/50 hover:text-white"}
+              >
+                {statusLabels[s]}
+              </Button>
+            </Link>
+          ))}
+        </div>
+      )}
 
+      {/* Empty state */}
       {jobs.length === 0 ? (
         <div className="text-center py-20">
-          <Video className="w-16 h-16 text-white/10 mx-auto mb-4" />
-          <p className="text-white/40 mb-4">Nenhum job encontrado</p>
-          <Link href="/generate">
+          {isImages ? (
+            <ImageIcon className="w-16 h-16 text-white/10 mx-auto mb-4" />
+          ) : (
+            <Video className="w-16 h-16 text-white/10 mx-auto mb-4" />
+          )}
+          <p className="text-white/40 mb-4">
+            {isImages ? "Nenhuma imagem gerada ainda" : "Nenhum vídeo encontrado"}
+          </p>
+          <Link href={isImages ? "/nanobanana" : "/generate"}>
             <Button className="bg-violet-600 hover:bg-violet-700 text-white">
-              Criar geração
+              {isImages ? "Gerar imagem" : "Criar geração"}
             </Button>
           </Link>
         </div>
+      ) : isImages ? (
+        /* ── Images grid ── */
+        <div className="grid md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
+          {jobs.map((job) => (
+            <ImageCard key={job.id} job={job} />
+          ))}
+        </div>
       ) : (
+        /* ── Videos grid ── */
         <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-4">
           {jobs.map((job) => (
-            <Link href={`/jobs/${job.id}`} key={job.id}>
-              <Card className="bg-white/[0.03] border-white/[0.08] hover:border-white/[0.15] transition-colors cursor-pointer group overflow-hidden">
-                <div className="aspect-video bg-[#0d1117] flex items-center justify-center relative overflow-hidden">
-                  {job.outputThumbnailUrl ? (
-                    // eslint-disable-next-line @next/next/no-img-element
-                    <img
-                      src={job.outputThumbnailUrl}
-                      alt="Thumbnail"
-                      className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
-                    />
-                  ) : (
-                    <Video className="w-10 h-10 text-white/20" />
-                  )}
-                  {job.status === "COMPLETED" && job.outputVideoUrl && (
-                    <div className="absolute inset-0 bg-black/50 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center">
-                      <div className="w-12 h-12 rounded-full bg-white/20 backdrop-blur-sm flex items-center justify-center">
-                        <Download className="w-5 h-5 text-white" />
-                      </div>
-                    </div>
-                  )}
-                </div>
-                <CardContent className="p-4">
-                  <div className="flex items-center justify-between">
-                    <div>
-                      <p className="text-sm font-medium text-white">
-                        #{job.id.slice(-8)}
-                      </p>
-                      <p className="text-xs text-white/40 mt-0.5">
-                        {formatRelativeTime(job.createdAt)}
-                      </p>
-                    </div>
-                    <JobStatusBadge status={job.status} />
-                  </div>
-                </CardContent>
-              </Card>
-            </Link>
+            <VideoCard key={job.id} job={job} />
           ))}
         </div>
       )}
@@ -164,7 +172,7 @@ export default async function HistoryPage({ searchParams }: PageProps) {
           {Array.from({ length: totalPages }, (_, i) => i + 1).map((p) => (
             <Link
               key={p}
-              href={`/history?page=${p}${status ? `&status=${status}` : ""}`}
+              href={`/history?tab=${tab}&page=${p}${status ? `&status=${status}` : ""}`}
             >
               <Button
                 variant={page === p ? "default" : "ghost"}

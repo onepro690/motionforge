@@ -1,17 +1,24 @@
 {
   "name": "motion-transfer-saas",
   "private": true,
-  "workspaces": ["apps/*", "packages/*"],
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
   "scripts": {
     "dev": "turbo run dev --parallel",
     "build": "turbo run build",
     "db:generate": "turbo run db:generate",
     "db:push": "turbo run db:push",
     "db:seed": "turbo run db:seed",
-    "worker": "turbo run dev --filter=worker"
+    "worker": "turbo run dev --filter=worker",
+    "yt": "node apps/yt-server/index.mjs"
   },
   "devDependencies": {
     "turbo": "^2.0.0",
     "typescript": "^5.0.0"
+  },
+  "dependencies": {
+    "tiktok-live-connector": "^2.1.1-beta1"
   }
 }

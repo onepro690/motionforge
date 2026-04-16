@@ -49,7 +49,7 @@ export async function POST(
       {
         jobId: job.id,
         userId: session.user.id,
-        inputVideoUrl: job.inputVideoUrl,
+        inputVideoUrl: job.inputVideoUrl ?? undefined,
         inputImageUrl: job.inputImageUrl,
         provider: job.provider,
         config: {

@@ -25,7 +25,134 @@
     --ring: 263.4 70% 50.4%;
     --radius: 0.75rem;
   }
+
+  .light {
+    --background: 0 0% 97%;
+    --foreground: 224 71.4% 4.1%;
+    --card: 0 0% 100%;
+    --card-foreground: 224 71.4% 4.1%;
+    --popover: 0 0% 100%;
+    --popover-foreground: 224 71.4% 4.1%;
+    --primary: 263.4 70% 50.4%;
+    --primary-foreground: 210 20% 98%;
+    --secondary: 220 14.3% 93%;
+    --secondary-foreground: 220.9 39.3% 11%;
+    --muted: 220 14.3% 93%;
+    --muted-foreground: 220 8.9% 46.1%;
+    --accent: 220 14.3% 93%;
+    --accent-foreground: 220.9 39.3% 11%;
+    --destructive: 0 72.2% 50.6%;
+    --destructive-foreground: 210 20% 98%;
+    --border: 220 13% 85%;
+    --input: 220 13% 91%;
+    --ring: 263.4 70% 50.4%;
+    --radius: 0.75rem;
+  }
 }
+
+/* ═══════════════════════════════════════════════
+   LIGHT MODE — global overrides
+   Uses attribute-selector to catch all Tailwind
+   text-white/* and border-white/* variants without
+   touching individual component files.
+   ═══════════════════════════════════════════════ */
+
+/* Main page & sidebar backgrounds */
+.light .mf-page   { background-color: #f1f5f9 !important; }
+.light .mf-sidebar {
+  background-color: #ffffff !important;
+  border-color: #e2e8f0 !important;
+}
+.light .mf-header { border-color: #e2e8f0 !important; }
+.light .mf-user-section { border-color: #e2e8f0 !important; }
+
+/* All Tailwind text-white/* variants → dark slate */
+.light [class*="text-white"] {
+  color: rgb(15 23 42 / 0.9) !important;
+}
+/* Softer variants (text-white/50, /40, /30, /20) */
+.light [class*="text-white\/5"],
+.light [class*="text-white/5"] {
+  color: rgb(15 23 42 / 0.5) !important;
+}
+.light [class*="text-white\/4"],
+.light [class*="text-white/4"] {
+  color: rgb(15 23 42 / 0.4) !important;
+}
+.light [class*="text-white\/3"],
+.light [class*="text-white/3"] {
+  color: rgb(15 23 42 / 0.35) !important;
+}
+.light [class*="text-white\/2"],
+.light [class*="text-white/2"] {
+  color: rgb(15 23 42 / 0.25) !important;
+}
+.light [class*="text-white\/1"],
+.light [class*="text-white/1"] {
+  color: rgb(15 23 42 / 0.15) !important;
+}
+
+/* Violet/cyan accents stay as-is (don't override) */
+.light [class*="text-violet"] { color: revert !important; }
+.light [class*="text-cyan"]   { color: revert !important; }
+.light [class*="text-amber"]  { color: revert !important; }
+.light [class*="text-red"]    { color: revert !important; }
+.light [class*="text-green"]  { color: revert !important; }
+
+/* All border-white/* variants → slate */
+.light [class*="border-white"] {
+  border-color: rgb(148 163 184 / 0.4) !important;
+}
+
+/* Dark hardcoded backgrounds → light surfaces */
+.light [class*="bg-\[#030712\]"],
+.light [class*="bg-\[#0d1117\]"],
+.light [class*="bg-\[#0f1117\]"],
+.light [class*="bg-\[#1a1a2e\]"] {
+  background-color: #f8fafc !important;
+}
+
+/* bg-white/[0.02..0.05] → subtle light surfaces */
+.light [class*="bg-white\/\[0.0"] {
+  background-color: rgb(241 245 249 / 0.8) !important;
+}
+
+/* Sidebar nav items */
+.light .mf-sidebar-item       { color: #475569 !important; }
+.light .mf-sidebar-item:hover { color: #0f172a !important; background-color: #f1f5f9 !important; }
+.light .mf-sidebar-item-active {
+  color: #7c3aed !important;
+  background-color: rgba(139,92,246,0.1) !important;
+  border-color: rgba(139,92,246,0.25) !important;
+}
+
+/* Dropdown content in light mode */
+.light [class*="bg-\[#0d1117\]"] {
+  background-color: #ffffff !important;
+}
+
+/* Input/textarea in light mode */
+.light input,
+.light textarea,
+.light select {
+  background-color: #ffffff !important;
+  color: #0f172a !important;
+  border-color: #cbd5e1 !important;
+}
+.light input::placeholder,
+.light textarea::placeholder {
+  color: #94a3b8 !important;
+}
+
+/* Card backgrounds */
+.light [class*="bg-white\/\[0.03\]"],
+.light [class*="bg-white\/\[0.04\]"] {
+  background-color: #ffffff !important;
+  border-color: #e2e8f0 !important;
+}
+
+/* Logo text */
+.light .mf-logo-text { color: #0f172a !important; }
 
 @layer base {
   * {

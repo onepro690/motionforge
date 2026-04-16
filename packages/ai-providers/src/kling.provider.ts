@@ -12,15 +12,13 @@ interface KieTask {
 
 interface KieResult {
   code: number;
+  msg?: string;
   data?: {
     taskId: string;
-    status: string;
-    output?: {
-      works?: Array<{ resource: string }>;
-      url?: string;
-    };
-    video_url?: string;
-    url?: string;
+    state: string; // "waiting" | "queuing" | "generating" | "success" | "fail"
+    resultJson?: string; // JSON string: { resultUrls: string[] }
+    failCode?: string;
+    failMsg?: string;
   };
 }
 
@@ -47,8 +45,8 @@ export class KlingMotionProvider extends BaseMotionProvider {
       this.uploadToBlob(input.inputVideoPath, "video/mp4"),
     ]);
 
-    // Determine mode from resolution config
-    const mode = input.config.resolution === "FHD_1080" ? "1080p" : "720p";
+    // Determine mode from resolution config ("std" = 720p, "pro" = 1080p)
+    const mode = input.config.resolution === "FHD_1080" ? "pro" : "std";
 
     console.log("[Kling] Creating motion control task...");
     const task = await this.createTask(imageUrl, videoUrl, mode, input.config.backgroundMode);
@@ -73,8 +71,8 @@ export class KlingMotionProvider extends BaseMotionProvider {
       videoPath: input.outputPath,
       thumbnailPath,
       duration: input.config.maxDuration,
-      width: mode === "1080p" ? 1920 : 1280,
-      height: mode === "1080p" ? 1080 : 720,
+      width: mode === "pro" ? 1920 : 1280,
+      height: mode === "pro" ? 1080 : 720,
       fps: 24,
     };
   }
@@ -97,22 +95,24 @@ export class KlingMotionProvider extends BaseMotionProvider {
   ): Promise<KieTask> {
     const backgroundSource = backgroundMode === "KEEP" ? "input_video" : "input_image";
 
+    const requestBody = {
+      model: "kling-3.0/motion-control",
+      input: {
+        input_urls: [imageUrl],
+        video_urls: [videoUrl],
+        character_orientation: "video",
+        background_source: backgroundSource,
+      },
+    };
+    console.log("[Kling] Request body:", JSON.stringify(requestBody, null, 2));
+
     const response = await fetch(`${KIE_API_BASE}/jobs/createTask`, {
       method: "POST",
       headers: {
         "Authorization": `Bearer ${this.apiKey}`,
         "Content-Type": "application/json",
       },
-      body: JSON.stringify({
-        model: "kling-3.0/motion-control",
-        input: {
-          input_urls: [imageUrl],
-          video_urls: [videoUrl],
-          mode,
-          character_orientation: "video",
-          background_source: backgroundSource,
-        },
-      }),
+      body: JSON.stringify(requestBody),
     });
 
     const data = await response.json() as { code: number; message?: string; data?: { taskId: string } };
@@ -126,12 +126,13 @@ export class KlingMotionProvider extends BaseMotionProvider {
 
   private async pollUntilComplete(taskId: string, timeoutSeconds: number): Promise<string> {
     const deadline = Date.now() + timeoutSeconds * 1000;
-    const pollInterval = 5000; // 5s
+    const pollInterval = 10000; // 10s (kie.ai recomenda não fazer polling agressivo)
 
     while (Date.now() < deadline) {
       await this.sleep(pollInterval);
 
-      const response = await fetch(`${KIE_API_BASE}/jobs/result?taskId=${taskId}`, {
+      // Endpoint correto: /jobs/recordInfo (não /jobs/result)
+      const response = await fetch(`${KIE_API_BASE}/jobs/recordInfo?taskId=${taskId}`, {
         headers: { "Authorization": `Bearer ${this.apiKey}` },
       });
 
@@ -142,23 +143,34 @@ export class KlingMotionProvider extends BaseMotionProvider {
         continue;
       }
 
-      const status = data.data?.status;
-      console.log(`[Kling] Task ${taskId} status: ${status}`);
+      // Campo correto: state (não status)
+      const state = data.data?.state;
+      console.log(`[Kling] Task ${taskId} state: ${state}`);
 
-      if (status === "succeed" || status === "success" || status === "completed") {
-        const url =
-          data.data?.output?.works?.[0]?.resource ??
-          data.data?.output?.url ??
-          data.data?.video_url ??
-          data.data?.url;
+      if (state === "success") {
+        // Campo correto: resultJson é uma string JSON com { resultUrls: string[] }
+        const resultJson = data.data?.resultJson;
+        if (!resultJson) throw new Error("Task succeeded but resultJson is empty");
 
-        if (url) return url;
-        throw new Error("Task completed but no output URL found");
+        let parsed: { resultUrls?: string[] };
+        try {
+          parsed = JSON.parse(resultJson);
+        } catch {
+          throw new Error(`Failed to parse resultJson: ${resultJson}`);
+        }
+
+        const url = parsed.resultUrls?.[0];
+        if (!url) throw new Error("Task succeeded but resultUrls is empty");
+        return url;
       }
 
-      if (status === "failed" || status === "error") {
-        throw new Error(`Kling task failed: ${JSON.stringify(data.data)}`);
+      if (state === "fail") {
+        throw new Error(
+          `Kling task failed — code: ${data.data?.failCode ?? "?"}, msg: ${data.data?.failMsg ?? "unknown"}`
+        );
       }
+
+      // Estados intermediários: waiting / queuing / generating → continua polling
     }
 
     throw new Error(`Kling task timed out after ${timeoutSeconds}s`);

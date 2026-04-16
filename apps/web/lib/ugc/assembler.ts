@@ -49,7 +49,9 @@ async function concatVideos(inputPaths: string[], outputPath: string): Promise<v
   await unlink(listPath).catch(() => {});
 }
 
-// Mix video with audio narration (video audio + narration at lower volume, or replace)
+// Substitui o áudio do vídeo pela narração. Antes a gente mixava 20% do
+// áudio do Veo + 100% da narração, mas isso causava voz dupla — o Veo já
+// gera lip-sync com voz própria. Agora trocamos completo pela faixa de TTS.
 async function mixAudio(
   videoPath: string,
   audioPath: string,
@@ -59,15 +61,9 @@ async function mixAudio(
     ffmpeg()
       .input(videoPath)
       .input(audioPath)
-      .complexFilter([
-        // Mix: video audio at 20%, narration at 100%
-        "[0:a]volume=0.2[va]",
-        "[1:a]volume=1.0[na]",
-        "[va][na]amix=inputs=2:duration=shortest[audio]",
-      ])
       .outputOptions([
         "-map", "0:v",
-        "-map", "[audio]",
+        "-map", "1:a",
         "-c:v", "copy",
         "-c:a", "aac",
         "-movflags", "+faststart",

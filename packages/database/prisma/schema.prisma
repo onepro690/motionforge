@@ -17,10 +17,20 @@ model User {
   updatedAt     DateTime @updatedAt
 
   // Relations
-  sessions      Session[]
-  accounts      Account[]
-  jobs          GenerationJob[]
-  assets        Asset[]
+  sessions Session[]
+  accounts Account[]
+  jobs     GenerationJob[]
+  assets   Asset[]
+
+  // UGC Module
+  ugcProducts    UgcTrendingProduct[]
+  ugcVideos      UgcDetectedVideo[]
+  ugcBriefs      UgcCreativeBrief[]
+  ugcGenerations UgcGeneratedVideo[]
+  ugcSettings    UgcSystemSettings?
+  ugcTemplates   UgcPromptTemplate[]
+  ugcFeedback    UgcFeedbackPattern[]
+  liveSessions   LiveSession[]
 
   @@map("users")
 }
@@ -100,44 +110,51 @@ enum BackgroundMode {
 }
 
 model GenerationJob {
-  id                    String         @id @default(cuid())
-  userId                String
-  status                JobStatus      @default(QUEUED)
-  provider              String         @default("mock")
+  id       String    @id @default(cuid())
+  userId   String
+  status   JobStatus @default(QUEUED)
+  provider String    @default("mock")
 
   // Inputs
-  inputVideoUrl         String
-  inputImageUrl         String
-  inputVideoThumbnail   String?
-  inputImageThumbnail   String?
+  inputVideoUrl String?
+  inputImageUrl String
+
+  // Text-to-video (prompt-based animation)
+  promptText          String? // user's raw description
+  generatedPrompt     String? // expanded prompt from AI
+  inputVideoThumbnail String?
+  inputImageThumbnail String?
 
   // Output
-  outputVideoUrl        String?
-  outputThumbnailUrl    String?
+  outputVideoUrl     String?
+  outputThumbnailUrl String?
 
   // Config
-  aspectRatio           AspectRatio    @default(RATIO_16_9)
-  resolution            Resolution     @default(HD_720)
-  maxDuration           Int            @default(15)
-  motionStrength        Float          @default(0.8)
-  identityStrength      Float          @default(0.9)
-  facePreserveStrength  Float          @default(0.85)
-  backgroundMode        BackgroundMode @default(KEEP)
+  aspectRatio          AspectRatio    @default(RATIO_16_9)
+  resolution           Resolution     @default(HD_720)
+  maxDuration          Int            @default(15)
+  motionStrength       Float          @default(0.8)
+  identityStrength     Float          @default(0.9)
+  facePreserveStrength Float          @default(0.85)
+  backgroundMode       BackgroundMode @default(KEEP)
 
   // Metadata
-  inputVideoDuration    Float?
-  inputVideoFps         Float?
-  inputVideoWidth       Int?
-  inputVideoHeight      Int?
+  inputVideoDuration Float?
+  inputVideoFps      Float?
+  inputVideoWidth    Int?
+  inputVideoHeight   Int?
+
+  // External task tracking (direct API, bypasses queue)
+  externalTaskId String?
 
   // Error
-  errorMessage          String?
+  errorMessage String?
 
   // Timestamps
-  startedAt             DateTime?
-  completedAt           DateTime?
-  createdAt             DateTime       @default(now())
-  updatedAt             DateTime       @updatedAt
+  startedAt   DateTime?
+  completedAt DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
@@ -162,4 +179,403 @@ model Asset {
 
   @@index([userId])
   @@map("assets")
+}
+
+// ─────────────────────────────────────────────
+//  TikTok Shop Auto UGC Module
+// ─────────────────────────────────────────────
+
+enum UgcProductStatus {
+  DETECTED
+  UNDER_REVIEW
+  APPROVED
+  REJECTED
+  SAVED_FOR_LATER
+  USED_FOR_GENERATION
+}
+
+enum UgcVideoStatus {
+  DRAFT_GENERATED
+  BRIEFING
+  SUBMITTING_TAKES
+  GENERATING_TAKES
+  ASSEMBLING
+  AWAITING_REVIEW
+  APPROVED
+  REJECTED
+  REMAKE_REQUESTED
+  REGENERATING
+  COMPLETED
+  FAILED
+}
+
+enum UgcReviewDecision {
+  APPROVED
+  REJECTED
+  REMAKE_REQUESTED
+}
+
+model UgcTrendingProduct {
+  id           String           @id @default(cuid())
+  userId       String
+  name         String
+  productId    String?
+  category     String?
+  niche        String?
+  thumbnailUrl String?
+  productUrl   String?
+  score        Float            @default(0)
+  status       UgcProductStatus @default(DETECTED)
+
+  detectedVideoCount Int     @default(0)
+  totalViews         BigInt  @default(0)
+  totalLikes         BigInt  @default(0)
+  totalShares        BigInt  @default(0)
+  totalComments      BigInt  @default(0)
+  viewGrowthRate     Float   @default(0)
+  engagementRate     Float   @default(0)
+  creatorCount       Int     @default(0)
+  accelerationScore  Float   @default(0)
+  scoringWeights     Json?
+  dominantHooks      Json?
+  dominantCopies     Json?
+  dominantStyles     Json?
+  trendSummary       String?
+
+  reviewedAt      DateTime?
+  rejectionReason String?
+  firstDetectedAt DateTime  @default(now())
+  lastDetectedAt  DateTime  @default(now())
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  user            User                @relation(fields: [userId], references: [id], onDelete: Cascade)
+  detectedVideos  UgcDetectedVideo[]
+  creativeBriefs  UgcCreativeBrief[]
+  generatedVideos UgcGeneratedVideo[]
+
+  @@index([userId])
+  @@index([status])
+  @@index([score])
+  @@map("ugc_trending_products")
+}
+
+model UgcDetectedVideo {
+  id            String  @id @default(cuid())
+  userId        String
+  productId     String
+  videoId       String  @unique
+  creatorHandle String?
+  videoUrl      String?
+  thumbnailUrl  String?
+  description   String?
+  transcript    String?
+
+  views    BigInt @default(0)
+  likes    BigInt @default(0)
+  comments BigInt @default(0)
+  shares   BigInt @default(0)
+
+  hookType        String?
+  copyStyle       String?
+  ugcStyle        String?
+  hasProductDemo  Boolean @default(false)
+  engagementScore Float   @default(0)
+
+  collectedAt DateTime @default(now())
+  createdAt   DateTime @default(now())
+
+  user    User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  product UgcTrendingProduct @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  @@index([productId])
+  @@index([userId])
+  @@map("ugc_detected_videos")
+}
+
+model UgcCreativeBrief {
+  id        String @id @default(cuid())
+  userId    String
+  productId String
+
+  productSummary  String
+  targetAudience  String?
+  mainProblem     String?
+  desiredOutcome  String?
+  angle           String?
+  tone            String?
+  videoStructure  Json?
+  suggestedHooks  Json?
+  suggestedCopies Json?
+  suggestedCtas   Json?
+  videoStyles     Json?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user    User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  product UgcTrendingProduct @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  @@index([productId])
+  @@map("ugc_creative_briefs")
+}
+
+model UgcGeneratedVideo {
+  id            String         @id @default(cuid())
+  userId        String
+  productId     String
+  briefId       String?
+  title         String?
+  status        UgcVideoStatus @default(DRAFT_GENERATED)
+  version       Int            @default(1)
+  parentVideoId String?
+
+  script                String?
+  copyByTake            Json?
+  veoPrompts            Json?
+  creativeBriefSnapshot Json?
+  model                 String  @default("veo3-fast")
+
+  finalVideoUrl   String?
+  thumbnailUrl    String?
+  durationSeconds Float?
+  takeCount       Int     @default(0)
+  audioUrl        String?
+
+  currentStep  String?
+  errorMessage String?
+  reviewedAt   DateTime?
+  reviewNotes  String?
+
+  generationStartedAt   DateTime?
+  generationCompletedAt DateTime?
+  createdAt             DateTime  @default(now())
+  updatedAt             DateTime  @updatedAt
+
+  user           User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  product        UgcTrendingProduct @relation(fields: [productId], references: [id], onDelete: Cascade)
+  takes          UgcGeneratedTake[]
+  reviews        UgcVideoReview[]
+  remakeRequests UgcRemakeRequest[]
+  logs           UgcPipelineLog[]
+
+  @@index([userId])
+  @@index([productId])
+  @@index([status])
+  @@map("ugc_generated_videos")
+}
+
+model UgcGeneratedTake {
+  id              String    @id @default(cuid())
+  videoId         String
+  userId          String
+  takeIndex       Int
+  veoJobId        String?
+  veoPrompt       String?
+  script          String?
+  status          JobStatus @default(QUEUED)
+  videoUrl        String?
+  durationSeconds Float?
+  errorMessage    String?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  video UgcGeneratedVideo @relation(fields: [videoId], references: [id], onDelete: Cascade)
+
+  @@index([videoId])
+  @@map("ugc_generated_takes")
+}
+
+model UgcVideoReview {
+  id         String            @id @default(cuid())
+  videoId    String
+  userId     String
+  decision   UgcReviewDecision
+  notes      String?
+  reviewedAt DateTime          @default(now())
+
+  video UgcGeneratedVideo @relation(fields: [videoId], references: [id], onDelete: Cascade)
+
+  @@index([videoId])
+  @@map("ugc_video_reviews")
+}
+
+model UgcRemakeRequest {
+  id                 String   @id @default(cuid())
+  videoId            String
+  userId             String
+  feedback           String
+  feedbackType       String?
+  parsedInstructions Json?
+  newVideoId         String?
+  status             String   @default("pending")
+  createdAt          DateTime @default(now())
+
+  video UgcGeneratedVideo @relation(fields: [videoId], references: [id], onDelete: Cascade)
+
+  @@index([videoId])
+  @@map("ugc_remake_requests")
+}
+
+model UgcPromptTemplate {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  stage     String
+  name      String
+  content   String
+  isDefault Boolean  @default(false)
+  isActive  Boolean  @default(true)
+  version   Int      @default(1)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([userId, stage])
+  @@map("ugc_prompt_templates")
+}
+
+model UgcSystemSettings {
+  id                     String   @id @default(cuid())
+  userId                 String   @unique
+  user                   User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  dailyVideoLimit        Int      @default(10)
+  minDurationSeconds     Int      @default(15)
+  maxDurationSeconds     Int      @default(25)
+  minTakesPerVideo       Int      @default(2)
+  maxTakesPerVideo       Int      @default(4)
+  autoMode               Boolean  @default(false)
+  requireProductApproval Boolean  @default(true)
+  requireVideoApproval   Boolean  @default(true)
+  defaultVoice           String   @default("nova")
+  defaultModel           String   @default("veo3-fast")
+  enableCaptions         Boolean  @default(false)
+  scoringWeights         Json     @default("{\"viewGrowthWeight\":0.30,\"engagementGrowthWeight\":0.25,\"creatorDiversityWeight\":0.15,\"recurrenceWeight\":0.20,\"accelerationWeight\":0.10}")
+  recentHooks            Json     @default("[]")
+  recentCtas             Json     @default("[]")
+  recentAngles           Json     @default("[]")
+  recentStyles           Json     @default("[]")
+  tiktokScraperApiKey    String?
+  searchKeywords         String   @default("tiktok shop brasil,achado do tiktok shop,comprei no tiktok shop,você precisa ter isso,compra que valeu")
+  updatedAt              DateTime @updatedAt
+
+  @@map("ugc_system_settings")
+}
+
+model UgcPipelineLog {
+  id         String   @id @default(cuid())
+  videoId    String
+  step       String
+  status     String
+  message    String?
+  data       Json?
+  durationMs Int?
+  createdAt  DateTime @default(now())
+
+  video UgcGeneratedVideo @relation(fields: [videoId], references: [id], onDelete: Cascade)
+
+  @@index([videoId])
+  @@map("ugc_pipeline_logs")
+}
+
+model UgcFeedbackPattern {
+  id          String   @id @default(cuid())
+  userId      String
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  pattern     String
+  patternType String
+  sentiment   String
+  frequency   Int      @default(1)
+  lastSeenAt  DateTime @default(now())
+
+  @@index([userId, patternType])
+  @@map("ugc_feedback_patterns")
+}
+
+// ── TikTok Shop Lives ────────────────────────────────────────────────────────
+
+model LiveSession {
+  id              String   @id @default(cuid())
+  userId          String
+  roomId          String   @unique
+  title           String?
+  hostHandle      String?
+  hostNickname    String?
+  hostAvatarUrl   String?
+
+  // Live metrics
+  viewerCount     Int      @default(0)
+  peakViewers     Int      @default(0)
+  likeCount       BigInt   @default(0)
+  totalViewers    BigInt   @default(0)
+
+  // Sales metrics
+  estimatedOrders Int      @default(0)
+  productCount    Int      @default(0)
+  products        Json?
+
+  // Status
+  isLive          Boolean  @default(false)
+  startedAt       DateTime?
+  endedAt         DateTime?
+  durationSeconds Int?
+
+  // Stream URLs (obtidas via tiktok-live-connector)
+  hlsUrl          String?  // HLS m3u8 URL para gravar
+  flvUrl          String?  // FLV URL (backup)
+  liveUrl         String?  // tiktok.com/@handle/live
+  thumbnailUrl    String?
+
+  // Gravação
+  recordingStatus String   @default("NONE") // NONE | QUEUED | RECORDING | DONE | FAILED
+  recordingUrl    String?  // Vercel Blob URL do arquivo gravado
+  recordingStartedAt  DateTime?
+  recordingEndedAt    DateTime?
+  recordingDurationSeconds Int?
+  recordingError  String?
+  recordingLockedUntil DateTime?
+
+  // Score composto para ranking
+  salesScore      Float    @default(0)
+
+  scrapedAt       DateTime @default(now())
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  user            User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([salesScore])
+  @@index([isLive])
+  @@index([recordingStatus])
+  @@index([scrapedAt])
+  @@map("live_sessions")
+}
+
+// Pool global de creators TikTok descobertos (compartilhado entre users).
+// Crescemos este pool a cada scrape; a próxima checagem verifica TODOS os
+// creators conhecidos + descobre novos.
+model UgcKnownCreator {
+  id            String    @id @default(cuid())
+  handle        String    @unique
+  nickname      String?
+  avatarUrl     String?
+  region        String?
+  hasCommerce   Boolean   @default(false)
+  lastSeenLive  DateTime?
+  lastChecked   DateTime  @default(now())
+  liveCount     Int       @default(0)
+  source        String?
+  // Histórico agregado p/ ranking "quem vende muito":
+  peakViewers       Int       @default(0)  // maior viewerCount já visto
+  avgViewers        Int       @default(0)  // média rolante
+  lastLiveStartedAt DateTime?              // início da última live detectada
+  lastLiveTitle     String?                // título da última live
+  totalLiveMinutes  Int       @default(0)  // tempo total acumulado de live
+  createdAt     DateTime  @default(now())
+
+  @@index([region])
+  @@index([lastChecked])
+  @@index([lastSeenLive])
+  @@index([peakViewers])
+  @@map("ugc_known_creators")
 }

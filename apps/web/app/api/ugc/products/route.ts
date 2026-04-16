@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { auth } from "@/lib/auth";
 import { headers } from "next/headers";
-import { prisma } from "@motion/database";
+import { prisma, Prisma } from "@motion/database";
 
 export async function GET(request: NextRequest) {
   const session = await auth.api.getSession({ headers: await headers() });
@@ -16,12 +16,12 @@ export async function GET(request: NextRequest) {
 
   // "APPROVED" inclui USED_FOR_GENERATION porque pra UI os dois são o mesmo
   // estado — o produto já passou pela aprovação e não deve voltar pra fila.
-  const statusFilter = status === "APPROVED"
-    ? { status: { in: ["APPROVED", "USED_FOR_GENERATION"] as const } }
-    : status
-      ? { status: status as "DETECTED" | "APPROVED" | "REJECTED" | "SAVED_FOR_LATER" | "USED_FOR_GENERATION" }
-      : {};
-  const where = { userId, ...statusFilter };
+  const where: Prisma.UgcTrendingProductWhereInput = { userId };
+  if (status === "APPROVED") {
+    where.status = { in: ["APPROVED", "USED_FOR_GENERATION"] };
+  } else if (status) {
+    where.status = status as Prisma.UgcTrendingProductWhereInput["status"];
+  }
 
   const [products, total] = await Promise.all([
     prisma.ugcTrendingProduct.findMany({

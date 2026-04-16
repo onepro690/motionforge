@@ -6,6 +6,18 @@ import { pollAndAssembleTakes } from "@/lib/ugc/pipeline";
 
 export const maxDuration = 120;
 
+// Serializa detectedVideos.views (BigInt) pra number pro JSON não explodir.
+function serializeVideo<T extends { product?: { detectedVideos?: Array<{ views: bigint | number }> } | null } | null>(v: T): T {
+  if (!v || !v.product?.detectedVideos) return v;
+  return {
+    ...v,
+    product: {
+      ...v.product,
+      detectedVideos: v.product.detectedVideos.map((d) => ({ ...d, views: Number(d.views) })),
+    },
+  } as T;
+}
+
 export async function GET(
   _req: NextRequest,
   { params }: { params: Promise<{ id: string }> }
@@ -17,7 +29,18 @@ export async function GET(
   const video = await prisma.ugcGeneratedVideo.findUnique({
     where: { id },
     include: {
-      product: { select: { name: true, thumbnailUrl: true, category: true } },
+      product: {
+        select: {
+          name: true,
+          thumbnailUrl: true,
+          category: true,
+          detectedVideos: {
+            orderBy: { views: "desc" },
+            take: 1,
+            select: { videoId: true, videoUrl: true, thumbnailUrl: true, creatorHandle: true, description: true, views: true },
+          },
+        },
+      },
       takes: { orderBy: { takeIndex: "asc" } },
       logs: { orderBy: { createdAt: "asc" }, take: 50 },
       reviews: { orderBy: { reviewedAt: "desc" }, take: 3 },
@@ -37,20 +60,31 @@ export async function GET(
       const fresh = await prisma.ugcGeneratedVideo.findUnique({
         where: { id },
         include: {
-          product: { select: { name: true, thumbnailUrl: true, category: true } },
+          product: {
+            select: {
+              name: true,
+              thumbnailUrl: true,
+              category: true,
+              detectedVideos: {
+                orderBy: { views: "desc" },
+                take: 1,
+                select: { videoId: true, videoUrl: true, thumbnailUrl: true, creatorHandle: true, description: true, views: true },
+              },
+            },
+          },
           takes: { orderBy: { takeIndex: "asc" } },
           logs: { orderBy: { createdAt: "asc" }, take: 50 },
           reviews: { orderBy: { reviewedAt: "desc" }, take: 3 },
           remakeRequests: { orderBy: { createdAt: "desc" }, take: 3 },
         },
       });
-      return NextResponse.json({ ...fresh, _pollResult: pollResult });
+      return NextResponse.json({ ...serializeVideo(fresh), _pollResult: pollResult });
     } catch {
       // Return current state even if poll fails
     }
   }
 
-  return NextResponse.json(video);
+  return NextResponse.json(serializeVideo(video));
 }
 
 export async function DELETE(

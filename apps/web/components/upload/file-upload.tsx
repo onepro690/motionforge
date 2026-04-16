@@ -7,9 +7,11 @@ import {
   ImageIcon,
   CheckCircle,
   Loader2,
+  ClipboardPaste,
 } from "lucide-react";
 import { cn, formatBytes } from "@/lib/utils";
 import { toast } from "sonner";
+import { upload } from "@vercel/blob/client";
 
 interface FileUploadProps {
   accept: string;
@@ -19,6 +21,7 @@ interface FileUploadProps {
   icon: "video" | "image";
   value?: UploadedFile | null;
   onChange: (file: UploadedFile | null) => void;
+  supportsPaste?: boolean;
 }
 
 export interface UploadedFile {
@@ -26,6 +29,7 @@ export interface UploadedFile {
   name: string;
   size: number;
   mimeType: string;
+  duration?: number; // seconds, only for video files
 }
 
 export function FileUpload({
@@ -36,6 +40,7 @@ export function FileUpload({
   icon,
   value,
   onChange,
+  supportsPaste = false,
 }: FileUploadProps) {
   const [dragging, setDragging] = useState(false);
   const [uploading, setUploading] = useState(false);
@@ -51,44 +56,48 @@ export function FileUpload({
         return;
       }
 
+      // Extract video duration before uploading
+      let fileDuration: number | undefined;
+      if (icon === "video" && file.type.startsWith("video/")) {
+        fileDuration = await new Promise<number>((resolve) => {
+          const video = document.createElement("video");
+          video.preload = "metadata";
+          const objectUrl = URL.createObjectURL(file);
+          video.onloadedmetadata = () => {
+            URL.revokeObjectURL(objectUrl);
+            resolve(video.duration);
+          };
+          video.onerror = () => {
+            URL.revokeObjectURL(objectUrl);
+            resolve(0);
+          };
+          video.src = objectUrl;
+        });
+      }
+
       setUploading(true);
       setProgress(0);
 
+      const fileType = icon === "video" ? "input_video" : "input_image";
+
       try {
-        const formData = new FormData();
-        formData.append("file", file);
-        formData.append(
-          "type",
-          icon === "video" ? "input_video" : "input_image"
-        );
-
-        const xhr = new XMLHttpRequest();
-        xhr.upload.onprogress = (e) => {
-          if (e.lengthComputable)
-            setProgress(Math.round((e.loaded / e.total) * 100));
-        };
-
-        const response = await new Promise<Response>((resolve, reject) => {
-          xhr.onload = () =>
-            resolve(
-              new Response(xhr.responseText, { status: xhr.status })
-            );
-          xhr.onerror = () => reject(new Error("Upload failed"));
-          xhr.open("POST", "/api/upload");
-          xhr.send(formData);
+        // Client-side upload directly to Vercel Blob — bypasses the 4.5MB
+        // serverless function body limit entirely.
+        const blob = await upload(file.name, file, {
+          access: "public",
+          handleUploadUrl: "/api/upload",
+          clientPayload: fileType,
+          onUploadProgress: ({ percentage }) => {
+            setProgress(Math.round(percentage));
+          },
         });
 
-        if (!response.ok) {
-          const error = await response.json();
-          throw new Error(error.error ?? "Upload falhou");
-        }
-
-        const data = await response.json();
         onChange({
-          url: data.url,
+          url: blob.url,
           name: file.name,
           size: file.size,
           mimeType: file.type,
+          duration: fileDuration,
         });
         toast.success("Arquivo enviado com sucesso!");
       } catch (error) {
@@ -122,6 +131,24 @@ export function FileUpload({
     },
     [handleFile]
   );
+
+  const handlePasteClick = useCallback(async () => {
+    try {
+      const items = await navigator.clipboard.read();
+      for (const item of items) {
+        const imageType = item.types.find((t) => t.startsWith("image/"));
+        if (imageType) {
+          const blob = await item.getType(imageType);
+          const file = new File([blob], "pasted-image.png", { type: imageType });
+          handleFile(file);
+          return;
+        }
+      }
+      toast.error("Nenhuma imagem na área de transferência");
+    } catch {
+      toast.error("Não foi possível acessar a área de transferência");
+    }
+  }, [handleFile]);
 
   if (value) {
     return (
@@ -195,6 +222,16 @@ export function FileUpload({
             <p className="text-white/25 text-xs mt-2">
               Máximo {formatBytes(maxSize)}
             </p>
+            {supportsPaste && (
+              <button
+                type="button"
+                onClick={(e) => { e.stopPropagation(); void handlePasteClick(); }}
+                className="mt-3 inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-white/[0.06] border border-white/[0.10] text-white/50 hover:text-white hover:bg-white/[0.10] transition-colors text-xs"
+              >
+                <ClipboardPaste className="w-3.5 h-3.5" />
+                Colar imagem (Ctrl+V)
+              </button>
+            )}
           </>
         )}
       </div>

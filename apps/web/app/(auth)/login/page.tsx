@@ -39,12 +39,12 @@ export default function LoginPage() {
       const result = await signIn.email({
         email: data.email,
         password: data.password,
-        callbackURL: "/dashboard",
+        callbackURL: "/hub",
       });
       if (result.error) {
         toast.error(result.error.message ?? "Erro ao fazer login");
       } else {
-        router.push("/dashboard");
+        router.push("/hub");
         router.refresh();
       }
     } catch {

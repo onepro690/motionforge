@@ -4,6 +4,7 @@ export * from "./mock.provider";
 export * from "./replicate.provider";
 export * from "./comfyui.provider";
 export * from "./kling.provider";
+export * from "./seeddance.provider";
 
 import { MockMotionProvider } from "./mock.provider";
 import { ReplicateMotionProvider } from "./replicate.provider";

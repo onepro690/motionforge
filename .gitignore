@@ -10,3 +10,6 @@ uploads
 *.tsbuildinfo
 
 .vercel
+
+.vercel
+.env*.local
