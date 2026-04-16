@@ -10,6 +10,17 @@ export async function GET(request: NextRequest) {
     if (!session) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
+  const view = request.nextUrl.searchParams.get("view");
+
+  if (view === "products") {
+    const products = await prisma.ugcTrendingProduct.findMany({
+      orderBy: { createdAt: "desc" },
+      take: 20,
+      select: { id: true, name: true, status: true, score: true, createdAt: true },
+    });
+    return NextResponse.json(products, { status: 200 });
+  }
+
   const recentVideos = await prisma.ugcGeneratedVideo.findMany({
     orderBy: { createdAt: "desc" },
     take: 10,
