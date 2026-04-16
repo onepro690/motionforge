@@ -20,104 +20,102 @@ const schema = z.object({
 });
 
 export async function POST(request: NextRequest) {
-  const session = await auth.api.getSession({ headers: await headers() });
-  if (!session) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  const userId = session.user.id;
+  try {
+    const session = await auth.api.getSession({ headers: await headers() });
+    if (!session) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    const userId = session.user.id;
 
-  const body = await request.json().catch(() => ({}));
-  const parsed = schema.safeParse(body);
-  if (!parsed.success) {
-    return NextResponse.json({ error: "Invalid input" }, { status: 400 });
-  }
-
-  const { productIds, count } = parsed.data;
-
-  // Check daily limit
-  const settings = await prisma.ugcSystemSettings.findUnique({ where: { userId } });
-  const dailyLimit = settings?.dailyVideoLimit ?? 10;
-  const today = new Date(); today.setHours(0, 0, 0, 0);
-  const videosToday = await prisma.ugcGeneratedVideo.count({ where: { userId, createdAt: { gte: today } } });
-
-  if (videosToday >= dailyLimit) {
-    return NextResponse.json({ error: `Limite diário de ${dailyLimit} vídeos atingido`, dailyLimit, videosToday }, { status: 429 });
-  }
-
-  const remaining = dailyLimit - videosToday;
-  const toGenerate = Math.min(count, remaining);
-
-  // Get approved products (includes USED_FOR_GENERATION for re-generation)
-  let approvedProducts = await prisma.ugcTrendingProduct.findMany({
-    where: {
-      userId,
-      status: { in: ["APPROVED", "USED_FOR_GENERATION"] },
-      ...(productIds?.length ? { id: { in: productIds } } : {}),
-    },
-    orderBy: { score: "desc" },
-    take: toGenerate,
-  });
-
-  if (approvedProducts.length === 0) {
-    // Check if auto mode is on and use detected products
-    if (settings?.autoMode) {
-      approvedProducts = await prisma.ugcTrendingProduct.findMany({
-        where: { userId, status: "DETECTED" },
-        orderBy: { score: "desc" },
-        take: toGenerate,
-      });
+    const body = await request.json().catch(() => ({}));
+    const parsed = schema.safeParse(body);
+    if (!parsed.success) {
+      return NextResponse.json({ error: "Invalid input", details: parsed.error.message }, { status: 400 });
     }
-    if (approvedProducts.length === 0) {
-      return NextResponse.json({ error: "Nenhum produto aprovado encontrado. Aprove produtos em alta primeiro." }, { status: 400 });
+
+    const { productIds, count } = parsed.data;
+
+    // Check daily limit
+    const settings = await prisma.ugcSystemSettings.findUnique({ where: { userId } });
+    const dailyLimit = settings?.dailyVideoLimit ?? 50;
+    const today = new Date(); today.setHours(0, 0, 0, 0);
+    const videosToday = await prisma.ugcGeneratedVideo.count({ where: { userId, createdAt: { gte: today } } });
+
+    if (videosToday >= dailyLimit) {
+      return NextResponse.json({ error: `Limite diário de ${dailyLimit} vídeos atingido (${videosToday} hoje)` }, { status: 429 });
     }
-  }
 
-  const createdVideos: string[] = [];
-  const errors: string[] = [];
+    const remaining = dailyLimit - videosToday;
+    const toGenerate = Math.min(count, remaining);
 
-  for (let i = 0; i < Math.min(toGenerate, approvedProducts.length); i++) {
-    const product = approvedProducts[i % approvedProducts.length];
-
-    // Create video record
-    const video = await prisma.ugcGeneratedVideo.create({
-      data: {
+    // Get approved products (includes USED_FOR_GENERATION for re-generation)
+    let approvedProducts = await prisma.ugcTrendingProduct.findMany({
+      where: {
         userId,
-        productId: product.id,
-        status: "DRAFT_GENERATED",
-        title: `${product.name} - v${Date.now()}`,
-        currentStep: "queued",
+        status: { in: ["APPROVED", "USED_FOR_GENERATION"] },
+        ...(productIds?.length ? { id: { in: productIds } } : {}),
       },
+      orderBy: { score: "desc" },
+      take: toGenerate,
     });
 
-    // Usa next/server `after` pra rodar o pipeline em background depois de
-    // mandar a response. Ao contrário de fire-and-forget simples, o runtime
-    // Vercel SEGURA a execução até `after` resolver — então o pipeline roda
-    // por completo (~60-120s) mesmo que o cliente já tenha a resposta.
-    const videoIdForBg = video.id;
-    after(async () => {
-      try {
-        await runVideoPipeline(videoIdForBg);
-      } catch (err) {
-        console.error(`[ugc/generate] Pipeline failed for video ${videoIdForBg}:`, err);
-        await prisma.ugcGeneratedVideo.update({
-          where: { id: videoIdForBg },
-          data: {
-            status: "FAILED",
-            errorMessage: err instanceof Error ? err.message : String(err),
-          },
-        }).catch(() => null);
+    if (approvedProducts.length === 0) {
+      if (settings?.autoMode) {
+        approvedProducts = await prisma.ugcTrendingProduct.findMany({
+          where: { userId, status: "DETECTED" },
+          orderBy: { score: "desc" },
+          take: toGenerate,
+        });
       }
+      if (approvedProducts.length === 0) {
+        return NextResponse.json({
+          error: "Nenhum produto aprovado encontrado. Aprove produtos em alta primeiro.",
+          debug: { userId, productIds, videosToday, dailyLimit },
+        }, { status: 400 });
+      }
+    }
+
+    const createdVideos: string[] = [];
+
+    for (let i = 0; i < Math.min(toGenerate, approvedProducts.length); i++) {
+      const product = approvedProducts[i % approvedProducts.length];
+
+      const video = await prisma.ugcGeneratedVideo.create({
+        data: {
+          userId,
+          productId: product.id,
+          status: "DRAFT_GENERATED",
+          title: `${product.name} - v${Date.now()}`,
+          currentStep: "queued",
+        },
+      });
+
+      const videoIdForBg = video.id;
+      after(async () => {
+        try {
+          await runVideoPipeline(videoIdForBg);
+        } catch (err) {
+          console.error(`[ugc/generate] Pipeline failed for video ${videoIdForBg}:`, err);
+          await prisma.ugcGeneratedVideo.update({
+            where: { id: videoIdForBg },
+            data: {
+              status: "FAILED",
+              errorMessage: err instanceof Error ? err.message : String(err),
+            },
+          }).catch(() => null);
+        }
+      });
+
+      createdVideos.push(video.id);
+    }
+
+    return NextResponse.json({
+      success: true,
+      videosCreated: createdVideos.length,
+      videoIds: createdVideos,
     });
-
-    createdVideos.push(video.id);
-    // Mantém o produto como APPROVED — a relação com o vídeo gerado já
-    // vive em UgcGeneratedVideo.productId. Antes a gente rebaixava pra
-    // USED_FOR_GENERATION, o que fazia o card sumir da aba "Aprovados" e
-    // voltar a mostrar os botões de aprovação.
+  } catch (err) {
+    console.error("[ugc/generate] Unhandled error:", err);
+    return NextResponse.json({
+      error: err instanceof Error ? err.message : "Erro interno ao gerar vídeo",
+    }, { status: 500 });
   }
-
-  return NextResponse.json({
-    success: true,
-    videosCreated: createdVideos.length,
-    videoIds: createdVideos,
-    errors,
-  });
 }
