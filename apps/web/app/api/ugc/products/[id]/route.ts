@@ -3,6 +3,7 @@ import { auth } from "@/lib/auth";
 import { headers } from "next/headers";
 import { prisma } from "@motion/database";
 import { z } from "zod";
+import { fetchTikwmDetail } from "@/lib/ugc/reference-video";
 
 const patchSchema = z.object({
   status: z.enum(["APPROVED", "REJECTED", "SAVED_FOR_LATER", "UNDER_REVIEW"]).optional(),
@@ -51,6 +52,86 @@ export async function GET(
   };
 
   return NextResponse.json(serialized);
+}
+
+// POST — adicionar vídeo manual ao produto
+const addVideoSchema = z.object({
+  videoUrl: z.string().url(),
+});
+
+export async function POST(
+  request: NextRequest,
+  { params }: { params: Promise<{ id: string }> }
+) {
+  const session = await auth.api.getSession({ headers: await headers() });
+  if (!session) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  const { id } = await params;
+  const userId = session.user.id;
+
+  const product = await prisma.ugcTrendingProduct.findUnique({ where: { id } });
+  if (!product || product.userId !== userId) {
+    return NextResponse.json({ error: "Not found" }, { status: 404 });
+  }
+
+  const body = await request.json();
+  const parsed = addVideoSchema.safeParse(body);
+  if (!parsed.success) {
+    return NextResponse.json({ error: "URL inválida" }, { status: 400 });
+  }
+
+  const { videoUrl } = parsed.data;
+
+  // Extrai videoId do URL do TikTok
+  const videoIdMatch = videoUrl.match(/\/video\/(\d+)/);
+  const videoId = videoIdMatch?.[1] ?? `manual-${Date.now()}`;
+
+  // Verifica se já existe
+  const existing = await prisma.ugcDetectedVideo.findUnique({ where: { videoId } });
+  if (existing) {
+    return NextResponse.json({ error: "Este vídeo já está cadastrado" }, { status: 409 });
+  }
+
+  // Busca metadados via tikwm
+  let thumbnailUrl: string | null = null;
+  let description: string | null = null;
+  let creatorHandle: string | null = null;
+  try {
+    const detail = await fetchTikwmDetail(videoUrl);
+    if (detail) {
+      description = detail.title || null;
+    }
+    // Extrai handle do URL
+    const handleMatch = videoUrl.match(/@([^/]+)/);
+    creatorHandle = handleMatch?.[1] ?? null;
+  } catch { /* ok */ }
+
+  const video = await prisma.ugcDetectedVideo.create({
+    data: {
+      userId,
+      productId: id,
+      videoId,
+      videoUrl,
+      thumbnailUrl,
+      description,
+      creatorHandle,
+    },
+  });
+
+  // Atualiza contadores do produto
+  await prisma.ugcTrendingProduct.update({
+    where: { id },
+    data: {
+      detectedVideoCount: { increment: 1 },
+    },
+  });
+
+  return NextResponse.json({
+    ...video,
+    views: Number(video.views),
+    likes: Number(video.likes),
+    comments: Number(video.comments),
+    shares: Number(video.shares),
+  });
 }
 
 export async function PATCH(

@@ -6,7 +6,7 @@ import {
   ArrowLeft, TrendingUp, ThumbsUp, ThumbsDown, Bookmark,
   Eye, Heart, MessageCircle, Share2, ExternalLink, Edit2,
   Check, X, Loader2, Zap, Users, Video, Search, Globe,
-  Copy, CheckCheck,
+  Copy, CheckCheck, Plus, Trash2, Link2,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
@@ -167,6 +167,10 @@ export default function ProductDetailPage({ params }: { params: Promise<{ id: st
   const [actionLoading, setActionLoading] = useState(false);
   const [generatingDesc, setGeneratingDesc] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [showAddVideo, setShowAddVideo] = useState(false);
+  const [newVideoUrl, setNewVideoUrl] = useState("");
+  const [addingVideo, setAddingVideo] = useState(false);
+  const [deletingVideo, setDeletingVideo] = useState<string | null>(null);
 
   const load = async () => {
     setLoading(true);
@@ -250,6 +254,46 @@ export default function ProductDetailPage({ params }: { params: Promise<{ id: st
     navigator.clipboard.writeText(product.name);
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
+  };
+
+  const addVideo = async () => {
+    if (!newVideoUrl.trim()) return;
+    setAddingVideo(true);
+    try {
+      const res = await fetch(`/api/ugc/products/${id}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ videoUrl: newVideoUrl.trim() }),
+      });
+      if (res.ok) {
+        toast.success("Vídeo adicionado!");
+        setNewVideoUrl("");
+        setShowAddVideo(false);
+        load();
+      } else {
+        const data = await res.json();
+        toast.error(data.error ?? "Erro ao adicionar vídeo");
+      }
+    } finally {
+      setAddingVideo(false);
+    }
+  };
+
+  const deleteVideo = async (videoDbId: string) => {
+    setDeletingVideo(videoDbId);
+    try {
+      const res = await fetch(`/api/ugc/products/${id}/videos/${videoDbId}`, {
+        method: "DELETE",
+      });
+      if (res.ok) {
+        toast.success("Vídeo removido");
+        load();
+      } else {
+        toast.error("Erro ao remover vídeo");
+      }
+    } finally {
+      setDeletingVideo(null);
+    }
   };
 
   const tiktokSearchUrl = product
@@ -499,72 +543,142 @@ export default function ProductDetailPage({ params }: { params: Promise<{ id: st
         </Card>
       </div>
 
-      {/* Top Videos */}
-      {product.detectedVideos.length > 0 && (
-        <div>
-          <div className="flex items-center justify-between mb-3">
-            <h3 className="text-sm font-semibold text-white/70">
-              Top Vídeos no TikTok ({product.detectedVideoCount})
-            </h3>
+      {/* Videos */}
+      <div>
+        <div className="flex items-center justify-between mb-3">
+          <h3 className="text-sm font-semibold text-white/70">
+            Vídeos de Referência ({product.detectedVideos.length})
+          </h3>
+          <div className="flex items-center gap-2">
             <span className="text-xs text-white/30">Clique para abrir no TikTok</span>
+            <Button
+              size="sm"
+              variant="outline"
+              className="border-white/10 text-white/60 hover:text-white text-xs h-7"
+              onClick={() => setShowAddVideo(!showAddVideo)}
+            >
+              <Plus className="w-3 h-3 mr-1" />
+              Adicionar Vídeo
+            </Button>
           </div>
+        </div>
+
+        {/* Add video form */}
+        {showAddVideo && (
+          <Card className="bg-white/[0.03] border-white/[0.06] p-4 mb-4">
+            <div className="flex items-center gap-2 mb-2">
+              <Link2 className="w-4 h-4 text-violet-400" />
+              <p className="text-sm font-medium text-white">Adicionar vídeo manualmente</p>
+            </div>
+            <p className="text-xs text-white/40 mb-3">
+              Cole o link do TikTok do vídeo de referência que quer usar para gerar UGC.
+            </p>
+            <div className="flex gap-2">
+              <input
+                type="text"
+                value={newVideoUrl}
+                onChange={(e) => setNewVideoUrl(e.target.value)}
+                placeholder="https://www.tiktok.com/@usuario/video/1234567890"
+                className="flex-1 bg-white/[0.05] border border-white/10 rounded-lg px-3 py-2 text-sm text-white placeholder:text-white/20 focus:outline-none focus:border-violet-500/50"
+                onKeyDown={(e) => e.key === "Enter" && addVideo()}
+              />
+              <Button
+                size="sm"
+                className="bg-violet-600 hover:bg-violet-500 text-white h-9"
+                onClick={addVideo}
+                disabled={addingVideo || !newVideoUrl.trim()}
+              >
+                {addingVideo ? <Loader2 className="w-4 h-4 animate-spin" /> : <Plus className="w-4 h-4 mr-1" />}
+                Adicionar
+              </Button>
+            </div>
+          </Card>
+        )}
+
+        {product.detectedVideos.length > 0 ? (
           <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-3">
             {product.detectedVideos.map((video) => {
-              // videoUrl is already the real tiktok.com/@handle/video/id URL
               const link = video.videoUrl && video.videoUrl.startsWith("https://www.tiktok.com")
                 ? video.videoUrl
                 : `https://www.tiktok.com/@${video.creatorHandle}/video/${video.videoId}`;
 
               return (
-                <a
-                  key={video.id}
-                  href={link}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  title={video.description ?? ""}
-                  className="group relative rounded-xl overflow-hidden border border-white/10 hover:border-violet-500/40 transition-all hover:scale-[1.02]"
-                >
-                  {video.thumbnailUrl ? (
-                    <img
-                      src={video.thumbnailUrl}
-                      alt=""
-                      className="w-full aspect-[9/16] object-cover"
-                    />
-                  ) : (
-                    <div className="w-full aspect-[9/16] bg-white/[0.03] flex items-center justify-center">
-                      <Video className="w-6 h-6 text-white/20" />
-                    </div>
-                  )}
-
-                  {/* Play icon overlay on hover */}
-                  <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center">
-                    <div className="w-10 h-10 rounded-full bg-white/20 flex items-center justify-center">
-                      <svg viewBox="0 0 24 24" className="w-5 h-5 fill-white ml-0.5" xmlns="http://www.w3.org/2000/svg">
-                        <path d="M8 5v14l11-7z"/>
-                      </svg>
-                    </div>
-                    <ExternalLink className="w-3.5 h-3.5 text-white absolute top-2 right-2" />
-                  </div>
-
-                  <div className="absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/80 to-transparent p-2">
-                    <p className="text-xs text-white/80 font-medium truncate">@{video.creatorHandle}</p>
-                    <div className="flex items-center gap-2 mt-0.5">
-                      <div className="flex items-center gap-0.5">
-                        <Eye className="w-2.5 h-2.5 text-white/50" />
-                        <span className="text-xs text-white/50">{formatViews(Number(video.views))}</span>
+                <div key={video.id} className="relative group">
+                  <a
+                    href={link}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    title={video.description ?? ""}
+                    className="block relative rounded-xl overflow-hidden border border-white/10 hover:border-violet-500/40 transition-all hover:scale-[1.02]"
+                  >
+                    {video.thumbnailUrl ? (
+                      <img
+                        src={video.thumbnailUrl}
+                        alt=""
+                        className="w-full aspect-[9/16] object-cover"
+                      />
+                    ) : (
+                      <div className="w-full aspect-[9/16] bg-white/[0.03] flex items-center justify-center">
+                        <Video className="w-6 h-6 text-white/20" />
                       </div>
-                      <div className="flex items-center gap-0.5">
-                        <Heart className="w-2.5 h-2.5 text-pink-400/70" />
-                        <span className="text-xs text-white/50">{formatViews(Number(video.likes))}</span>
+                    )}
+
+                    <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center">
+                      <div className="w-10 h-10 rounded-full bg-white/20 flex items-center justify-center">
+                        <svg viewBox="0 0 24 24" className="w-5 h-5 fill-white ml-0.5" xmlns="http://www.w3.org/2000/svg">
+                          <path d="M8 5v14l11-7z"/>
+                        </svg>
+                      </div>
+                      <ExternalLink className="w-3.5 h-3.5 text-white absolute top-2 right-2" />
+                    </div>
+
+                    <div className="absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/80 to-transparent p-2">
+                      <p className="text-xs text-white/80 font-medium truncate">@{video.creatorHandle}</p>
+                      <div className="flex items-center gap-2 mt-0.5">
+                        <div className="flex items-center gap-0.5">
+                          <Eye className="w-2.5 h-2.5 text-white/50" />
+                          <span className="text-xs text-white/50">{formatViews(Number(video.views))}</span>
+                        </div>
+                        <div className="flex items-center gap-0.5">
+                          <Heart className="w-2.5 h-2.5 text-pink-400/70" />
+                          <span className="text-xs text-white/50">{formatViews(Number(video.likes))}</span>
+                        </div>
                       </div>
                     </div>
-                  </div>
-                </a>
+                  </a>
+                  {/* Delete button */}
+                  <button
+                    onClick={() => deleteVideo(video.id)}
+                    disabled={deletingVideo === video.id}
+                    className="absolute top-1.5 left-1.5 z-10 p-1.5 rounded-lg bg-black/60 border border-white/10 text-white/40 hover:text-red-400 hover:border-red-500/30 opacity-0 group-hover:opacity-100 transition-all"
+                  >
+                    {deletingVideo === video.id ? (
+                      <Loader2 className="w-3 h-3 animate-spin" />
+                    ) : (
+                      <Trash2 className="w-3 h-3" />
+                    )}
+                  </button>
+                </div>
               );
             })}
           </div>
-        </div>
-      )}
+        ) : (
+          <Card className="bg-white/[0.02] border-white/[0.06] p-8 text-center">
+            <Video className="w-8 h-8 text-white/20 mx-auto mb-2" />
+            <p className="text-sm text-white/40">Nenhum vídeo de referência</p>
+            <p className="text-xs text-white/20 mt-1">Adicione um vídeo do TikTok para usar como referência</p>
+            <Button
+              size="sm"
+              variant="outline"
+              className="mt-3 border-white/10 text-white/60"
+              onClick={() => setShowAddVideo(true)}
+            >
+              <Plus className="w-3 h-3 mr-1" />
+              Adicionar Vídeo
+            </Button>
+          </Card>
+        )}
+      </div>
     </div>
   );
 }
