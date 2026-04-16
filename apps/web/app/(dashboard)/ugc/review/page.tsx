@@ -7,6 +7,7 @@ import {
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
+import { DownloadButton } from "@/components/download-button";
 import { toast } from "sonner";
 
 interface Take {
@@ -304,12 +305,14 @@ export default function ReviewPage() {
                     </p>
                   </div>
                   {video.finalVideoUrl && (
-                    <a href={video.finalVideoUrl} target="_blank" rel="noopener noreferrer" download>
-                      <Button size="sm" variant="outline" className="border-white/10 text-white/60 hover:text-white">
-                        <Download className="w-4 h-4 mr-2" />
-                        Download
-                      </Button>
-                    </a>
+                    <DownloadButton
+                      url={video.finalVideoUrl}
+                      filename={`ugc-${video.id.slice(-8)}.mp4`}
+                      label="Download"
+                      size="sm"
+                      variant="outline"
+                      className="border-white/10 text-white/60 hover:text-white"
+                    />
                   )}
                 </div>
 

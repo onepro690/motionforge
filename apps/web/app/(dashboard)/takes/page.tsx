@@ -34,6 +34,7 @@ import {
   FileUpload,
   type UploadedFile,
 } from "@/components/upload/file-upload";
+import { forceDownload } from "@/lib/utils";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -475,12 +476,11 @@ export default function TakesPage() {
                 <CardContent className="pt-4 space-y-3">
                   <div className="flex items-center justify-between">
                     <span className="text-sm text-white/70">Take {job.takeIndex + 1}</span>
-                    <a href={job.outputVideoUrl!} download>
-                      <Button variant="outline" className="h-7 text-xs border-white/10 text-white/60 hover:bg-white/5">
-                        <Download className="w-3 h-3 mr-1" />
-                        Baixar
-                      </Button>
-                    </a>
+                    <Button variant="outline" className="h-7 text-xs border-white/10 text-white/60 hover:bg-white/5"
+                      onClick={() => void forceDownload(job.outputVideoUrl!, `take-${job.takeIndex + 1}.mp4`).catch(() => toast.error("Erro ao baixar"))}>
+                      <Download className="w-3 h-3 mr-1" />
+                      Baixar
+                    </Button>
                   </div>
                   <video src={job.outputVideoUrl!} controls className="w-full rounded-lg bg-black" />
                 </CardContent>
@@ -491,12 +491,11 @@ export default function TakesPage() {
 
         <div className="flex gap-3">
           {mergedVideoUrl && (
-            <a href={mergedVideoUrl} download className="flex-1">
-              <Button variant="outline" className="w-full border-white/10 text-white hover:bg-white/5">
-                <Download className="w-4 h-4 mr-2" />
-                Baixar {isMerged ? "Vídeo Final" : "Take 1"}
-              </Button>
-            </a>
+            <Button variant="outline" className="flex-1 border-white/10 text-white hover:bg-white/5"
+              onClick={() => void forceDownload(mergedVideoUrl, `${isMerged ? "video-final" : "take-1"}.mp4`).catch(() => toast.error("Erro ao baixar"))}>
+              <Download className="w-4 h-4 mr-2" />
+              Baixar {isMerged ? "Vídeo Final" : "Take 1"}
+            </Button>
           )}
           <Button
             onClick={() => {

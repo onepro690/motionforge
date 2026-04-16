@@ -17,6 +17,7 @@ export const runtime = "nodejs";
 const schema = z.object({
   productIds: z.array(z.string()).optional(), // specific products to use
   count: z.number().int().min(1).max(10).default(1),
+  characterId: z.string().optional(), // personagem a usar como avatar
 });
 
 export async function POST(request: NextRequest) {
@@ -31,7 +32,23 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: "Invalid input", details: parsed.error.message }, { status: 400 });
     }
 
-    const { productIds, count } = parsed.data;
+    const { productIds, count, characterId } = parsed.data;
+
+    // Valida personagem se fornecido
+    if (characterId) {
+      const character = await prisma.ugcCharacter.findUnique({ where: { id: characterId } });
+      if (!character || character.userId !== userId) {
+        return NextResponse.json({ error: "Personagem não encontrado" }, { status: 400 });
+      }
+    } else {
+      // Verifica se tem pelo menos um personagem
+      const anyChar = await prisma.ugcCharacter.findFirst({ where: { userId } });
+      if (!anyChar) {
+        return NextResponse.json({
+          error: "Nenhum personagem criado. Vá em Personagens e crie um avatar primeiro.",
+        }, { status: 400 });
+      }
+    }
 
     const settings = await prisma.ugcSystemSettings.findUnique({ where: { userId } });
     const toGenerate = count;
@@ -68,10 +85,14 @@ export async function POST(request: NextRequest) {
     for (let i = 0; i < Math.min(toGenerate, approvedProducts.length); i++) {
       const product = approvedProducts[i % approvedProducts.length];
 
+      // Se não especificou characterId, pega o primeiro personagem do usuário
+      const finalCharacterId = characterId ?? (await prisma.ugcCharacter.findFirst({ where: { userId } }))?.id ?? null;
+
       const video = await prisma.ugcGeneratedVideo.create({
         data: {
           userId,
           productId: product.id,
+          characterId: finalCharacterId,
           status: "DRAFT_GENERATED",
           title: `${product.name} - v${Date.now()}`,
           currentStep: "queued",

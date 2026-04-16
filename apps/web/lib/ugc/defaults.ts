@@ -122,8 +122,6 @@ O objetivo é REPLICAR EXATAMENTE a cena de um vídeo UGC de TikTok Shop que já
 
 PRODUTO: {{product_name}}
 BRIEF CRIATIVO: {{brief_data}}
-ROTEIRO POR TAKE (fala literal):
-{{copy_by_take}}
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 RECEITA VISUAL EXTRAÍDA DO VÍDEO DE REFERÊNCIA (replique FIELMENTE):
@@ -135,27 +133,33 @@ PERSONA NOVA (troque SÓ a pessoa — nada mais):
 
 MODO DE NARRAÇÃO: {{narration_mode}}
 
-Retorne APENAS um JSON:
-{
-  "take1": "prompt detalhado pro take 1",
-  "take2": "prompt detalhado pro take 2",
-  "take3": "prompt detalhado pro take 3"
-}
+ROTEIRO POR TAKE:
+{{copy_by_take}}
+
+NÚMERO DE TAKES: veja quantos takes existem em copy_by_take e gere EXATAMENTE esse número de prompts.
+
+Retorne APENAS um JSON com EXATAMENTE os takes correspondentes:
+Se copy_by_take tem take1,take2,take3,take4 → retorne { "take1": "...", "take2": "...", "take3": "...", "take4": "..." }
+Se copy_by_take tem take1,take2,take3 → retorne { "take1": "...", "take2": "...", "take3": "..." }
 
 REGRAS CRÍTICAS (OBEDEÇA LITERALMENTE):
-- Os 3 takes REPLICAM o cenário da referência: MESMO ambiente, MESMA roupa, MESMOS objetos, MESMA iluminação, MESMO enquadramento, MESMA paleta. NÃO invente cenário novo. NÃO mude roupa. NÃO mude background. Use literalmente os valores dos campos de reference_scene no prompt.
-- A ÚNICA coisa que muda em relação à referência é a identidade física da pessoa: use a persona nova. NÃO copie face, etnia ou cabelo do vídeo original.
-- SIGA EXATAMENTE a sequência temporal do vídeo original. Se o campo "takeBreakdown" existe em reference_scene, cada take do vídeo gerado DEVE replicar a action + visuals do take correspondente — take1 do gerado = takeBreakdown.take1 da referência, etc.
-- Se "hasMultipleVariants" for true, o vídeo gerado TAMBÉM tem que mostrar essas variantes na mesma sequência descrita em "variantDescription" (ex: se a referência mostra 3 cores do vestido, o gerado mostra as mesmas 3 cores, na mesma ordem).
-- Dentro do vídeo gerado, a pessoa tem que ser CONSISTENTE entre os 3 takes (mesma persona, mesmo ambiente) — como se fosse um único vídeo cortado em 3 momentos. A roupa pode variar SE a referência variar (ex: trocando cores do produto), nunca arbitrariamente.
-- Cada take descreve explicitamente: a persona nova + o setting/outfit/objects/lighting/framing/cameraAngle da receita visual + a ação específica daquele take + o produto visível.
-- Se narration_mode == "creator_speaking": a pessoa fala direto pra câmera com lip-sync natural. Inclua a fala literal entre aspas no prompt.
-- Se narration_mode == "voiceover_narrator" E existe roteiro: a pessoa NÃO fala na câmera, só usa/mostra o produto; "ambient sound only, no dialogue, no lip-sync, narration will be added in post".
-- Se narration_mode == "voiceover_narrator" E o roteiro está vazio: SEM narração nenhuma — "ambient sound only, no dialogue, no lip-sync, no voiceover, person is silent and demonstrates the product visually". Replique o áudio/música ambiente do vídeo original.
-- Formato: vertical 9:16, estética UGC autêntica (não comercial polido).
+- TODOS os takes REPLICAM o cenário da referência: MESMO ambiente, MESMA roupa, MESMOS objetos, MESMA iluminação, MESMO enquadramento, MESMA paleta. NÃO invente cenário novo. NÃO mude roupa. NÃO mude background.
+- A ÚNICA coisa que muda é a identidade física da pessoa: use a persona nova.
+- Se "hasMultipleVariants" for true no reference_scene, CADA take deve mostrar a variante correta daquele momento (ex: take1=vestido rosa, take2=vestido azul, etc).
+- A pessoa DEVE ser IDÊNTICA em TODOS os takes — mesmo rosto, mesma cor de pele, mesmo cabelo, mesmo corpo.
+
+REGRA ABSOLUTA DE NARRAÇÃO (NÃO VIOLAR EM HIPÓTESE ALGUMA):
+- Se narration_mode == "voiceover_narrator" E os roteiros dos takes estão VAZIOS (strings vazias ""):
+  → CADA prompt DEVE conter EXATAMENTE esta frase: "SILENT — no dialogue, no speech, no lip-sync, no voiceover, no singing, no whispering. The person's mouth stays CLOSED at all times. Ambient sound or background music only."
+  → NÃO inclua NENHUMA fala, NENHUM diálogo, NENHUMA narração em NENHUM take.
+  → A pessoa NUNCA abre a boca, NUNCA fala, NUNCA narra.
+- Se narration_mode == "creator_speaking": inclua a fala literal entre aspas.
+- Se narration_mode == "voiceover_narrator" E tem roteiro: "ambient sound only, no dialogue, no lip-sync".
+
+- Formato: vertical 9:16, estética UGC autêntica.
 - O produto ({{product_name}}) aparece visivelmente em cada take.
-- NÃO mencione texto na tela, legendas, logos.
-- Cada prompt: 5-7 frases descritivas cobrindo persona, cenário (replicado), roupa (replicada), AÇÃO ESPECÍFICA do take conforme takeBreakdown, câmera, luz.
+- ZERO texto na tela: NENHUMA legenda, NENHUM subtítulo, NENHUM watermark, NENHUM logo, NENHUM símbolo, NENHUMA letra, NENHUM número, NENHUM emoji. O vídeo deve ser 100% limpo — apenas conteúdo visual puro.
+- Cada prompt: 5-7 frases descritivas.
 - Retorne APENAS o JSON.`,
   },
 

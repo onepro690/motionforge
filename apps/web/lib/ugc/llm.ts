@@ -3,7 +3,6 @@
 
 import { generateText } from "ai";
 import { createOpenAI } from "@ai-sdk/openai";
-import { personaToDescription, type UgcPersona } from "./personas";
 
 function getOpenAI() {
   const apiKey = process.env.OPENAI_API_KEY;
@@ -88,7 +87,7 @@ export interface CreativeBrief {
   targetAudience: string;
   mainProblem: string;
   desiredOutcome: string;
-  videoStructure: { take1: string; take2: string; take3: string };
+  videoStructure: Record<string, string>;
   suggestedHooks: string[];
   suggestedCtas: string[];
   visualStyle: string;
@@ -140,7 +139,7 @@ export async function generateBrief(
 
 export interface VideoScript {
   fullScript: string;
-  takeScripts: { take1: string; take2: string; take3: string };
+  takeScripts: Record<string, string>;
   hookUsed: string;
   ctaUsed: string;
   angleUsed: string;
@@ -261,24 +260,23 @@ Regras:
 
 // ── Veo Prompt Generator ───────────────────────────────────────────────────
 
-export interface VeoPrompts {
-  take1: string;
-  take2: string;
-  take3: string;
-}
+export type VeoPrompts = Record<string, string>;
 
 export async function generateVeoPrompts(
   productName: string,
   brief: CreativeBrief,
-  copyByTake: { take1: string; take2: string; take3: string },
+  copyByTake: Record<string, string>,
   templateContent: string,
-  persona: UgcPersona,
-  referenceScene: ReferenceScene | null
+  characterName: string,
+  referenceScene: ReferenceScene | null,
+  takeCount: number = 3
 ): Promise<VeoPrompts> {
   const openai = getOpenAI();
 
-  const personaDesc = personaToDescription(persona);
+  const personaDesc = `the person shown in the input image (character: ${characterName})`;
   const narrationMode = (brief as unknown as { narrationMode?: string }).narrationMode ?? "creator_speaking";
+  const isSilent = narrationMode !== "creator_speaking" && !Object.values(copyByTake).some((s) => s && s.trim().length > 0);
+
   const sceneBlock = referenceScene
     ? JSON.stringify(referenceScene, null, 2)
     : "(sem análise visual — use o visualStyle do brief como fallback)";
@@ -299,13 +297,11 @@ export async function generateVeoPrompts(
     temperature: 0.7,
   });
 
-  const raw = parseJson<{ take1?: string; take2?: string; take3?: string }>(text, {});
+  const raw = parseJson<Record<string, string>>(text, {});
 
-  const speaks = narrationMode === "creator_speaking";
-  const hasScript = Object.values(copyByTake).some((s) => s && s.trim().length > 0);
-  const silentClause = !speaks && !hasScript
-    ? " SILENT TAKE — no dialogue, no speech, no lip-sync, person's mouth stays closed, no voiceover, ambient sound only. Person must NOT speak or mouth any words."
-    : !speaks
+  const silentClause = isSilent
+    ? " ABSOLUTELY SILENT — NO dialogue, NO speech, NO lip-sync, NO voiceover, NO narration, NO singing, NO whispering, NO mouthing words. The person's mouth MUST stay CLOSED at all times. Ambient sound or music only. This is a SILENT video — the person NEVER speaks."
+    : narrationMode !== "creator_speaking"
       ? " No lip-sync on camera; ambient sound only — narration will be added in post as voice-over. Person does not speak directly to camera."
       : "";
 
@@ -313,26 +309,65 @@ export async function generateVeoPrompts(
     ? `Setting: ${referenceScene.setting}. Outfit: ${referenceScene.outfit}. Objects visible: ${referenceScene.objects.join(", ")}. Lighting: ${referenceScene.lighting}. Framing: ${referenceScene.framing}. Camera angle: ${referenceScene.cameraAngle}. Mood: ${referenceScene.mood}. Color palette: ${referenceScene.colorPalette}.`
     : `Setting: ${brief.visualStyle}`;
 
-  // Cada take agora recebe sua própria imagem de referência (frame extraído
-  // do vídeo original naquele momento + Nano Banana). O prompt de texto é
-  // complementar: descreve a cena e a persona, mas a fidelidade visual
-  // vem do image-to-video. A cláusula de silêncio é a parte mais crítica
-  // porque o Veo tende a gerar fala se não for explicitamente proibido.
-  const baseScene = `Vertical 9:16 smartphone UGC video, handheld selfie feel. Animate this reference image. The person is: ${personaDesc}. Scene: ${sceneDesc} Keep the same outfit, objects, lighting, and framing shown in the input image.${silentClause}`;
+  const baseScene = `Vertical 9:16 smartphone UGC video, handheld selfie feel. Animate this EXACT reference image — DO NOT change ANYTHING about the scene, person, outfit, background, objects, lighting, or framing. The ONLY change allowed is adding the specified speech/lip movement. The person is: ${personaDesc}. Scene: ${sceneDesc} The input image is the ABSOLUTE ground truth — reproduce it exactly, only adding natural movement and speech.${silentClause}`;
+
+  // Strip speech instructions from GPT-4o output when video should be silent
+  const stripSpeech = (s: string): string => {
+    if (!isSilent) return s;
+    return s
+      .replace(/\b(says?|speaks?|narrat\w*|talk\w*|whisper\w*|mouth\w*|voice\w*|dialogue|lip.?sync|singing|say\w*)\b[^.!]*/gi, "")
+      .replace(/[""][^""]*[""](?:\s*(?:she|he|they)\s+(?:says?|speaks?|narrat\w*))?/gi, "")
+      .replace(/\s{2,}/g, " ")
+      .trim();
+  };
 
   const enforce = (s: string): string => {
-    let out = s;
-    if (silentClause && !/\b(no dialogue|silent|no speech|no voiceover|mouth stays closed)\b/i.test(out)) {
+    let out = stripSpeech(s);
+    if (silentClause) {
       out += silentClause;
     }
     return out;
   };
 
-  return {
-    take1: enforce(raw.take1 ?? `${baseScene} Take 1 — ${referenceScene?.action ?? "intro shot"}, person interacts with the product naturally.`),
-    take2: enforce(raw.take2 ?? `${baseScene} Take 2 — continue from previous take, ${referenceScene?.action ?? "demonstration"}, same person same location.`),
-    take3: enforce(raw.take3 ?? `${baseScene} Take 3 — same person, same room, closing beat with ${productName} visible.`),
-  };
+  const consistencyClause = ` CRITICAL: This is a CONTINUOUS video — the person MUST be the EXACT SAME person across ALL takes. Same face, same skin tone, same hair (color, style, length), same body type, same ethnicity, same age. Do NOT change the person between takes. The input image shows the person — match them exactly.`;
+
+  const noTextClause = ` ABSOLUTELY NO TEXT, NO CAPTIONS, NO SUBTITLES, NO WATERMARKS, NO LOGOS, NO SYMBOLS, NO WRITTEN WORDS, NO LETTERS, NO NUMBERS, NO EMOJIS anywhere in the video frame at any point. The video must be completely clean — pure visual content only, zero on-screen text or graphics of any kind.`;
+
+  const result: VeoPrompts = {};
+  for (let i = 0; i < takeCount; i++) {
+    const key = `take${i + 1}`;
+    const rawPrompt = raw[key] ?? raw[`take${i + 1}`];
+    const defaultAction = i === 0 ? "intro shot" : i === takeCount - 1 ? `closing beat with ${productName} visible` : "demonstration";
+    const fallback = `${baseScene} Take ${i + 1} — ${referenceScene?.action ?? defaultAction}, person interacts with the product naturally.`;
+    let prompt = enforce(rawPrompt ?? fallback) + consistencyClause + noTextClause;
+
+    // Quando é creator_speaking, injeta o texto EXATO do transcript de referência
+    // diretamente no prompt — não confia no GPT-4o para reproduzir palavra por palavra.
+    const takeScript = copyByTake[key]?.trim();
+    if (narrationMode === "creator_speaking" && takeScript) {
+      prompt += ` The person speaks DIRECTLY to camera with natural lip-sync, pronouncing each word clearly and naturally in Brazilian Portuguese. They say EXACTLY these words (do NOT change, paraphrase, or omit any word): "${takeScript}". IMPORTANT: The input reference image defines EVERYTHING about the scene — the ONLY thing that changes is the person's mouth moving to speak these words. Do NOT alter the person's appearance, outfit, background, lighting, or any other visual element.`;
+    }
+
+    // ── Instruções de continuidade entre takes ──
+    // Os takes serão concatenados num vídeo contínuo. O movimento, posição e
+    // expressão da pessoa devem encaixar suavemente de um take pro outro.
+    if (takeCount > 1) {
+      if (i === 0) {
+        // Primeiro take: termina em posição natural de quem ainda está falando
+        prompt += ` CONTINUITY: This is take ${i + 1} of ${takeCount} in a continuous video. End this take with the person still in a natural mid-conversation pose — do NOT end with a conclusive gesture, nod, or pause. The person should look like they are about to continue speaking. Keep the person looking at the camera in the same position throughout.`;
+      } else if (i === takeCount - 1) {
+        // Último take: começa da mesma posição natural
+        prompt += ` CONTINUITY: This is the FINAL take (${i + 1} of ${takeCount}) in a continuous video. Start this take with the person in the EXACT same position, pose, and expression as the end of the previous take — looking directly at camera, mid-conversation. The person can naturally conclude at the end of this take.`;
+      } else {
+        // Takes do meio: começa e termina na mesma posição
+        prompt += ` CONTINUITY: This is take ${i + 1} of ${takeCount} in a continuous video. Start with the person in the EXACT same position, pose, and expression as the end of the previous take. End with the person still in a natural mid-conversation pose — do NOT pause or change position. The person stays looking at the camera in the same spot throughout, as if this is one continuous recording.`;
+      }
+    }
+
+    result[key] = prompt;
+  }
+
+  return result;
 }
 
 // ── Remake Instructions ────────────────────────────────────────────────────

@@ -21,6 +21,7 @@ import {
 import { JobStatusBadge } from "@/components/jobs/status-badge";
 import { JobStatusPoller } from "@/components/jobs/status-poller";
 import { CancelButton } from "@/components/jobs/cancel-button";
+import { DownloadButton } from "@/components/download-button";
 import { formatRelativeTime, getStatusLabel } from "@/lib/utils";
 
 interface PageProps {
@@ -214,14 +215,14 @@ export default async function JobDetailPage({ params }: PageProps) {
           <CardHeader className="flex flex-row items-center justify-between">
             <CardTitle className="text-white text-base">Resultado</CardTitle>
             {job.status === "COMPLETED" && job.outputVideoUrl && (
-              <a href={job.outputVideoUrl} download>
-                <Button
-                  size="sm"
-                  className="bg-violet-600 hover:bg-violet-700 text-white gap-2 h-8 text-xs"
-                >
-                  <Download className="w-3 h-3" /> Download
-                </Button>
-              </a>
+              <DownloadButton
+                url={job.outputVideoUrl}
+                filename={`video-${job.id.slice(-8)}.mp4`}
+                label="Download"
+                size="sm"
+                className="bg-violet-600 hover:bg-violet-700 text-white h-8 text-xs"
+                variant="default"
+              />
             )}
           </CardHeader>
           <CardContent>

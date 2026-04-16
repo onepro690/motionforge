@@ -4,12 +4,19 @@ import { useSearchParams } from "next/navigation";
 import Link from "next/link";
 import {
   TrendingUp, ThumbsUp, ThumbsDown, Bookmark, Eye, Loader2,
-  RefreshCw, Users, Video, ArrowUpRight, ChevronLeft, ChevronRight, Filter, Sparkles
+  RefreshCw, Users, Video, ArrowUpRight, ChevronLeft, ChevronRight, Filter, Sparkles,
+  UserCircle, X
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { toast } from "sonner";
+
+interface Character {
+  id: string;
+  name: string;
+  imageUrl: string;
+}
 
 type ProductStatus = "DETECTED" | "UNDER_REVIEW" | "APPROVED" | "REJECTED" | "SAVED_FOR_LATER" | "USED_FOR_GENERATION";
 
@@ -72,6 +79,21 @@ export default function ProductsPage() {
   const [regenLoading, setRegenLoading] = useState<string | null>(null);
   const [statusFilter, setStatusFilter] = useState<string>(searchParams.get("status") ?? "");
 
+  // Character picker modal
+  const [characters, setCharacters] = useState<Character[]>([]);
+  const [charPickerProductId, setCharPickerProductId] = useState<string | null>(null);
+  const [charPickerAction, setCharPickerAction] = useState<"approve" | "regen">("approve");
+
+  const loadCharacters = useCallback(async () => {
+    const res = await fetch("/api/ugc/characters");
+    if (res.ok) {
+      const data = await res.json();
+      setCharacters(data.characters);
+    }
+  }, []);
+
+  useEffect(() => { loadCharacters(); }, [loadCharacters]);
+
   const load = useCallback(async () => {
     setLoading(true);
     try {
@@ -90,7 +112,79 @@ export default function ProductsPage() {
 
   useEffect(() => { load(); }, [load]);
 
+  // Abre o picker de personagem antes de gerar
+  const startGeneration = (productId: string, action: "approve" | "regen") => {
+    if (characters.length === 0) {
+      toast.error("Nenhum personagem criado. Vá em Personagens e crie um avatar primeiro.");
+      return;
+    }
+    setCharPickerProductId(productId);
+    setCharPickerAction(action);
+  };
+
+  // Gera vídeo com personagem selecionado
+  const generateWithCharacter = async (characterId: string) => {
+    const productId = charPickerProductId;
+    if (!productId) return;
+    setCharPickerProductId(null);
+
+    if (charPickerAction === "approve") {
+      setActionLoading(productId);
+      try {
+        const res = await fetch(`/api/ugc/products/${productId}`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ status: "APPROVED" }),
+        });
+        if (!res.ok) { toast.error("Erro ao atualizar status"); return; }
+
+        toast.success("Produto aprovado! Iniciando geração do vídeo…");
+        const genRes = await fetch("/api/ugc/generate", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ productIds: [productId], count: 1, characterId }),
+        });
+        const genText = await genRes.text();
+        let genJson: { videosCreated?: number; error?: string } = {};
+        try { genJson = JSON.parse(genText); } catch { genJson = { error: `Resposta inválida (${genRes.status}): ${genText.slice(0, 200)}` }; }
+        if (genRes.ok && (genJson.videosCreated ?? 0) > 0) {
+          toast.success("Vídeo em geração — aparecerá em Review quando pronto", { duration: 6000 });
+        } else {
+          toast.error(genJson.error ?? `Erro ${genRes.status}: ${genText.slice(0, 200)}`);
+        }
+        load();
+      } finally {
+        setActionLoading(null);
+      }
+    } else {
+      setRegenLoading(productId);
+      try {
+        const res = await fetch("/api/ugc/generate", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ productIds: [productId], count: 1, characterId }),
+        });
+        const text = await res.text();
+        let json: { videosCreated?: number; error?: string } = {};
+        try { json = JSON.parse(text); } catch { json = { error: `Resposta inválida (${res.status}): ${text.slice(0, 200)}` }; }
+        if (res.ok && (json.videosCreated ?? 0) > 0) {
+          toast.success("Novo vídeo em geração — aparecerá em Review quando pronto", { duration: 6000 });
+        } else {
+          toast.error(json.error ?? `Erro ${res.status}: ${text.slice(0, 200)}`);
+        }
+      } catch (err) {
+        toast.error(`Erro de rede: ${err instanceof Error ? err.message : String(err)}`);
+      } finally {
+        setRegenLoading(null);
+      }
+    }
+  };
+
   const updateStatus = async (id: string, status: ProductStatus) => {
+    if (status === "APPROVED") {
+      startGeneration(id, "approve");
+      return;
+    }
     setActionLoading(id);
     try {
       const res = await fetch(`/api/ugc/products/${id}`, {
@@ -98,61 +192,16 @@ export default function ProductsPage() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ status }),
       });
-      if (!res.ok) {
-        toast.error("Erro ao atualizar status");
-        return;
-      }
-
-      // Ao aprovar, dispara geração de vídeo imediatamente. O pipeline roda
-      // em background (Veo3 + TTS + assembly) e deposita o resultado na
-      // aba Review quando pronto.
-      if (status === "APPROVED") {
-        toast.success("Produto aprovado! Iniciando geração do vídeo…");
-        const genRes = await fetch("/api/ugc/generate", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ productIds: [id], count: 1 }),
-        });
-        const genText = await genRes.text();
-        let genJson: { videosCreated?: number; error?: string } = {};
-        try { genJson = JSON.parse(genText); } catch { genJson = { error: `Resposta inválida (${genRes.status}): ${genText.slice(0, 200)}` }; }
-        if (genRes.ok && (genJson.videosCreated ?? 0) > 0) {
-          toast.success("Vídeo em geração — aparecerá em Review quando pronto", {
-            duration: 6000,
-          });
-        } else {
-          toast.error(genJson.error ?? `Erro ${genRes.status}: ${genText.slice(0, 200)}`);
-        }
-      } else {
-        toast.success(status === "REJECTED" ? "Produto rejeitado" : "Status atualizado");
-      }
+      if (!res.ok) { toast.error("Erro ao atualizar status"); return; }
+      toast.success(status === "REJECTED" ? "Produto rejeitado" : "Status atualizado");
       load();
     } finally {
       setActionLoading(null);
     }
   };
 
-  const regenerate = async (id: string) => {
-    setRegenLoading(id);
-    try {
-      const res = await fetch("/api/ugc/generate", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ productIds: [id], count: 1 }),
-      });
-      const text = await res.text();
-      let json: { videosCreated?: number; error?: string } = {};
-      try { json = JSON.parse(text); } catch { json = { error: `Resposta inválida (${res.status}): ${text.slice(0, 200)}` }; }
-      if (res.ok && (json.videosCreated ?? 0) > 0) {
-        toast.success("Novo vídeo em geração — aparecerá em Review quando pronto", { duration: 6000 });
-      } else {
-        toast.error(json.error ?? `Erro ${res.status}: ${text.slice(0, 200)}`);
-      }
-    } catch (err) {
-      toast.error(`Erro de rede: ${err instanceof Error ? err.message : String(err)}`);
-    } finally {
-      setRegenLoading(null);
-    }
+  const regenerate = (id: string) => {
+    startGeneration(id, "regen");
   };
 
   const handleScrape = async () => {
@@ -374,6 +423,53 @@ export default function ProductsPage() {
             <Button size="sm" variant="outline" className="border-white/10 text-white/60" onClick={() => setPage((p) => p + 1)} disabled={page * 12 >= total}>
               <ChevronRight className="w-4 h-4" />
             </Button>
+          </div>
+        </div>
+      )}
+
+      {/* Character picker modal */}
+      {charPickerProductId && (
+        <div className="fixed inset-0 bg-black/70 backdrop-blur-sm z-50 flex items-center justify-center p-4" onClick={() => setCharPickerProductId(null)}>
+          <div className="bg-[#0d1117] border border-white/10 rounded-2xl p-6 max-w-md w-full space-y-4" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between">
+              <h3 className="text-lg font-bold text-white flex items-center gap-2">
+                <UserCircle className="w-5 h-5 text-violet-400" />
+                Escolha o Personagem
+              </h3>
+              <button onClick={() => setCharPickerProductId(null)} className="text-white/40 hover:text-white">
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+            <p className="text-sm text-white/40">
+              Selecione qual avatar será usado neste vídeo. O personagem substitui a pessoa do vídeo de referência.
+            </p>
+            {characters.length === 0 ? (
+              <div className="text-center py-6">
+                <UserCircle className="w-8 h-8 text-white/20 mx-auto mb-2" />
+                <p className="text-sm text-white/40">Nenhum personagem criado</p>
+                <Link href="/ugc/personagens">
+                  <Button size="sm" className="mt-3 bg-violet-600 hover:bg-violet-500 text-white">
+                    Criar Personagem
+                  </Button>
+                </Link>
+              </div>
+            ) : (
+              <div className="grid grid-cols-3 gap-3 max-h-80 overflow-y-auto">
+                {characters.map((char) => (
+                  <button
+                    key={char.id}
+                    onClick={() => generateWithCharacter(char.id)}
+                    className="group rounded-xl overflow-hidden border-2 border-transparent hover:border-violet-500 transition-all"
+                  >
+                    <div className="aspect-[3/4] relative">
+                      <img src={char.imageUrl} alt={char.name} className="w-full h-full object-cover" />
+                      <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-transparent to-transparent" />
+                      <p className="absolute bottom-1.5 left-2 right-2 text-xs font-semibold text-white truncate">{char.name}</p>
+                    </div>
+                  </button>
+                ))}
+              </div>
+            )}
           </div>
         </div>
       )}

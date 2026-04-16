@@ -27,15 +27,62 @@ const WHISPER_HALLUCINATIONS = new Set([
   "subtitles by the amara.org community",
 ]);
 
-function isRealSpeech(text: string): boolean {
+// Segmentos do Whisper verbose_json — usados para detectar música vs fala real.
+interface WhisperSegment {
+  start: number;
+  end: number;
+  text: string;
+  no_speech_prob?: number;
+  avg_logprob?: number;
+}
+
+// Analisa os segmentos do Whisper pra detectar se o áudio é música (não fala).
+// Música tipicamente tem: segmentos longos ininterruptos, no_speech_prob alto,
+// e/ou avg_logprob muito baixo (Whisper tem baixa confiança na transcrição).
+function isMusicNotSpeech(segments: WhisperSegment[]): boolean {
+  if (!segments || segments.length === 0) return false;
+
+  // Se a maioria dos segmentos tem no_speech_prob alto, é música/silêncio
+  const highNoSpeech = segments.filter((s) => (s.no_speech_prob ?? 0) > 0.5);
+  if (highNoSpeech.length > segments.length * 0.6) {
+    console.log(`[reference-video] music detected: ${highNoSpeech.length}/${segments.length} segments have no_speech_prob > 0.5`);
+    return true;
+  }
+
+  // Se a maioria dos segmentos tem avg_logprob muito baixo, Whisper não
+  // tem confiança — típico de música onde ele "inventa" a transcrição
+  const lowConfidence = segments.filter((s) => (s.avg_logprob ?? 0) < -1.0);
+  if (lowConfidence.length > segments.length * 0.6) {
+    console.log(`[reference-video] music detected: ${lowConfidence.length}/${segments.length} segments have avg_logprob < -1.0`);
+    return true;
+  }
+
+  // Poucos segmentos longos cobrindo todo o áudio = provável música contínua
+  // (fala real tem pausas naturais → mais segmentos curtos)
+  if (segments.length <= 2) {
+    const totalDuration = segments.reduce((sum, s) => sum + (s.end - s.start), 0);
+    if (totalDuration > 10) {
+      const avgLen = totalDuration / segments.length;
+      if (avgLen > 8) {
+        console.log(`[reference-video] music detected: only ${segments.length} segments, avg ${avgLen.toFixed(1)}s each (likely continuous music)`);
+        return true;
+      }
+    }
+  }
+
+  return false;
+}
+
+function isRealSpeech(text: string, segments?: WhisperSegment[]): boolean {
   const trimmed = text.trim().toLowerCase();
   if (!trimmed) return false;
   if (WHISPER_HALLUCINATIONS.has(trimmed)) return false;
   const clean = trimmed.replace(/[^\p{L}\p{N}]/gu, "");
-  // Precisa de pelo menos 10 chars alfanuméricos — antes era 5, mas Whisper
-  // frequentemente inventa frases curtas tipo "Obrigado." em vídeos só com
-  // música. 10 chars filtra quase todas as alucinações sem perder fala real.
-  return clean.length >= 10;
+  // Precisa de pelo menos 10 chars alfanuméricos
+  if (clean.length < 10) return false;
+  // Se temos segmentos do Whisper, usa análise avançada pra filtrar música
+  if (segments && isMusicNotSpeech(segments)) return false;
+  return true;
 }
 
 const TIKWM_API = "https://www.tikwm.com/api/";
@@ -78,10 +125,17 @@ export async function fetchTikwmDetail(tiktokUrl: string): Promise<TikwmDetail |
   }
 }
 
+export interface TranscriptSegment {
+  start: number;
+  end: number;
+  text: string;
+}
+
 export interface TranscriptResult {
   text: string;
   hasSpeech: boolean;
   language?: string;
+  segments?: TranscriptSegment[];
 }
 
 // Baixa o mp4 e manda pro Whisper. Retorna texto + flag indicando se tem
@@ -124,12 +178,27 @@ export async function transcribeVideoAudio(playUrl: string): Promise<TranscriptR
       return null;
     }
 
-    const data = (await res.json()) as { text?: string; language?: string };
+    const data = (await res.json()) as {
+      text?: string;
+      language?: string;
+      segments?: WhisperSegment[];
+    };
     const text = (data.text ?? "").trim();
+    const segments = data.segments ?? [];
+    const hasSpeech = isRealSpeech(text, segments);
+    if (!hasSpeech && text.length > 0) {
+      console.log(`[reference-video] audio classified as music/non-speech. Transcript: "${text.slice(0, 100)}". Segments: ${segments.length}, no_speech_probs: [${segments.map((s) => (s.no_speech_prob ?? 0).toFixed(2)).join(", ")}]`);
+    }
+    // Exporta segments com timestamps para split inteligente por take
+    const cleanSegments: TranscriptSegment[] = hasSpeech
+      ? segments.map((s) => ({ start: s.start, end: s.end, text: s.text.trim() })).filter((s) => s.text.length > 0)
+      : [];
+
     return {
-      text,
-      hasSpeech: isRealSpeech(text),
+      text: hasSpeech ? text : "", // Limpa o texto se for música — avatar fica calado
+      hasSpeech,
       language: data.language,
+      segments: cleanSegments,
     };
   } catch (err) {
     console.error("[reference-video] transcribe error:", err);
@@ -143,19 +212,26 @@ export async function ensureReferenceTranscript(detectedVideoId: string): Promis
   transcript: string;
   hasSpeech: boolean;
   playUrl: string | null;
+  segments?: TranscriptSegment[];
 } | null> {
   const dv = await prisma.ugcDetectedVideo.findUnique({
     where: { id: detectedVideoId },
   });
   if (!dv) return null;
 
-  // Já temos transcript cacheado? Reusa.
+  // Já temos transcript cacheado? Se for texto vazio (música/silêncio), reusa.
+  // Se for texto com fala, RE-TRANSCREVE para obter os segments com timestamps
+  // — precisamos dos timestamps do Whisper para split preciso por take.
   if (dv.transcript !== null && dv.transcript !== undefined) {
-    return {
-      transcript: dv.transcript,
-      hasSpeech: isRealSpeech(dv.transcript),
-      playUrl: null,
-    };
+    if (!isRealSpeech(dv.transcript)) {
+      // Música/silêncio — não precisa de segments
+      return {
+        transcript: dv.transcript,
+        hasSpeech: false,
+        playUrl: null,
+      };
+    }
+    // Tem fala → re-transcreve para pegar segments com timestamps
   }
 
   // Precisa da URL pública do TikTok pra pegar o mp4 via tikwm.
@@ -177,17 +253,79 @@ export async function ensureReferenceTranscript(detectedVideoId: string): Promis
     transcript: result.text,
     hasSpeech: result.hasSpeech,
     playUrl: detail.playUrl,
+    segments: result.segments,
   };
 }
 
+// ── Scene detection via ffmpeg ──────────────────────────────────────────
+// Detecta mudanças de cena (cortes, trocas de roupa, mudança de cor) usando
+// o filtro `select='gt(scene,X)'` do ffmpeg. Retorna os timestamps dos
+// pontos de corte. Mais preciso que intervalos iguais.
+
+async function detectSceneChanges(videoPath: string, durationSeconds: number): Promise<number[]> {
+  // ffmpeg scene detection: score 0-1, threshold 0.3 captura cortes claros
+  // Testamos com threshold progressivamente mais baixo se não encontrar cortes
+  const thresholds = [0.35, 0.25, 0.15];
+
+  for (const threshold of thresholds) {
+    try {
+      const sceneTimestamps: number[] = [];
+      const logPath = join(videoPath + `_scene_${threshold}.log`);
+
+      await new Promise<void>((resolve, reject) => {
+        ffmpeg(videoPath)
+          .outputOptions([
+            "-vf", `select='gt(scene,${threshold})',showinfo`,
+            "-vsync", "vfr",
+            "-f", "null",
+          ])
+          .output("/dev/null")
+          .on("stderr", (line: string) => {
+            // showinfo outputs lines like: [Parsed_showinfo...] n:1 pts:12345 pts_time:3.456
+            const match = line.match(/pts_time:([\d.]+)/);
+            if (match) {
+              const ts = parseFloat(match[1]);
+              if (ts > 0.5 && ts < durationSeconds - 0.5) {
+                sceneTimestamps.push(ts);
+              }
+            }
+          })
+          .on("end", () => resolve())
+          .on("error", (err: Error) => reject(err))
+          .run();
+      });
+
+      console.log(`[reference-video] scene detection (threshold=${threshold}): ${sceneTimestamps.length} cuts at [${sceneTimestamps.map(t => t.toFixed(1) + "s").join(", ")}]`);
+
+      // Filtra timestamps muito próximos (<1.5s entre si) — mantém apenas o primeiro
+      const filtered: number[] = [];
+      for (const ts of sceneTimestamps) {
+        if (filtered.length === 0 || ts - filtered[filtered.length - 1] > 1.5) {
+          filtered.push(ts);
+        }
+      }
+
+      if (filtered.length >= 1) {
+        console.log(`[reference-video] scene changes after filtering: ${filtered.length} cuts`);
+        return filtered;
+      }
+      // Se não encontrou cortes com este threshold, tenta o próximo
+    } catch (err) {
+      console.error(`[reference-video] scene detection failed (threshold=${threshold}):`, err);
+    }
+  }
+
+  return []; // Nenhum corte detectado
+}
+
 // ── Frame extraction ────────────────────────────────────────────────────
-// Extrai frames do vídeo de referência em intervalos iguais usando
-// fluent-ffmpeg (mesma lib que o assembler, funciona no Vercel).
-// Para um vídeo de 16s com 3 takes, extrai frames em ~2.7s, ~8s, ~13.3s
-// — captura naturalmente cada segmento de roupa/cor diferente.
+// Extrai frames do vídeo de referência nos pontos de mudança de cena
+// usando ffmpeg scene detection. Cada frame captura um momento visual
+// distinto (roupa diferente, cenário diferente, corte diferente).
 
 export interface ExtractedFrames {
   frames: Array<{ url: string; timestamp: number }>;
+  detectedSceneCount: number; // Número de cenas detectadas pelo ffmpeg
 }
 
 export async function extractKeyFrames(
@@ -220,13 +358,47 @@ export async function extractKeyFrames(
       return null;
     }
 
-    // Divide o vídeo em partes iguais e pega o frame no meio de cada parte.
-    // Para 3 takes de um vídeo de 16s: frames em ~2.7s, ~8s, ~13.3s
-    const timestamps: number[] = [];
-    for (let i = 0; i < targetCount; i++) {
-      timestamps.push(((i + 0.5) / targetCount) * duration);
+    // Detecta pontos de corte/mudança de cena com ffmpeg
+    const sceneChanges = await detectSceneChanges(videoPath, duration);
+    // Número de cenas = cortes + 1 (a primeira cena começa no início)
+    const detectedSceneCount = sceneChanges.length + 1;
+    console.log(`[reference-video] detected ${detectedSceneCount} scenes (${sceneChanges.length} cuts)`);
+
+    // Usa o maior entre targetCount (do pipeline) e detectedSceneCount (do ffmpeg)
+    const actualCount = Math.max(targetCount, detectedSceneCount);
+
+    // Calcula timestamps:
+    // 1) Se temos cortes reais E targetCount <= cenas detectadas:
+    //    → frame no MEIO de cada segmento entre cortes (captura cada roupa/cena)
+    // 2) Se targetCount > cenas (ex: speech video 50s com 1 cena):
+    //    → intervalos iguais ao longo do vídeo (frames espaçados pro speech)
+    // 3) Se sem cortes:
+    //    → intervalos iguais
+    let timestamps: number[];
+    if (sceneChanges.length > 0 && detectedSceneCount >= actualCount) {
+      // Pontos de corte reais → frame no meio de cada segmento
+      const boundaries = [0, ...sceneChanges, duration];
+      timestamps = [];
+      for (let i = 0; i < boundaries.length - 1; i++) {
+        timestamps.push((boundaries[i] + boundaries[i + 1]) / 2);
+      }
+    } else if (sceneChanges.length > 0 && actualCount > detectedSceneCount) {
+      // Mais takes necessários que cenas detectadas (ex: speech video).
+      // Usa cortes como base e adiciona frames extras em intervalos iguais.
+      // Para speech: frames espaçados uniformemente cobrem todo o vídeo.
+      timestamps = [];
+      for (let i = 0; i < actualCount; i++) {
+        timestamps.push(((i + 0.5) / actualCount) * duration);
+      }
+    } else {
+      // Sem cortes → intervalos iguais
+      timestamps = [];
+      for (let i = 0; i < actualCount; i++) {
+        timestamps.push(((i + 0.5) / actualCount) * duration);
+      }
     }
-    console.log(`[reference-video] extracting frames at: ${timestamps.map((t) => t.toFixed(1) + "s").join(", ")}`);
+
+    console.log(`[reference-video] extracting ${timestamps.length} frames at: ${timestamps.map((t) => t.toFixed(1) + "s").join(", ")}`);
 
     const frames: Array<{ url: string; timestamp: number }> = [];
     for (let i = 0; i < timestamps.length; i++) {
@@ -259,7 +431,7 @@ export async function extractKeyFrames(
     }
 
     console.log(`[reference-video] all ${frames.length} frames extracted and uploaded`);
-    return { frames };
+    return { frames, detectedSceneCount };
   } catch (err) {
     console.error("[reference-video] frame extraction failed:", err);
     return null;
@@ -274,15 +446,18 @@ export async function extractKeyFrames(
 // acontece ao longo do tempo. Isso resolve casos tipo "o vídeo mostra o
 // vestido em 3 cores diferentes" — single-frame analysis só vê uma cor.
 
+export interface SceneBreakdown {
+  timeRange: string;
+  action: string;
+  visuals: string;
+}
+
 export interface ReferenceVideoAnalysis {
   hasNarration: boolean;
   narrationStyle: "direct_speech" | "voiceover" | "none";
   narrationSummary: string;
-  takeBreakdown: {
-    take1: { timeRange: string; action: string; visuals: string };
-    take2: { timeRange: string; action: string; visuals: string };
-    take3: { timeRange: string; action: string; visuals: string };
-  };
+  sceneCount: number;
+  scenes: SceneBreakdown[];
   keyVisualSequence: string;
   productShownAs: string;
   hasMultipleVariants: boolean;
@@ -314,23 +489,23 @@ export async function analyzeReferenceVideoWithGemini(
 Preste MUITA atenção:
 - Se há narração falada humana (não música, não efeito sonoro, não música com letra).
 - Se o vídeo mostra MÚLTIPLAS variantes do produto (cores, tamanhos, versões diferentes).
-- A sequência temporal: o que aparece no início, meio e fim.
-- Qual é a AÇÃO específica em cada terço do vídeo.
+- QUANTAS CENAS DISTINTAS tem — cada troca de roupa, cor do produto, ou corte de cena conta como uma cena separada.
+- A sequência temporal COMPLETA: o que aparece em CADA cena.
 
 Retorne APENAS um JSON com esta estrutura:
 {
   "hasNarration": true|false,
   "narrationStyle": "direct_speech" | "voiceover" | "none",
   "narrationSummary": "resumo do que a pessoa/narrador fala, ou string vazia se none",
-  "takeBreakdown": {
-    "take1": { "timeRange": "0-Xs", "action": "ação EXATA que a pessoa faz (ex: segura o vestido rosa na frente do corpo)", "visuals": "descrição DETALHADA do visual: cor EXATA da roupa/produto, posição da pessoa, objetos visíveis, fundo (ex: 'mulher segura vestido ROSA em cabide, fundo branco, espelho à esquerda')" },
-    "take2": { "timeRange": "Xs-Ys", "action": "ação EXATA do meio do vídeo", "visuals": "visual DETALHADO incluindo cor/variante EXATA do produto neste momento (ex: 'mulher veste vestido AZUL, gira mostrando o caimento, mesma sala')" },
-    "take3": { "timeRange": "Ys-fim", "action": "ação EXATA do final", "visuals": "visual DETALHADO incluindo cor/variante EXATA do produto neste momento (ex: 'mulher veste vestido PRETO, posa no espelho, sorri')" }
-  },
+  "sceneCount": N,
+  "scenes": [
+    { "timeRange": "0-Xs", "action": "ação EXATA (ex: segura o vestido rosa na frente do corpo)", "visuals": "visual DETALHADO: cor EXATA da roupa/produto, posição da pessoa, objetos, fundo (ex: 'mulher segura vestido ROSA em cabide, fundo branco, espelho à esquerda')" },
+    { "timeRange": "Xs-Ys", "action": "ação EXATA da segunda cena", "visuals": "visual DETALHADO com cor/variante EXATA (ex: 'mulher veste vestido AZUL, gira mostrando o caimento')" }
+  ],
   "keyVisualSequence": "descrição compacta da progressão visual do vídeo inteiro, citando CADA cor/variante na ordem exata",
   "productShownAs": "como o produto é mostrado (segurando, vestindo, demonstrando, etc)",
   "hasMultipleVariants": true|false,
-  "variantDescription": "se hasMultipleVariants, descreva quais variantes NA ORDEM que aparecem, mapeando cada uma ao take (ex: 'take1: vestido rosa, take2: vestido azul, take3: vestido preto'). Se não, string vazia."
+  "variantDescription": "se hasMultipleVariants, descreva quais variantes NA ORDEM que aparecem (ex: 'cena 1: vestido rosa, cena 2: vestido azul, cena 3: vestido preto, cena 4: vestido branco'). Se não, string vazia."
 }
 
 REGRAS CRÍTICAS:
@@ -338,9 +513,10 @@ REGRAS CRÍTICAS:
 - "voiceover" = narrador em off, pessoa não fala com a câmera.
 - "none" = só música/ambient, ninguém fala.
 - Se o áudio é SÓ música (mesmo com letra cantada) e ninguém narra o produto → "none".
-- Se o vídeo mostra o produto em várias cores/variantes, SEMPRE marque hasMultipleVariants=true e descreva as variantes COM O TAKE onde cada uma aparece.
-- CADA "visuals" de cada take DEVE descrever a COR ou VARIANTE EXATA do produto visível NAQUELE MOMENTO do vídeo. Nunca use descrições genéricas como "o produto" — diga "vestido ROSA", "tênis BRANCO", etc.
-- Se o produto muda de cor/variante entre os takes, CADA take deve ter a cor correta daquele momento.
+- "sceneCount" = número TOTAL de cenas distintas. Se o vídeo mostra 4 roupas diferentes, sceneCount=4. Se mostra 2 ângulos do mesmo look, sceneCount=2. CONTE EXATAMENTE quantas cenas tem.
+- O array "scenes" DEVE ter EXATAMENTE sceneCount elementos — um por cena. NÃO agrupe cenas. Se tem 4 trocas de roupa, retorne 4 cenas, NÃO 3.
+- CADA "visuals" de cada cena DEVE descrever a COR ou VARIANTE EXATA do produto visível NAQUELE MOMENTO do vídeo. Nunca use descrições genéricas — diga "vestido ROSA", "tênis BRANCO", etc.
+- Se o vídeo mostra o produto em várias cores/variantes, SEMPRE marque hasMultipleVariants=true.
 - Retorne APENAS o JSON, sem markdown, sem explicação.`;
 
     const model = "gemini-2.5-flash";
@@ -377,7 +553,23 @@ REGRAS CRÍTICAS:
 
     try {
       const match = text.match(/\{[\s\S]*\}/);
-      return JSON.parse(match ? match[0] : text) as ReferenceVideoAnalysis;
+      const parsed = JSON.parse(match ? match[0] : text) as ReferenceVideoAnalysis & { takeBreakdown?: Record<string, SceneBreakdown> };
+
+      // Backward compat: se Gemini retornou o formato antigo takeBreakdown, converte pra scenes
+      if (!parsed.scenes && parsed.takeBreakdown) {
+        parsed.scenes = Object.values(parsed.takeBreakdown);
+        parsed.sceneCount = parsed.scenes.length;
+      }
+      // Garante que sceneCount bate com scenes.length
+      if (parsed.scenes) {
+        parsed.sceneCount = parsed.scenes.length;
+      } else {
+        parsed.scenes = [];
+        parsed.sceneCount = 0;
+      }
+
+      console.log(`[reference-video] Gemini analysis: ${parsed.sceneCount} scenes, narration=${parsed.narrationStyle}`);
+      return parsed;
     } catch (err) {
       console.error("[reference-video] failed to parse gemini JSON:", err, text.slice(0, 300));
       return null;

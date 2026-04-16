@@ -10,6 +10,7 @@ import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Card, CardContent } from "@/components/ui/card";
+import { forceDownload } from "@/lib/utils";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -684,11 +685,10 @@ export default function StudioPage() {
                 )}
 
                 <div className="flex gap-2">
-                  <a href={img.url} download={`nano-${idx + 1}.png`} target="_blank" rel="noopener noreferrer" className="flex-1">
-                    <Button variant="outline" size="sm" className="w-full border-white/10 text-white/60 hover:bg-white/5">
-                      <Download className="w-3.5 h-3.5 mr-1.5" />Baixar
-                    </Button>
-                  </a>
+                  <Button variant="outline" size="sm" className="flex-1 border-white/10 text-white/60 hover:bg-white/5"
+                    onClick={() => void forceDownload(img.url, `nano-${idx + 1}.png`).catch(() => toast.error("Erro ao baixar imagem"))}>
+                    <Download className="w-3.5 h-3.5 mr-1.5" />Baixar
+                  </Button>
                   <Button variant="outline" size="sm" disabled={img.regenerating}
                     onClick={() => setImages(prev => prev.map(i => i.id === img.id ? { ...i, showRegenForm: !i.showRegenForm } : i))}
                     className="flex-1 border-white/10 text-white/60 hover:bg-white/5">

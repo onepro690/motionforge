@@ -7,6 +7,7 @@ import {
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
+import { DownloadButton } from "@/components/download-button";
 import { toast } from "sonner";
 
 type VideoStatus =
@@ -155,11 +156,14 @@ function VideoCard({ video, onRefresh, onDeleted }: { video: GeneratedVideo; onR
             </Button>
           </Link>
           {video.finalVideoUrl && (
-            <a href={video.finalVideoUrl} target="_blank" rel="noopener noreferrer" download>
-              <Button size="sm" variant="outline" className="border-white/10 text-white/60 hover:text-white text-xs h-8 px-2">
-                <Download className="w-3 h-3" />
-              </Button>
-            </a>
+            <DownloadButton
+              url={video.finalVideoUrl}
+              filename={`ugc-${video.id.slice(-8)}.mp4`}
+              size="sm"
+              variant="outline"
+              className="border-white/10 text-white/60 hover:text-white text-xs h-8 px-2"
+              iconOnly
+            />
           )}
           {isInProgress && (
             <Button size="sm" variant="outline" className="border-white/10 text-white/60 hover:text-white text-xs h-8 px-2" onClick={onRefresh}>

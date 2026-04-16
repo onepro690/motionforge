@@ -44,6 +44,33 @@ export function getStatusLabel(status: string): string {
   return labels[status] ?? status;
 }
 
+// Download forçado via fetch+blob — funciona cross-origin (Vercel Blob, GCS, etc).
+// <a download> NÃO funciona cross-origin — abre numa nova aba em vez de baixar.
+export async function forceDownload(url: string, filename: string): Promise<void> {
+  const proxyUrl = `/api/proxy-video?url=${encodeURIComponent(url)}`;
+  const res = await fetch(proxyUrl);
+  if (!res.ok) {
+    // Fallback: tenta fetch direto (funciona se same-origin ou CORS ok)
+    const directRes = await fetch(url);
+    if (!directRes.ok) throw new Error("Falha ao baixar arquivo");
+    const blob = await directRes.blob();
+    const blobUrl = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = blobUrl;
+    a.download = filename;
+    a.click();
+    URL.revokeObjectURL(blobUrl);
+    return;
+  }
+  const blob = await res.blob();
+  const blobUrl = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = blobUrl;
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(blobUrl);
+}
+
 export function getStatusColor(status: string): string {
   const colors: Record<string, string> = {
     QUEUED: "text-yellow-400 bg-yellow-400/10",

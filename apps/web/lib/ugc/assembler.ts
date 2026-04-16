@@ -85,6 +85,57 @@ async function getVideoDuration(videoPath: string): Promise<number> {
   });
 }
 
+// Trim trailing silence from a video.
+// Uses ffmpeg silencedetect to find where speech ends, then trims.
+// Keeps a small buffer (0.3s) after last speech for natural ending.
+async function trimTrailingSilence(inputPath: string, outputPath: string): Promise<boolean> {
+  try {
+    // Detect silence periods using ffmpeg
+    const silenceInfo = await new Promise<string>((resolve) => {
+      let stderr = "";
+      ffmpeg(inputPath)
+        .audioFilters("silencedetect=noise=-30dB:d=0.5")
+        .format("null")
+        .output("/dev/null")
+        .on("stderr", (line: string) => { stderr += line + "\n"; })
+        .on("end", () => resolve(stderr))
+        .on("error", () => resolve(stderr))
+        .run();
+    });
+
+    // Parse silence_end timestamps — find the last one
+    const silenceEndMatches = [...silenceInfo.matchAll(/silence_end:\s*([\d.]+)/g)];
+    const duration = await new Promise<number>((resolve) => {
+      ffmpeg.ffprobe(inputPath, (_err, data) => resolve(data?.format?.duration ?? 0));
+    });
+
+    if (silenceEndMatches.length === 0 || duration <= 0) {
+      // No silence detected or can't get duration — use original
+      return false;
+    }
+
+    const lastSpeechEnd = parseFloat(silenceEndMatches[silenceEndMatches.length - 1][1]);
+    const trimPoint = Math.min(lastSpeechEnd + 0.3, duration); // 0.3s buffer
+
+    // Only trim if there's significant trailing silence (>0.8s)
+    if (duration - trimPoint < 0.8) return false;
+
+    await new Promise<void>((resolve, reject) => {
+      ffmpeg(inputPath)
+        .setDuration(trimPoint)
+        .outputOptions(["-c:v", "libx264", "-c:a", "aac", "-movflags", "+faststart"])
+        .output(outputPath)
+        .on("end", () => resolve())
+        .on("error", (err: Error) => reject(err))
+        .run();
+    });
+    return true;
+  } catch (err) {
+    console.error("[assembler] trimTrailingSilence error:", err);
+    return false;
+  }
+}
+
 // Main assembly function
 export async function assembleTakes(
   takes: TakeInfo[],
@@ -105,7 +156,16 @@ export async function assembleTakes(
     for (let i = 0; i < takes.length; i++) {
       const takePath = join(tmpDir, `take-${i}.mp4`);
       await downloadFile(takes[i].url, takePath);
-      takePaths.push(takePath);
+
+      // Trim trailing silence from each take to avoid dead air between takes
+      const trimmedPath = join(tmpDir, `take-${i}-trimmed.mp4`);
+      const wasTrimmed = await trimTrailingSilence(takePath, trimmedPath);
+      if (wasTrimmed) {
+        await unlink(takePath).catch(() => {});
+        takePaths.push(trimmedPath);
+      } else {
+        takePaths.push(takePath);
+      }
     }
 
     // Concatenate takes

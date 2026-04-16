@@ -30,6 +30,7 @@ model User {
   ugcSettings    UgcSystemSettings?
   ugcTemplates   UgcPromptTemplate[]
   ugcFeedback    UgcFeedbackPattern[]
+  ugcCharacters  UgcCharacter[]
   liveSessions   LiveSession[]
 
   @@map("users")
@@ -324,6 +325,7 @@ model UgcGeneratedVideo {
   id            String         @id @default(cuid())
   userId        String
   productId     String
+  characterId   String?
   briefId       String?
   title         String?
   status        UgcVideoStatus @default(DRAFT_GENERATED)
@@ -354,6 +356,7 @@ model UgcGeneratedVideo {
 
   user           User               @relation(fields: [userId], references: [id], onDelete: Cascade)
   product        UgcTrendingProduct @relation(fields: [productId], references: [id], onDelete: Cascade)
+  character      UgcCharacter?      @relation(fields: [characterId], references: [id])
   takes          UgcGeneratedTake[]
   reviews        UgcVideoReview[]
   remakeRequests UgcRemakeRequest[]
@@ -366,19 +369,21 @@ model UgcGeneratedVideo {
 }
 
 model UgcGeneratedTake {
-  id              String    @id @default(cuid())
-  videoId         String
-  userId          String
-  takeIndex       Int
-  veoJobId        String?
-  veoPrompt       String?
-  script          String?
-  status          JobStatus @default(QUEUED)
-  videoUrl        String?
-  durationSeconds Float?
-  errorMessage    String?
-  createdAt       DateTime  @default(now())
-  updatedAt       DateTime  @updatedAt
+  id                String    @id @default(cuid())
+  videoId           String
+  userId            String
+  takeIndex         Int
+  veoJobId          String?
+  veoPrompt         String?
+  script            String?
+  status            JobStatus @default(QUEUED)
+  videoUrl          String?
+  durationSeconds   Float?
+  errorMessage      String?
+  referenceFrameUrl String?
+  editedImageUrl    String?
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
 
   video UgcGeneratedVideo @relation(fields: [videoId], references: [id], onDelete: Cascade)
 
@@ -549,6 +554,21 @@ model LiveSession {
   @@index([recordingStatus])
   @@index([scrapedAt])
   @@map("live_sessions")
+}
+
+model UgcCharacter {
+  id        String   @id @default(cuid())
+  userId    String
+  name      String
+  imageUrl  String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user   User                @relation(fields: [userId], references: [id], onDelete: Cascade)
+  videos UgcGeneratedVideo[]
+
+  @@index([userId])
+  @@map("ugc_characters")
 }
 
 // Pool global de creators TikTok descobertos (compartilhado entre users).
