@@ -5,7 +5,7 @@ import Link from "next/link";
 import {
   TrendingUp, ThumbsUp, ThumbsDown, Bookmark, Eye, Loader2,
   RefreshCw, Users, Video, ArrowUpRight, ChevronLeft, ChevronRight, Filter, Sparkles,
-  UserCircle, X
+  UserCircle, X, Plus, Link2
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
@@ -78,6 +78,12 @@ export default function ProductsPage() {
   const [actionLoading, setActionLoading] = useState<string | null>(null);
   const [regenLoading, setRegenLoading] = useState<string | null>(null);
   const [statusFilter, setStatusFilter] = useState<string>(searchParams.get("status") ?? "");
+
+  // Add video manually
+  const [showAddVideo, setShowAddVideo] = useState(false);
+  const [newVideoUrl, setNewVideoUrl] = useState("");
+  const [newProductName, setNewProductName] = useState("");
+  const [addingVideo, setAddingVideo] = useState(false);
 
   // Character picker modal
   const [characters, setCharacters] = useState<Character[]>([]);
@@ -204,6 +210,30 @@ export default function ProductsPage() {
     startGeneration(id, "regen");
   };
 
+  const handleAddVideo = async () => {
+    if (!newVideoUrl.trim() || !newProductName.trim()) return;
+    setAddingVideo(true);
+    try {
+      const res = await fetch("/api/ugc/products", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ videoUrl: newVideoUrl.trim(), productName: newProductName.trim() }),
+      });
+      if (res.ok) {
+        toast.success("Produto criado com vídeo de referência!");
+        setNewVideoUrl("");
+        setNewProductName("");
+        setShowAddVideo(false);
+        load();
+      } else {
+        const data = await res.json();
+        toast.error(data.error ?? "Erro ao adicionar");
+      }
+    } finally {
+      setAddingVideo(false);
+    }
+  };
+
   const handleScrape = async () => {
     setScraping(true);
     try {
@@ -240,17 +270,67 @@ export default function ProductsPage() {
             {total} produto{total !== 1 ? "s" : ""} detectado{total !== 1 ? "s" : ""}
           </p>
         </div>
-        <Button
-          variant="outline"
-          size="sm"
-          onClick={handleScrape}
-          disabled={scraping}
-          className="border-white/10 text-white/70 hover:text-white"
-        >
-          {scraping ? <Loader2 className="w-4 h-4 animate-spin mr-2" /> : <RefreshCw className="w-4 h-4 mr-2" />}
-          Atualizar Tendências
-        </Button>
+        <div className="flex gap-2">
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => setShowAddVideo(!showAddVideo)}
+            className="border-violet-500/20 text-violet-300 hover:text-violet-200 hover:bg-violet-500/10"
+          >
+            <Plus className="w-4 h-4 mr-2" />
+            Adicionar Vídeo
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={handleScrape}
+            disabled={scraping}
+            className="border-white/10 text-white/70 hover:text-white"
+          >
+            {scraping ? <Loader2 className="w-4 h-4 animate-spin mr-2" /> : <RefreshCw className="w-4 h-4 mr-2" />}
+            Atualizar Tendências
+          </Button>
+        </div>
       </div>
+
+      {/* Add video form */}
+      {showAddVideo && (
+        <Card className="bg-white/[0.03] border-violet-500/20 p-5">
+          <div className="flex items-center gap-2 mb-3">
+            <Link2 className="w-4 h-4 text-violet-400" />
+            <p className="text-sm font-semibold text-white">Adicionar vídeo manualmente</p>
+          </div>
+          <p className="text-xs text-white/40 mb-4">
+            Cole o link de um vídeo do TikTok e dê um nome ao produto. O vídeo será usado como referência para gerar UGC.
+          </p>
+          <div className="flex flex-col sm:flex-row gap-3">
+            <input
+              type="text"
+              value={newProductName}
+              onChange={(e) => setNewProductName(e.target.value)}
+              placeholder="Nome do produto"
+              className="sm:w-56 bg-white/[0.05] border border-white/10 rounded-lg px-3 py-2 text-sm text-white placeholder:text-white/20 focus:outline-none focus:border-violet-500/50"
+            />
+            <input
+              type="text"
+              value={newVideoUrl}
+              onChange={(e) => setNewVideoUrl(e.target.value)}
+              placeholder="https://www.tiktok.com/@usuario/video/1234567890"
+              className="flex-1 bg-white/[0.05] border border-white/10 rounded-lg px-3 py-2 text-sm text-white placeholder:text-white/20 focus:outline-none focus:border-violet-500/50"
+              onKeyDown={(e) => e.key === "Enter" && handleAddVideo()}
+            />
+            <Button
+              size="sm"
+              className="bg-violet-600 hover:bg-violet-500 text-white h-9 px-4"
+              onClick={handleAddVideo}
+              disabled={addingVideo || !newVideoUrl.trim() || !newProductName.trim()}
+            >
+              {addingVideo ? <Loader2 className="w-4 h-4 animate-spin" /> : <Plus className="w-4 h-4 mr-1" />}
+              Adicionar
+            </Button>
+          </div>
+        </Card>
+      )}
 
       {/* Filters */}
       <div className="flex gap-2 flex-wrap">
