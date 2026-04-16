@@ -45,11 +45,11 @@ export async function POST(request: NextRequest) {
   const remaining = dailyLimit - videosToday;
   const toGenerate = Math.min(count, remaining);
 
-  // Get approved products
+  // Get approved products (includes USED_FOR_GENERATION for re-generation)
   let approvedProducts = await prisma.ugcTrendingProduct.findMany({
     where: {
       userId,
-      status: "APPROVED",
+      status: { in: ["APPROVED", "USED_FOR_GENERATION"] },
       ...(productIds?.length ? { id: { in: productIds } } : {}),
     },
     orderBy: { score: "desc" },
