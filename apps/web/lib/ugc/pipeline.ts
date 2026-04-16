@@ -295,16 +295,29 @@ export async function runVideoPipeline(
     let perTakeImages: Record<string, { data: string; mimeType: string } | null> = {};
     let editedImage: { data: string; mimeType: string } | null = null;
 
-    const refPlayUrl = referenceTranscript?.playUrl
-      ?? (bestReference?.videoUrl ? (await fetchTikwmDetail(bestReference.videoUrl).catch((e) => { console.error("[pipeline] tikwm fallback failed:", e); return null; }))?.playUrl ?? null : null);
+    let refPlayUrl = referenceTranscript?.playUrl ?? null;
+    let refDuration: number | null = null;
+
+    if (!refPlayUrl && bestReference?.videoUrl) {
+      const tikwmDetail = await fetchTikwmDetail(bestReference.videoUrl).catch((e) => { console.error("[pipeline] tikwm fallback failed:", e); return null; });
+      if (tikwmDetail) {
+        refPlayUrl = tikwmDetail.playUrl;
+        refDuration = tikwmDetail.durationSeconds;
+      }
+    }
+
+    if (!refDuration && bestReference?.videoUrl && refPlayUrl) {
+      const tikwmDetail = await fetchTikwmDetail(bestReference.videoUrl).catch(() => null);
+      refDuration = tikwmDetail?.durationSeconds ?? null;
+    }
 
     if (!refPlayUrl) {
       await log(videoId, "extract_keyframes", "failed", `no play URL — bestRef.videoUrl=${bestReference?.videoUrl ?? "null"}, transcript.playUrl=${referenceTranscript?.playUrl ?? "null"}`);
     }
 
     if (refPlayUrl) {
-      await log(videoId, "extract_keyframes", "started");
-      const keyframes = await extractKeyFrames(refPlayUrl, videoId, takeCount).catch(async (e) => {
+      await log(videoId, "extract_keyframes", "started", `duration=${refDuration ?? "unknown"}`);
+      const keyframes = await extractKeyFrames(refPlayUrl, videoId, takeCount, refDuration).catch(async (e) => {
         const msg = e instanceof Error ? e.message : String(e);
         console.error("[pipeline] extractKeyFrames error:", msg);
         await log(videoId, "extract_keyframes", "failed", `ERROR: ${msg.slice(0, 500)}`);

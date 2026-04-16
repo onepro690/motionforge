@@ -19,7 +19,6 @@ const nextConfig: NextConfig = {
     "@anthropic-ai/sdk",
     "fluent-ffmpeg",
     "@ffmpeg-installer/ffmpeg",
-    "@ffprobe-installer/ffprobe",
     "google-auth-library",
     "tiktok-live-connector",
   ],

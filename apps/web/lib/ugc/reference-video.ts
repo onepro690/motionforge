@@ -5,7 +5,6 @@
 
 import { prisma } from "@motion/database";
 import ffmpegInstaller from "@ffmpeg-installer/ffmpeg";
-import ffprobeInstaller from "@ffprobe-installer/ffprobe";
 import ffmpeg from "fluent-ffmpeg";
 import { writeFile, readFile, unlink, mkdir } from "fs/promises";
 import { join } from "path";
@@ -13,7 +12,6 @@ import { randomBytes } from "crypto";
 import { put } from "@vercel/blob";
 
 ffmpeg.setFfmpegPath(ffmpegInstaller.path);
-ffmpeg.setFfprobePath(ffprobeInstaller.path);
 
 // Palavras/frases curtas que o Whisper inventa em vídeos silenciosos ou só
 // com música. Se a transcrição for exatamente uma dessas, tratamos como
@@ -192,25 +190,11 @@ export interface ExtractedFrames {
   frames: Array<{ url: string; timestamp: number }>;
 }
 
-async function getVideoDuration(videoPath: string): Promise<number> {
-  return new Promise((resolve, reject) => {
-    ffmpeg.ffprobe(videoPath, (err, data) => {
-      if (err) {
-        console.error("[reference-video] ffprobe error:", err.message);
-        reject(err);
-        return;
-      }
-      const dur = data?.format?.duration ?? 0;
-      console.log(`[reference-video] ffprobe duration=${dur}, format=${data?.format?.format_name}`);
-      resolve(dur);
-    });
-  });
-}
-
 export async function extractKeyFrames(
   playUrl: string,
   videoId: string,
-  targetCount: number = 3
+  targetCount: number = 3,
+  durationSeconds?: number | null
 ): Promise<ExtractedFrames | null> {
   const id = randomBytes(8).toString("hex");
   const tmpDir = join("/tmp", `ugc-frames-${id}`);
@@ -229,9 +213,12 @@ export async function extractKeyFrames(
     console.log(`[reference-video] downloaded ${buf.length} bytes`);
     await writeFile(videoPath, buf);
 
-    const duration = await getVideoDuration(videoPath);
-    console.log(`[reference-video] video duration: ${duration}s`);
-    if (duration <= 0) return null;
+    const duration = durationSeconds && durationSeconds > 0 ? durationSeconds : null;
+    console.log(`[reference-video] video duration: ${duration ?? "unknown"}s`);
+    if (!duration || duration <= 0) {
+      console.error("[reference-video] no duration available — cannot extract frames");
+      return null;
+    }
 
     // Divide o vídeo em partes iguais e pega o frame no meio de cada parte.
     // Para 3 takes de um vídeo de 16s: frames em ~2.7s, ~8s, ~13.3s
