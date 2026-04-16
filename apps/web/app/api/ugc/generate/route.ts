@@ -108,12 +108,10 @@ export async function POST(request: NextRequest) {
     });
 
     createdVideos.push(video.id);
-
-    // Mark product as being used
-    await prisma.ugcTrendingProduct.update({
-      where: { id: product.id },
-      data: { status: "USED_FOR_GENERATION" },
-    }).catch(() => {});
+    // Mantém o produto como APPROVED — a relação com o vídeo gerado já
+    // vive em UgcGeneratedVideo.productId. Antes a gente rebaixava pra
+    // USED_FOR_GENERATION, o que fazia o card sumir da aba "Aprovados" e
+    // voltar a mostrar os botões de aprovação.
   }
 
   return NextResponse.json({

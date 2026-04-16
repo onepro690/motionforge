@@ -14,10 +14,14 @@ export async function GET(request: NextRequest) {
   const limit = parseInt(searchParams.get("limit") ?? "20");
   const skip = (page - 1) * limit;
 
-  const where = {
-    userId,
-    ...(status ? { status: status as "DETECTED" | "APPROVED" | "REJECTED" } : {}),
-  };
+  // "APPROVED" inclui USED_FOR_GENERATION porque pra UI os dois são o mesmo
+  // estado — o produto já passou pela aprovação e não deve voltar pra fila.
+  const statusFilter = status === "APPROVED"
+    ? { status: { in: ["APPROVED", "USED_FOR_GENERATION"] as const } }
+    : status
+      ? { status: status as "DETECTED" | "APPROVED" | "REJECTED" | "SAVED_FOR_LATER" | "USED_FOR_GENERATION" }
+      : {};
+  const where = { userId, ...statusFilter };
 
   const [products, total] = await Promise.all([
     prisma.ugcTrendingProduct.findMany({

@@ -265,7 +265,7 @@ export default function ProductsPage() {
 
               {/* Actions */}
               <div className="flex gap-2 pt-1">
-                {product.status !== "APPROVED" && product.status !== "REJECTED" && (
+                {product.status !== "APPROVED" && product.status !== "REJECTED" && product.status !== "USED_FOR_GENERATION" && (
                   <>
                     <Button
                       size="sm"
@@ -297,7 +297,7 @@ export default function ProductsPage() {
                     </Button>
                   </>
                 )}
-                {product.status === "APPROVED" && (
+                {(product.status === "APPROVED" || product.status === "USED_FOR_GENERATION") && (
                   <Button
                     size="sm"
                     variant="outline"
