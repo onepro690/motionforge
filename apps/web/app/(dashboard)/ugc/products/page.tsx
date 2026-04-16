@@ -113,16 +113,15 @@ export default function ProductsPage() {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ productIds: [id], count: 1 }),
         });
-        const genJson = (await genRes.json().catch(() => ({}))) as {
-          videosCreated?: number;
-          error?: string;
-        };
+        const genText = await genRes.text();
+        let genJson: { videosCreated?: number; error?: string } = {};
+        try { genJson = JSON.parse(genText); } catch { genJson = { error: `Resposta inválida (${genRes.status}): ${genText.slice(0, 200)}` }; }
         if (genRes.ok && (genJson.videosCreated ?? 0) > 0) {
           toast.success("Vídeo em geração — aparecerá em Review quando pronto", {
             duration: 6000,
           });
         } else {
-          toast.error(genJson.error ?? "Falha ao disparar geração");
+          toast.error(genJson.error ?? `Erro ${genRes.status}: ${genText.slice(0, 200)}`);
         }
       } else {
         toast.success(status === "REJECTED" ? "Produto rejeitado" : "Status atualizado");
@@ -141,15 +140,16 @@ export default function ProductsPage() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ productIds: [id], count: 1 }),
       });
-      const json = (await res.json().catch(() => ({}))) as {
-        videosCreated?: number;
-        error?: string;
-      };
+      const text = await res.text();
+      let json: { videosCreated?: number; error?: string } = {};
+      try { json = JSON.parse(text); } catch { json = { error: `Resposta inválida (${res.status}): ${text.slice(0, 200)}` }; }
       if (res.ok && (json.videosCreated ?? 0) > 0) {
         toast.success("Novo vídeo em geração — aparecerá em Review quando pronto", { duration: 6000 });
       } else {
-        toast.error(json.error ?? "Falha ao disparar geração");
+        toast.error(json.error ?? `Erro ${res.status}: ${text.slice(0, 200)}`);
       }
+    } catch (err) {
+      toast.error(`Erro de rede: ${err instanceof Error ? err.message : String(err)}`);
     } finally {
       setRegenLoading(null);
     }
