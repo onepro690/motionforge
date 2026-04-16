@@ -33,18 +33,8 @@ export async function POST(request: NextRequest) {
 
     const { productIds, count } = parsed.data;
 
-    // Check daily limit
     const settings = await prisma.ugcSystemSettings.findUnique({ where: { userId } });
-    const dailyLimit = settings?.dailyVideoLimit ?? 999999;
-    const today = new Date(); today.setHours(0, 0, 0, 0);
-    const videosToday = await prisma.ugcGeneratedVideo.count({ where: { userId, createdAt: { gte: today } } });
-
-    if (videosToday >= dailyLimit) {
-      return NextResponse.json({ error: `Limite diário de ${dailyLimit} vídeos atingido (${videosToday} hoje)` }, { status: 429 });
-    }
-
-    const remaining = dailyLimit - videosToday;
-    const toGenerate = Math.min(count, remaining);
+    const toGenerate = count;
 
     // Get approved products (includes USED_FOR_GENERATION for re-generation)
     let approvedProducts = await prisma.ugcTrendingProduct.findMany({
@@ -68,7 +58,7 @@ export async function POST(request: NextRequest) {
       if (approvedProducts.length === 0) {
         return NextResponse.json({
           error: "Nenhum produto aprovado encontrado. Aprove produtos em alta primeiro.",
-          debug: { userId, productIds, videosToday, dailyLimit },
+          debug: { userId, productIds },
         }, { status: 400 });
       }
     }
