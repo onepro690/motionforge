@@ -188,8 +188,10 @@ async function extractLastFrame(videoUrl: string): Promise<{ data: string; mimeT
   const id = randomBytes(6).toString("hex");
   const tmpDir = join("/tmp", `lastframe-${id}`);
   await mkdir(tmpDir, { recursive: true });
+  // PNG (lossless, RGB) to avoid JPEG 4:2:0 chroma subsampling + quantization
+  // that would shift skin tones toward warm/yellow across chained takes.
   const videoPath = join(tmpDir, "video.mp4");
-  const framePath = join(tmpDir, "lastframe.jpg");
+  const framePath = join(tmpDir, "lastframe.png");
 
   try {
     // Download video — tenta com e sem token
@@ -238,7 +240,7 @@ async function extractLastFrame(videoUrl: string): Promise<{ data: string; mimeT
         .seekInput(seekTime)
         .frames(1)
         .output(framePath)
-        .outputOptions(["-q:v", "2"]) // high quality JPEG
+        .outputOptions(["-pix_fmt", "rgb24"]) // lossless PNG, full-range RGB
         .on("end", () => resolve())
         .on("error", (err: Error) => reject(err))
         .run();
@@ -248,7 +250,7 @@ async function extractLastFrame(videoUrl: string): Promise<{ data: string; mimeT
     console.log(`[extractLastFrame] Frame extracted: ${frameBuffer.byteLength} bytes at ${seekTime}s`);
     return {
       data: frameBuffer.toString("base64"),
-      mimeType: "image/jpeg",
+      mimeType: "image/png",
     };
   } catch (err) {
     console.error("[extractLastFrame] FAILED:", err);
@@ -268,7 +270,7 @@ async function extractFrameAtOffset(videoUrl: string, offsetFromEnd: number): Pr
   const tmpDir = join("/tmp", `frame-offset-${id}`);
   await mkdir(tmpDir, { recursive: true });
   const videoPath = join(tmpDir, "video.mp4");
-  const framePath = join(tmpDir, "frame.jpg");
+  const framePath = join(tmpDir, "frame.png");
 
   try {
     let res = await fetch(videoUrl, { signal: AbortSignal.timeout(30000) }).catch(() => null);
@@ -291,14 +293,14 @@ async function extractFrameAtOffset(videoUrl: string, offsetFromEnd: number): Pr
         .seekInput(seekTime)
         .frames(1)
         .output(framePath)
-        .outputOptions(["-q:v", "2"])
+        .outputOptions(["-pix_fmt", "rgb24"])
         .on("end", () => resolve())
         .on("error", (err: Error) => reject(err))
         .run();
     });
 
     const frameBuffer = await readFile(framePath);
-    return { data: frameBuffer.toString("base64"), mimeType: "image/jpeg" };
+    return { data: frameBuffer.toString("base64"), mimeType: "image/png" };
   } catch {
     return null;
   } finally {
@@ -317,7 +319,7 @@ async function extractLastFrameFromBuffer(videoBuffer: Buffer): Promise<{ data: 
   const tmpDir = join("/tmp", `lastframe-buf-${id}`);
   await mkdir(tmpDir, { recursive: true });
   const videoPath = join(tmpDir, "video.mp4");
-  const framePath = join(tmpDir, "lastframe.jpg");
+  const framePath = join(tmpDir, "lastframe.png");
 
   try {
     await writeFile(videoPath, videoBuffer);
@@ -336,7 +338,7 @@ async function extractLastFrameFromBuffer(videoBuffer: Buffer): Promise<{ data: 
         .seekInput(seekTime)
         .frames(1)
         .output(framePath)
-        .outputOptions(["-q:v", "2"])
+        .outputOptions(["-pix_fmt", "rgb24"])
         .on("end", () => resolve())
         .on("error", (err: Error) => reject(err))
         .run();
@@ -344,7 +346,7 @@ async function extractLastFrameFromBuffer(videoBuffer: Buffer): Promise<{ data: 
 
     const frameBuffer = await readFile(framePath);
     console.log(`[extractLastFrameFromBuffer] Frame extracted: ${frameBuffer.byteLength} bytes`);
-    return { data: frameBuffer.toString("base64"), mimeType: "image/jpeg" };
+    return { data: frameBuffer.toString("base64"), mimeType: "image/png" };
   } catch (err) {
     console.error("[extractLastFrameFromBuffer] FAILED:", err);
     return null;
@@ -359,9 +361,10 @@ async function extractLastFrameFromBuffer(videoBuffer: Buffer): Promise<{ data: 
 
 async function persistLastFrame(frame: { data: string; mimeType: string }, takeId: string): Promise<string | null> {
   try {
-    const blob = await put(`ugc-lastframe-${takeId}.jpg`, Buffer.from(frame.data, "base64"), {
+    const ext = frame.mimeType === "image/png" ? "png" : "jpg";
+    const blob = await put(`ugc-lastframe-${takeId}.${ext}`, Buffer.from(frame.data, "base64"), {
       access: "public",
-      contentType: "image/jpeg",
+      contentType: frame.mimeType,
       addRandomSuffix: false,
     });
     console.log(`[persistLastFrame] Saved: ${blob.url}`);

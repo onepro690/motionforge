@@ -323,6 +323,11 @@ export async function generateVeoPrompts(
   // Scene lock: fundo/câmera/enquadramento/composição bloqueados.
   const sceneLock = `SCENE LOCK: background, environment, camera angle, camera distance, lens feel, lighting direction and intensity, shadows, color grading, composition, and depth of field are FIXED by the input image. Do NOT change any of these. No new rooms, no new walls, no new furniture, no new props. If the input image shows a plain backdrop, keep it plain. If it shows a specific location, stay in that location.`;
 
+  // Color lock: anti-drift entre takes encadeadas. Veo tende a adicionar
+  // warm/yellow/sepia a cada geração quando alimentado com seu próprio frame,
+  // acumulando ao longo da cadeia. Essa clausula trava white balance no input.
+  const colorLock = `COLOR LOCK: preserve the EXACT color grading, white balance, saturation, contrast, exposure, sharpness, and skin tone of the input image with ZERO drift. Do NOT add warm tones, do NOT add yellow tint, do NOT add sepia, do NOT add amber, do NOT add orange cast, do NOT add a "cinematic" or "film" look, do NOT add teal-and-orange, do NOT boost saturation, do NOT boost contrast, do NOT sharpen, do NOT soften, do NOT shift white balance cooler or warmer. Skin tone must stay identical in hue and lightness to the input image — do NOT tan, do NOT redden, do NOT yellow. The output must look like it was shot by the exact same camera with the exact same color profile as the input image. Neutral whites in the input image must remain neutral whites in the output (same RGB balance).`;
+
   // Identity lock (já existia, reforçado).
   const identityLock = `IDENTITY LOCK: the person's face and body must match the input image PIXEL-IDENTICAL — same face shape, same facial features, same skin tone, same hair color/style/length, same eye color, same ethnicity, same body proportions, same age. Do NOT morph, do NOT drift, do NOT reinterpret. The identity is fixed by the input image and must stay 100% identical from the first frame to the last frame of this take and across every other take.`;
 
@@ -388,7 +393,7 @@ export async function generateVeoPrompts(
         speechBlock = `${reenactmentHeader} Vertical 9:16 UGC video. The person in the input image speaks DIRECTLY TO CAMERA with natural lip-sync in BRAZILIAN PORTUGUESE (pt-BR). They say LITERALLY these ${wordCount} words, word-for-word, no paraphrasing, no additions, no removals, no translations, no English, no mumbling: "${takeScript}". Pronounce every word exactly as written. Start speaking within the first 0.3 seconds. Finish the last word before the take ends. After the last word close the mouth and stop — do NOT add any extra speech. AUDIO TRACK: ONLY the person's voice speaking this exact Portuguese text — ZERO background music, ZERO sound effects, ZERO other voices, ZERO other languages, ZERO singing.`;
       }
 
-      prompt = `${speechBlock} ${referenceBlock} ${sceneLock} ${identityLock} ${forbidList} ${anatomyShort}`;
+      prompt = `${speechBlock} ${referenceBlock} ${sceneLock} ${colorLock} ${identityLock} ${forbidList} ${anatomyShort}`;
 
       // Pronunciation (opcional)
       if (/\bcarrinho\b/i.test(takeScript)) {
@@ -428,7 +433,7 @@ export async function generateVeoPrompts(
         ? `${reenactmentHeader} Vertical 9:16 UGC video — ABSOLUTELY SILENT reenactment. The person's MOUTH MUST STAY CLOSED throughout the entire take — NO lip-sync, NO dialogue, NO speech, NO voiceover in any language, NO singing, NO whispering, NO mouthing of words. The person NEVER speaks and NEVER moves their lips in a way that implies speech. AUDIO TRACK: only the ambient/music feel of the reference — ZERO voices.`
         : `${reenactmentHeader} Vertical 9:16 UGC video. No on-camera speech in this take — the narration will be added as voice-over in post. Keep the mouth relaxed and closed unless the reference specifically shows it moving.`;
 
-      prompt = `${silentHeader} ${referenceBlock} ${sceneLock} ${identityLock} ${forbidList} ${anatomyShort}`;
+      prompt = `${silentHeader} ${referenceBlock} ${sceneLock} ${colorLock} ${identityLock} ${forbidList} ${anatomyShort}`;
 
       // Para takes silent, o raw do GPT-4o é descartado — só rebaixa a
       // densidade do prompt e pode introduzir linguagem generativa.
