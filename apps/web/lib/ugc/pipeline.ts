@@ -1810,7 +1810,17 @@ export async function pollAndAssembleTakes(videoId: string): Promise<{
     return { allDone: false, failedCount, status: "GENERATING_TAKES" };
   }
 
-  await prisma.ugcGeneratedVideo.update({ where: { id: videoId }, data: { status: "ASSEMBLING" } });
+  // ── Lock atômico: só UM polling pode entrar em assembly. Evita TOCTOU
+  // (sem isso, dois polls concorrentes fazem 2 assemblies ao mesmo tempo,
+  // cada um enchendo /tmp → ENOSPC).
+  const lockResult = await prisma.ugcGeneratedVideo.updateMany({
+    where: { id: videoId, status: "GENERATING_TAKES" },
+    data: { status: "ASSEMBLING" },
+  });
+  if (lockResult.count === 0) {
+    console.log(`[pollAndAssemble] assembly lock failed for ${videoId} — another cycle is assembling, skipping`);
+    return { allDone: false, failedCount, status: "ASSEMBLING" };
+  }
   await log(videoId, "assemble", "started", `All ${freshTakes.length} takes completed, assembling...`);
 
   try {

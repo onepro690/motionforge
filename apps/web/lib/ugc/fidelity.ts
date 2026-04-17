@@ -14,6 +14,55 @@
 //    Scores críticos abaixo do threshold → regenera uma vez.
 
 import type { SceneBreakdown, TranscriptSegment, VoiceStyle } from "./reference-video";
+import ffmpegInstaller from "@ffmpeg-installer/ffmpeg";
+import ffmpeg from "fluent-ffmpeg";
+import { writeFile, readFile, unlink, mkdir } from "fs/promises";
+import { join } from "path";
+import { randomBytes } from "crypto";
+
+ffmpeg.setFfmpegPath(ffmpegInstaller.path);
+
+// Recorta um trecho [startTime, endTime] do vídeo de referência e devolve
+// os bytes do mp4 do recorte. Sem isso, o Gemini compara a fatia gerada
+// (ex: 4s mostrando um vestido) contra o vídeo INTEIRO (16s mostrando 4
+// vestidos) e diz "wardrobe não bate" — falso negativo.
+async function extractReferenceSegment(
+  playUrl: string,
+  startTime: number,
+  endTime: number
+): Promise<Buffer | null> {
+  const id = randomBytes(6).toString("hex");
+  const tmpDir = join("/tmp", `ugc-refseg-${id}`);
+  await mkdir(tmpDir, { recursive: true });
+  const inputPath = join(tmpDir, "ref.mp4");
+  const outputPath = join(tmpDir, "segment.mp4");
+  try {
+    const res = await fetch(playUrl, { signal: AbortSignal.timeout(30000) });
+    if (!res.ok) return null;
+    const bytes = Buffer.from(await res.arrayBuffer());
+    await writeFile(inputPath, bytes);
+
+    const duration = Math.max(0.5, endTime - startTime);
+    await new Promise<void>((resolve, reject) => {
+      ffmpeg(inputPath)
+        .setStartTime(startTime)
+        .setDuration(duration)
+        .outputOptions(["-c", "copy", "-avoid_negative_ts", "make_zero"])
+        .output(outputPath)
+        .on("end", () => resolve())
+        .on("error", (err: Error) => reject(err))
+        .run();
+    });
+    return await readFile(outputPath);
+  } catch (err) {
+    console.error("[fidelity] extractReferenceSegment failed:", err);
+    return null;
+  } finally {
+    await unlink(inputPath).catch(() => {});
+    await unlink(outputPath).catch(() => {});
+    await import("fs/promises").then((fs) => fs.rmdir(tmpDir).catch(() => {}));
+  }
+}
 
 // ── TAKE_SPEC ────────────────────────────────────────────────────────────
 // A especificação rígida de um take. Preserva EXATAMENTE o trecho do vídeo
@@ -207,25 +256,34 @@ export async function validateTakeFidelity(params: {
   if (!apiKey) return null;
 
   try {
-    // Baixa os dois vídeos em paralelo
-    const [genRes, refRes] = await Promise.all([
-      fetch(generatedVideoUrl, { signal: AbortSignal.timeout(30000) }),
-      fetch(referencePlayUrl, { signal: AbortSignal.timeout(30000) }),
-    ]);
-    if (!genRes.ok || !refRes.ok) return null;
-    const [genBytes, refBytes] = await Promise.all([
-      genRes.arrayBuffer(),
-      refRes.arrayBuffer(),
-    ]);
+    // Recorta o segmento do vídeo de referência ANTES de mandar pro Gemini.
+    // Sem recorte, o Gemini compara 4s gerados contra 16s do original e diz
+    // "wardrobe errada" porque só vê 1 vestido em vez de 4 → falso negativo.
+    const refSegmentBytes = await extractReferenceSegment(
+      referencePlayUrl,
+      takeSpec.startTime,
+      takeSpec.endTime,
+    );
+    if (!refSegmentBytes) {
+      console.warn("[fidelity] failed to extract reference segment — skipping validation");
+      return null;
+    }
+
+    const genRes = await fetch(generatedVideoUrl, { signal: AbortSignal.timeout(30000) });
+    if (!genRes.ok) return null;
+    const genBytes = Buffer.from(await genRes.arrayBuffer());
+
     // Gemini inline aceita ~18MB por parte
-    if (genBytes.byteLength > 18 * 1024 * 1024 || refBytes.byteLength > 18 * 1024 * 1024) {
+    if (genBytes.byteLength > 18 * 1024 * 1024 || refSegmentBytes.byteLength > 18 * 1024 * 1024) {
       console.warn("[fidelity] video too large for inline gemini validation");
       return null;
     }
 
     const instruction = `Você é um auditor de fidelidade de vídeo. Recebeu DOIS vídeos:
-VIDEO 1 = vídeo de REFERÊNCIA (trecho ${takeSpec.startTime.toFixed(1)}s-${takeSpec.endTime.toFixed(1)}s do original)
-VIDEO 2 = vídeo GERADO (reencenação do trecho, trocando apenas a pessoa pelo avatar escolhido)
+VIDEO 1 = SEGMENTO JÁ RECORTADO do vídeo de referência (exatamente o trecho ${takeSpec.startTime.toFixed(1)}s-${takeSpec.endTime.toFixed(1)}s do original, duração ${takeSpec.duration.toFixed(1)}s)
+VIDEO 2 = vídeo GERADO (reencenação desse trecho, trocando apenas a pessoa pelo avatar escolhido)
+
+IMPORTANTE: VIDEO 1 já é APENAS o trecho deste take — não o vídeo inteiro. Não penalize o VIDEO 2 por não mostrar coisas que estavam em outros trechos do vídeo original fora desta janela.
 
 Sua tarefa: pontuar a FIDELIDADE do VIDEO 2 em relação ao VIDEO 1. A única mudança permitida é a identidade da pessoa. TODO o resto deve ser idêntico: cenário, câmera, enquadramento, iluminação, movimento, pose, roupa, timing, ação, número de pessoas, fala.
 
@@ -274,10 +332,10 @@ Regras:
           contents: [{
             role: "user",
             parts: [
-              { text: "VIDEO 1 — REFERENCE:" },
-              { inlineData: { mimeType: "video/mp4", data: Buffer.from(refBytes).toString("base64") } },
+              { text: "VIDEO 1 — REFERENCE SEGMENT (already trimmed to this take's window):" },
+              { inlineData: { mimeType: "video/mp4", data: refSegmentBytes.toString("base64") } },
               { text: "VIDEO 2 — GENERATED:" },
-              { inlineData: { mimeType: "video/mp4", data: Buffer.from(genBytes).toString("base64") } },
+              { inlineData: { mimeType: "video/mp4", data: genBytes.toString("base64") } },
               { text: instruction },
             ],
           }],
@@ -314,13 +372,13 @@ Regras:
       issues: Array.isArray(parsed.issues) ? parsed.issues.slice(0, 10) : [],
     };
 
-    // Verdict: reprova se qualquer score crítico cair abaixo do threshold
-    const criticalFail =
-      scores.avatarConsistency < FIDELITY_THRESHOLDS.avatarConsistency ||
-      scores.backgroundMatch < FIDELITY_THRESHOLDS.backgroundMatch ||
-      scores.speechExactness < FIDELITY_THRESHOLDS.speechExactness ||
-      scores.overallFidelity < FIDELITY_THRESHOLDS.overallFidelity;
-    scores.verdict = criticalFail ? "rejected" : "approved";
+    // Verdict: reprova SÓ em falha catastrófica (evita queimar retries de Veo
+    // em casos cosméticos). Critérios: avatar totalmente errado OU overall
+    // muito baixo. Scores dentro da margem viram "approved" com issues logadas.
+    const catastrophic =
+      scores.avatarConsistency < 0.5 ||
+      scores.overallFidelity < 0.5;
+    scores.verdict = catastrophic ? "rejected" : "approved";
 
     return scores;
   } catch (err) {
