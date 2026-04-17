@@ -82,29 +82,32 @@ function TakeTimeline({
       <div
         ref={timelineRef}
         className="relative h-10 bg-white/5 rounded cursor-crosshair select-none"
-        onMouseDown={(e) => {
+        onPointerDown={(e) => {
           if (e.button !== 0) return;
-          setSelectStart(getTimeFromX(e.clientX));
+          e.preventDefault();
+          const startTime = getTimeFromX(e.clientX);
+          setSelectStart(startTime);
           setSelectEnd(null);
-        }}
-        onMouseMove={(e) => {
-          if (selectStart !== null) setSelectEnd(getTimeFromX(e.clientX));
-        }}
-        onMouseUp={(e) => {
-          if (selectStart !== null) {
-            const end = getTimeFromX(e.clientX);
-            const s = Math.min(selectStart, end);
-            const en = Math.max(selectStart, end);
+          const onMove = (ev: PointerEvent) => {
+            setSelectEnd(getTimeFromX(ev.clientX));
+          };
+          const onUp = (ev: PointerEvent) => {
+            window.removeEventListener("pointermove", onMove);
+            window.removeEventListener("pointerup", onUp);
+            const end = getTimeFromX(ev.clientX);
+            const s = Math.min(startTime, end);
+            const en = Math.max(startTime, end);
             if (en - s > 0.2) {
               onAddCut(take.takeIndex, s, en);
             } else {
               onSeek(take.takeIndex, s);
             }
-          }
-          setSelectStart(null);
-          setSelectEnd(null);
+            setSelectStart(null);
+            setSelectEnd(null);
+          };
+          window.addEventListener("pointermove", onMove);
+          window.addEventListener("pointerup", onUp);
         }}
-        onMouseLeave={() => { setSelectStart(null); setSelectEnd(null); }}
       >
         <div className="absolute inset-0 rounded overflow-hidden">
           <div className="w-full h-full bg-emerald-500/10" />
@@ -359,6 +362,7 @@ function EditPageContent() {
                 <video
                   key={take.id}
                   src={take.videoUrl!}
+                  preload="metadata"
                   className={`absolute inset-0 w-full h-full object-cover ${activeTakeIndex === take.takeIndex ? "block" : "hidden"}`}
                   ref={(el) => { if (el) handleTakeLoaded(take.takeIndex, el); }}
                   onPlay={() => setPlaying(true)}
