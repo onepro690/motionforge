@@ -103,19 +103,22 @@ export async function swapPersonWithAvatar(
       `IMAGE 2: The ORIGINAL PHOTO of the avatar/character.\n` +
       `IMAGE 3: A PREVIOUS RESULT where this avatar was already placed in a different scene. This shows EXACTLY how the avatar should look after editing.\n` +
       `\nYour task: Place the person from IMAGE 3 into the scene from IMAGE 1.\n` +
-      `\nThe person in the result MUST look IDENTICAL to the person in IMAGE 3:\n` +
-      `- EXACT same face shape and facial features\n` +
-      `- EXACT same skin tone and skin color (do NOT darken or lighten)\n` +
-      `- EXACT same hair color, hair style, hair length, hair texture\n` +
-      `- EXACT same eye color and eye shape\n` +
-      `- EXACT same ethnicity and physical traits\n` +
-      `\nThe SCENE must come from IMAGE 1:\n` +
+      `\n⚠️ CRITICAL — FACE CONSISTENCY IS THE #1 PRIORITY:\n` +
+      `The person's FACE in the result MUST be PIXEL-LEVEL IDENTICAL to the face in IMAGE 3. This is not similar, not close — it is the SAME face, the SAME person. If someone compared the face in your result to the face in IMAGE 3 side-by-side, they must look like the same identical photograph of the same person. Do NOT reinterpret, do NOT redraw, do NOT "improve" the face — clone it exactly from IMAGE 3.\n` +
+      `\nFROM IMAGE 3 (copy EXACTLY — this is the identity lock):\n` +
+      `- EXACT same face shape, jawline, cheekbones, nose, lips, chin\n` +
+      `- EXACT same skin tone and skin color (do NOT darken or lighten — sample the pixels from IMAGE 3)\n` +
+      `- EXACT same hair color, hair style, hair length, hair texture, hairline\n` +
+      `- EXACT same eye color, eye shape, eye spacing, eyebrow shape\n` +
+      `- EXACT same ethnicity, age, and physical traits\n` +
+      `- EXACT same distinctive features (moles, freckles, etc) that appear in IMAGE 3\n` +
+      `\nFROM IMAGE 1 (scene only — NOT the face):\n` +
       `- Same background, room, environment\n` +
       `- Same outfit/clothing (color, type, style) as IMAGE 1\n` +
       `- Same body pose and hand position as IMAGE 1\n` +
       `- Same camera angle, framing, lighting as IMAGE 1\n` +
       `- Same objects and product as IMAGE 1\n` +
-      `\nDO NOT change the person's skin color. DO NOT change hair. The face must be recognizable as the SAME person from IMAGE 3.\n` +
+      `\nDO NOT take the face from IMAGE 1 — that's a different person. The face ALWAYS comes from IMAGE 3. If the face in IMAGE 1 is visible, replace it completely with the face from IMAGE 3.\n` +
       `DO NOT add tattoos, piercings, scars, birthmarks, moles, or ANY body modifications that are NOT visible in IMAGE 2 and IMAGE 3. The person's body must be CLEAN and IDENTICAL to the original photos — no additions whatsoever.\n` +
       `REMOVE all text, captions, subtitles, watermarks, logos, symbols, letters, numbers, and emojis from the image. The output must be completely clean — zero on-screen text or graphics.\n` +
       `Photorealistic UGC smartphone selfie quality. Output aspect ratio: 9:16 vertical.` + groupClause;
@@ -245,12 +248,14 @@ export async function swapAllPhenotypes(
       `IMAGE 1: A frame from a reference video showing a specific scene — background, outfit, pose, product, lighting, framing.\n` +
       `IMAGE 2: A PREVIOUS RESULT where the person's phenotype (ethnicity, face, skin tone, hair) was already swapped. Use this as the EXACT phenotype reference for the person in the new result.\n` +
       `\nYour task: Recreate IMAGE 1 EXACTLY, but every person visible must have the phenotype shown in IMAGE 2.\n` +
-      `\nFROM IMAGE 2 (copy ONLY the person's physical identity):\n` +
-      `- EXACT same face shape and facial features\n` +
-      `- EXACT same skin tone (do NOT darken or lighten)\n` +
-      `- EXACT same hair color, style, length, texture\n` +
-      `- EXACT same eye color, eye shape\n` +
-      `- EXACT same ethnicity and age range\n` +
+      `\n⚠️ CRITICAL — FACE CONSISTENCY IS THE #1 PRIORITY:\n` +
+      `The person's FACE in the result MUST be PIXEL-LEVEL IDENTICAL to the face in IMAGE 2. Same face, same person, not "similar" — identical. Do NOT reinterpret, do NOT redraw, do NOT vary the face. Clone it exactly from IMAGE 2.\n` +
+      `\nFROM IMAGE 2 (copy EXACTLY — this is the identity lock):\n` +
+      `- EXACT same face shape, jawline, cheekbones, nose, lips, chin\n` +
+      `- EXACT same skin tone (do NOT darken or lighten — sample the pixels)\n` +
+      `- EXACT same hair color, style, length, texture, hairline\n` +
+      `- EXACT same eye color, eye shape, eyebrow shape\n` +
+      `- EXACT same ethnicity, age range, and distinctive features\n` +
       `\nFROM IMAGE 1 (copy EVERYTHING ELSE, pixel-perfect):\n` +
       `- Exact same background, room, environment, scenery\n` +
       `- Exact same outfit/clothing (color, type, style)\n` +
@@ -258,7 +263,8 @@ export async function swapAllPhenotypes(
       `- Exact same camera angle, framing, composition\n` +
       `- Exact same lighting, shadows, color grading\n` +
       `- Exact same objects and product being shown/held\n` +
-      `\nIf MULTIPLE people appear in IMAGE 1, ALL of them must get a phenotype matching IMAGE 2 (or consistent with it).\n` +
+      `\nDO NOT take the face from IMAGE 1 — that's the original person being replaced. The face ALWAYS comes from IMAGE 2.\n` +
+      `If MULTIPLE people appear in IMAGE 1, ALL of them must get the phenotype from IMAGE 2 (keep them consistent — same face/ethnicity for all).\n` +
       `DO NOT add tattoos, piercings, scars, birthmarks, moles, or ANY body modifications not in IMAGE 2.\n` +
       `REMOVE all text, captions, subtitles, watermarks, logos, letters, numbers, emojis. Pure visual only.\n` +
       `Photorealistic UGC smartphone selfie quality. Output aspect ratio: 9:16 vertical.`;

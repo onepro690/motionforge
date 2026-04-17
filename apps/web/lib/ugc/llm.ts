@@ -381,7 +381,13 @@ export async function generateVeoPrompts(
 
   // Clauses CURTAS e focadas. Veo 3 precisa de densidade, não volume.
   const imageFidelity = `IMAGE FIDELITY: the input image is the ground truth. Keep the background, outfit, framing, lighting, and exact number of people identical. Do NOT add crowds, extra people, new environments, or props that aren't in the image.`;
-  const identityLock = `IDENTITY LOCK: the person's face, hair, skin tone, and outfit stay 100% identical from first to last frame — no morphing, no drift.`;
+  // IDENTITY LOCK reforçado: amarra a face AO INPUT IMAGE (não só "entre
+  // primeiro e último frame"). Em modo silencioso com troca de roupa, os
+  // takes rodam em paralelo — se o Veo inventa uma face diferente da imagem
+  // em cada take, o avatar "troca" visivelmente. Esta frase obriga o Veo a
+  // respeitar a identidade da IMAGE de input, que já foi padronizada pelo
+  // Nano Banana usando take1 como referência.
+  const identityLock = `IDENTITY LOCK: the person's face must match the input image EXACTLY — same face shape, same facial features, same skin tone, same hair color/style/length, same eye color, same ethnicity. Do NOT invent a new face, do NOT morph features, do NOT reinterpret the face. The identity is fixed by the input image and must stay 100% identical from first to last frame.`;
   const noTextShort = `No captions, subtitles, watermarks, or on-screen text.`;
   const anatomyShort = `Anatomy correct: no cut-off limbs, no clipping through furniture, no fused hands or extra fingers. Keep the full head and upper body inside the frame throughout the take — no zoom-in crops, no head chopping, no body parts disappearing off-screen, stable framing.`;
 
