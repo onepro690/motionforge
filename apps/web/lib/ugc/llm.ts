@@ -277,6 +277,8 @@ export interface SceneBreakdownInput {
   timeRange: string;
   action: string;
   visuals: string;
+  speakerMode?: "none" | "solo" | "group_unison" | "multiple_alternating";
+  peopleCount?: number;
 }
 
 export async function generateVeoPrompts(
@@ -387,7 +389,22 @@ export async function generateVeoPrompts(
     // diretamente no prompt — não confia no GPT-4o para reproduzir palavra por palavra.
     const takeScript = copyByTake[key]?.trim();
     if (narrationMode === "creator_speaking" && takeScript) {
-      prompt += ` The person speaks DIRECTLY to camera with natural lip-sync, pronouncing each word clearly and naturally in Brazilian Portuguese. They say EXACTLY these words (do NOT change, paraphrase, or omit any word): "${takeScript}". IMPORTANT: The input reference image defines EVERYTHING about the scene — the ONLY thing that changes is the person's mouth moving to speak these words. Do NOT alter the person's appearance, outfit, background, lighting, or any other visual element.`;
+      // Decide se é fala solo ou em grupo/uníssono com base na cena de referência
+      const sceneForTake = scenes?.[i];
+      const speakerMode = sceneForTake?.speakerMode ?? "solo";
+      // Heurística de fallback caso Gemini não preencha speakerMode (versões antigas)
+      const visualsText = (sceneForTake?.visuals ?? "").toLowerCase() + " " + (sceneForTake?.action ?? "").toLowerCase();
+      const looksLikeGroup = /\b(grupo|várias pessoas|varias pessoas|muita gente|multidão|multidao|coro|crowd|group|together|juntas|juntos|todos|todas|em uníssono|em unissono)\b/.test(visualsText);
+      const effectiveMode = speakerMode !== "solo" ? speakerMode : (looksLikeGroup ? "group_unison" : "solo");
+
+      if (effectiveMode === "group_unison") {
+        const pc = sceneForTake?.peopleCount && sceneForTake.peopleCount > 1 ? sceneForTake.peopleCount : 0;
+        prompt += ` CRITICAL GROUP SPEECH — this take shows ${pc > 0 ? `${pc} people` : "multiple people"} speaking IN UNISON (all together at the same time). ALL visible people open their mouths and say EXACTLY these words simultaneously in perfect sync (do NOT change, paraphrase, or omit any word): "${takeScript}". Natural lip-sync on EVERY visible person, in Brazilian Portuguese. NOT just one person speaking — the WHOLE GROUP speaks the same phrase TOGETHER at the same moment, matching each other's timing and energy. The reference scene shows this exact group-speech moment — reproduce it faithfully. Do NOT alter the number of people, their positions, outfits, background, or lighting.`;
+      } else if (effectiveMode === "multiple_alternating") {
+        prompt += ` CRITICAL MULTI-SPEAKER SCENE — this take shows multiple people taking turns speaking (not in unison, but alternating). Each person says their part in order, natural lip-sync in Brazilian Portuguese, covering EXACTLY these words across all speakers (do NOT change, paraphrase, or omit any word): "${takeScript}". Preserve the number and position of people from the reference scene.`;
+      } else {
+        prompt += ` The person speaks DIRECTLY to camera with natural lip-sync, pronouncing each word clearly and naturally in Brazilian Portuguese. They say EXACTLY these words (do NOT change, paraphrase, or omit any word): "${takeScript}". IMPORTANT: The input reference image defines EVERYTHING about the scene — the ONLY thing that changes is the person's mouth moving to speak these words. Do NOT alter the person's appearance, outfit, background, lighting, or any other visual element.`;
+      }
 
       // Instruções de pronúncia para palavras PT-BR que Veo 3 costuma errar.
       // "carrinho" (RR forte) vs "carinho" (R fraco) — são palavras DIFERENTES.

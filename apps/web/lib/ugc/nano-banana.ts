@@ -50,7 +50,8 @@ async function fetchBase64(url: string): Promise<{ data: string; mimeType: strin
 export async function swapPersonWithAvatar(
   referenceFrameUrl: string,
   avatarImageUrl: string,
-  previousTakeResultUrl?: string | null
+  previousTakeResultUrl?: string | null,
+  groupScene?: { peopleCount?: number; description?: string } | null
 ): Promise<{ url: string; mimeType: string } | null> {
   const apiKey = process.env.GOOGLE_AI_API_KEY?.trim();
   if (!apiKey) {
@@ -81,7 +82,15 @@ export async function swapPersonWithAvatar(
     }
   }
 
-  console.log(`[nano-banana] ref: ${ref.data.length} chars, avatar: ${avatar.data.length} chars, prevResult: ${prevResult ? prevResult.data.length + " chars" : "none"}`);
+  console.log(`[nano-banana] ref: ${ref.data.length} chars, avatar: ${avatar.data.length} chars, prevResult: ${prevResult ? prevResult.data.length + " chars" : "none"}, group: ${groupScene ? JSON.stringify(groupScene) : "none"}`);
+
+  // Se a cena de referência tem múltiplas pessoas (ex: coro, grupo gritando),
+  // NÃO remover ninguém — trocar só o fenótipo do rosto principal pelo do avatar,
+  // mantendo TODAS as demais pessoas exatamente onde estão.
+  const isGroup = !!(groupScene && groupScene.peopleCount && groupScene.peopleCount > 1);
+  const groupClause = isGroup
+    ? `\n\nIMPORTANT — THIS IS A GROUP SCENE: The reference frame (IMAGE 1) shows ${groupScene!.peopleCount} people visible. You MUST keep ALL ${groupScene!.peopleCount} people in the result — do NOT remove anyone, do NOT merge people, do NOT leave only one person. Reproduce the EXACT same number of people in their EXACT same positions. Only ONE of them (the most prominent/central person) should have the face and phenotype swapped to match IMAGE 2. The other people keep their original faces and appearances from IMAGE 1 — DO NOT alter them. Every person from the original scene must be present in the result, same layout, same poses.`
+    : "";
 
   let instruction: string;
   let parts: Array<{ inlineData?: { mimeType: string; data: string }; text?: string }>;
@@ -109,7 +118,7 @@ export async function swapPersonWithAvatar(
       `\nDO NOT change the person's skin color. DO NOT change hair. The face must be recognizable as the SAME person from IMAGE 3.\n` +
       `DO NOT add tattoos, piercings, scars, birthmarks, moles, or ANY body modifications that are NOT visible in IMAGE 2 and IMAGE 3. The person's body must be CLEAN and IDENTICAL to the original photos — no additions whatsoever.\n` +
       `REMOVE all text, captions, subtitles, watermarks, logos, symbols, letters, numbers, and emojis from the image. The output must be completely clean — zero on-screen text or graphics.\n` +
-      `Photorealistic UGC smartphone selfie quality. Output aspect ratio: 9:16 vertical.`;
+      `Photorealistic UGC smartphone selfie quality. Output aspect ratio: 9:16 vertical.` + groupClause;
 
     parts = [
       { text: "IMAGE 1 (scene/outfit/pose — from this take's reference frame):" },
@@ -137,7 +146,7 @@ export async function swapPersonWithAvatar(
       `\nDO NOT change the skin color of the person from IMAGE 2. If IMAGE 2 shows a light-skinned person, the result must show a light-skinned person. The face must be recognizable as the same person from IMAGE 2.\n` +
       `DO NOT add tattoos, piercings, scars, birthmarks, moles, or ANY body modifications that are NOT visible in IMAGE 2. The person's body must be CLEAN and IDENTICAL to the original photo — no additions whatsoever.\n` +
       `REMOVE all text, captions, subtitles, watermarks, logos, symbols, letters, numbers, and emojis from the image. The output must be completely clean — zero on-screen text or graphics.\n` +
-      `Photorealistic UGC smartphone selfie quality. Output aspect ratio: 9:16 vertical.`;
+      `Photorealistic UGC smartphone selfie quality. Output aspect ratio: 9:16 vertical.` + groupClause;
 
     parts = [
       { text: "IMAGE 1 (scene/outfit/pose reference):" },

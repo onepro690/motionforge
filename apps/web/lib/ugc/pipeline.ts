@@ -709,12 +709,18 @@ export async function runVideoPipeline(
         const mode = phenotypeOnlyMode ? "phenotype-only" : "avatar-swap";
 
         const editFrame = async (fi: number, prevRefUrl: string | null) => {
+          // Cena correspondente (pode vir do Gemini breakdown). Se tem múltiplas
+          // pessoas, avisa o Nano Banana pra não apagar ninguém.
+          const sceneForFrame = referenceScenes[fi];
+          const sceneGroupInfo = sceneForFrame && sceneForFrame.peopleCount && sceneForFrame.peopleCount > 1
+            ? { peopleCount: sceneForFrame.peopleCount, description: sceneForFrame.visuals }
+            : null;
           await log(videoId, `nano_banana_frame${fi + 1}`, "started",
-            `[${mode}] frame ${fi + 1}${prevRefUrl ? " + prev take result" : ""}`);
+            `[${mode}] frame ${fi + 1}${prevRefUrl ? " + prev take result" : ""}${sceneGroupInfo ? ` (GROUP: ${sceneGroupInfo.peopleCount} people)` : ""}`);
           const edited: { url: string; mimeType: string } | null = phenotypeOnlyMode
             ? await swapAllPhenotypes(keyframes.frames[fi].url, prevRefUrl)
                 .catch((e) => { console.error(`[pipeline] phenotype swap frame${fi + 1} error:`, e); return null; })
-            : await swapPersonWithAvatar(keyframes.frames[fi].url, characterImageUrl!, prevRefUrl)
+            : await swapPersonWithAvatar(keyframes.frames[fi].url, characterImageUrl!, prevRefUrl, sceneGroupInfo)
                 .catch((e) => { console.error(`[pipeline] nano_banana frame${fi + 1} error:`, e); return null; });
           if (edited) {
             editedByFrame[fi] = await imageUrlToBase64(edited.url);

@@ -450,6 +450,14 @@ export interface SceneBreakdown {
   timeRange: string;
   action: string;
   visuals: string;
+  // Quem fala nesta cena específica:
+  // - "none"                = nenhuma fala humana (só música/ambiente)
+  // - "solo"                = uma pessoa sozinha fala/lip-sync
+  // - "group_unison"        = várias pessoas falam JUNTAS em uníssono (coro, gritaria)
+  // - "multiple_alternating" = várias pessoas se alternam falando
+  speakerMode?: "none" | "solo" | "group_unison" | "multiple_alternating";
+  // Número aproximado de pessoas visíveis na cena (1, 2, 3+, crowd)
+  peopleCount?: number;
 }
 
 export interface VoiceStyle {
@@ -521,8 +529,8 @@ Retorne APENAS um JSON com esta estrutura:
   },
   "sceneCount": N,
   "scenes": [
-    { "timeRange": "0-Xs", "action": "ação EXATA (ex: segura o vestido rosa na frente do corpo)", "visuals": "visual DETALHADO: cor EXATA da roupa/produto, posição da pessoa, objetos, fundo (ex: 'mulher segura vestido ROSA em cabide, fundo branco, espelho à esquerda')" },
-    { "timeRange": "Xs-Ys", "action": "ação EXATA da segunda cena", "visuals": "visual DETALHADO com cor/variante EXATA (ex: 'mulher veste vestido AZUL, gira mostrando o caimento')" }
+    { "timeRange": "0-Xs", "action": "ação EXATA (ex: segura o vestido rosa na frente do corpo)", "visuals": "visual DETALHADO: cor EXATA da roupa/produto, posição da pessoa, objetos, fundo (ex: 'mulher segura vestido ROSA em cabide, fundo branco, espelho à esquerda')", "peopleCount": N, "speakerMode": "none" | "solo" | "group_unison" | "multiple_alternating" },
+    { "timeRange": "Xs-Ys", "action": "ação EXATA da segunda cena", "visuals": "visual DETALHADO com cor/variante EXATA (ex: 'mulher veste vestido AZUL, gira mostrando o caimento')", "peopleCount": N, "speakerMode": "..." }
   ],
   "keyVisualSequence": "descrição compacta da progressão visual do vídeo inteiro, citando CADA cor/variante na ordem exata",
   "productShownAs": "como o produto é mostrado (segurando, vestindo, demonstrando, etc)",
@@ -539,6 +547,13 @@ REGRAS CRÍTICAS:
 - "sceneCount" = número TOTAL de cenas distintas. Se o vídeo mostra 4 roupas diferentes, sceneCount=4. Se mostra 2 ângulos do mesmo look, sceneCount=2. CONTE EXATAMENTE quantas cenas tem.
 - O array "scenes" DEVE ter EXATAMENTE sceneCount elementos — um por cena. NÃO agrupe cenas. Se tem 4 trocas de roupa, retorne 4 cenas, NÃO 3.
 - CADA "visuals" de cada cena DEVE descrever a COR ou VARIANTE EXATA do produto visível NAQUELE MOMENTO do vídeo. Nunca use descrições genéricas — diga "vestido ROSA", "tênis BRANCO", etc.
+- "peopleCount" de cada cena = quantas pessoas aparecem VISIVELMENTE na cena (use 5 se for multidão/coro).
+- "speakerMode" de cada cena (CRÍTICO — observe com atenção):
+   * "none"                = ninguém está falando nesta cena (só música/ação)
+   * "solo"                = UMA pessoa sozinha fala/faz lip-sync para a câmera
+   * "group_unison"        = DUAS OU MAIS pessoas falam/gritam JUNTAS a mesma coisa ao mesmo tempo (coro, gritaria sincronizada)
+   * "multiple_alternating" = VÁRIAS pessoas se alternam falando (cada uma fala sua parte)
+  → Se a cena mostra 5 pessoas todas gritando "MOMOMOMO" juntas, isso é "group_unison", NÃO "solo".
 - Se o vídeo mostra o produto em várias cores/variantes, SEMPRE marque hasMultipleVariants=true.
 - Retorne APENAS o JSON, sem markdown, sem explicação.`;
 
