@@ -209,14 +209,17 @@ function EditPageContent() {
   useEffect(() => { load(); }, [load]);
 
   const handleTakeLoaded = (takeIndex: number, el: HTMLVideoElement) => {
+    if (videoRefs.current[takeIndex] === el) return;
     videoRefs.current[takeIndex] = el;
-    const onMeta = () => {
-      if (el.duration && !isNaN(el.duration)) {
-        setTakeDurations(prev => ({ ...prev, [takeIndex]: el.duration }));
-      }
+    const apply = () => {
+      if (!el.duration || isNaN(el.duration)) return;
+      setTakeDurations(prev => {
+        if (prev[takeIndex] === el.duration) return prev;
+        return { ...prev, [takeIndex]: el.duration };
+      });
     };
-    el.addEventListener("loadedmetadata", onMeta);
-    if (el.duration && !isNaN(el.duration)) onMeta();
+    el.addEventListener("loadedmetadata", apply);
+    apply();
   };
 
   useEffect(() => {
