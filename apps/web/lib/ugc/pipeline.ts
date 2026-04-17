@@ -12,7 +12,7 @@ import { getAntiRepeatContext, recordUsedElements, getNegativePatterns } from ".
 import { DEFAULT_PROMPT_TEMPLATES } from "./defaults";
 import { ensureReferenceTranscript, fetchTikwmDetail, extractKeyFrames, analyzeReferenceVideoWithGemini, TranscriptSegment, VoiceStyle, SceneBreakdown } from "./reference-video";
 import { swapPersonWithAvatar, swapAllPhenotypes, imageUrlToBase64 } from "./nano-banana";
-import { buildTakeSpecs, isFashionSilentMode, validateTakeFidelity, FIDELITY_THRESHOLDS, type TakeSpec } from "./fidelity";
+import { buildTakeSpecs, isFashionSilentMode, validateTakeFidelity, type TakeSpec } from "./fidelity";
 
 import ffmpegInstaller from "@ffmpeg-installer/ffmpeg";
 import ffmpeg from "fluent-ffmpeg";
@@ -1601,20 +1601,13 @@ export async function pollAndAssembleTakes(videoId: string): Promise<{
           });
 
           if (scores) {
-            await log(videoId, `fidelity_take_${take.takeIndex + 1}`, scores.verdict === "approved" ? "completed" : "failed",
+            await log(videoId, `fidelity_take_${take.takeIndex + 1}`, "completed",
               `verdict=${scores.verdict} avatar=${scores.avatarConsistency.toFixed(2)} bg=${scores.backgroundMatch.toFixed(2)} cam=${scores.cameraMatch.toFixed(2)} action=${scores.actionMatch.toFixed(2)} wardrobe=${scores.wardrobeTimingMatch.toFixed(2)} speech=${scores.speechExactness.toFixed(2)} speaker=${scores.speakerStructureMatch.toFixed(2)} overall=${scores.overallFidelity.toFixed(2)}${scores.issues.length ? ` | issues: ${scores.issues.slice(0, 3).join("; ")}` : ""}`,
               scores as unknown as object);
-
-            if (scores.verdict === "rejected") {
-              const reason = `fidelity rejected (overall=${scores.overallFidelity.toFixed(2)}, min=${FIDELITY_THRESHOLDS.overallFidelity}): ${scores.issues.slice(0, 3).join("; ") || "below threshold"}`;
-              await prisma.ugcGeneratedTake.update({
-                where: { id: take.id },
-                data: { status: "FAILED", errorMessage: reason },
-              });
-              failedCount++;
-              allCompleted = false;
-              continue;
-            }
+            // Fidelity scoring is telemetry-only. Not auto-rejecting: the
+            // validator struggles with legitimate cases (group shots, multi-
+            // speaker scenes) and burns the Veo retry budget on false positives.
+            // User reviews the final video in AWAITING_REVIEW.
           }
         }
       } catch (e) {
