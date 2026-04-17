@@ -10,7 +10,7 @@ import { generateNarration } from "./tts";
 import { assembleTakes } from "./assembler";
 import { getAntiRepeatContext, recordUsedElements, getNegativePatterns } from "./anti-repeat";
 import { DEFAULT_PROMPT_TEMPLATES } from "./defaults";
-import { ensureReferenceTranscript, fetchTikwmDetail, extractKeyFrames, analyzeReferenceVideoWithGemini, TranscriptSegment, VoiceStyle } from "./reference-video";
+import { ensureReferenceTranscript, fetchTikwmDetail, extractKeyFrames, analyzeReferenceVideoWithGemini, TranscriptSegment, VoiceStyle, SceneBreakdown } from "./reference-video";
 import { swapPersonWithAvatar, swapAllPhenotypes, imageUrlToBase64 } from "./nano-banana";
 
 import ffmpegInstaller from "@ffmpeg-installer/ffmpeg";
@@ -555,6 +555,7 @@ export async function runVideoPipeline(
     let hasNarration = false;
     let geminiSceneCount = 3; // fallback se Gemini não funcionar
     let referenceVoiceStyle: VoiceStyle | null = null;
+    let referenceScenes: SceneBreakdown[] = [];
     if (refPlayUrl_narration) {
       await log(videoId, "narration_detection", "started", "Gemini analyzing video for speech vs music + scene count");
 
@@ -578,6 +579,9 @@ export async function runVideoPipeline(
         }
         if (hasNarration && geminiAnalysis.voiceStyle) {
           referenceVoiceStyle = geminiAnalysis.voiceStyle;
+        }
+        if (geminiAnalysis.scenes && geminiAnalysis.scenes.length > 0) {
+          referenceScenes = geminiAnalysis.scenes;
         }
         await log(videoId, "narration_detection", "completed",
           `Gemini says: narrationStyle=${geminiAnalysis.narrationStyle}, sceneCount=${geminiAnalysis.sceneCount}, hasNarration=${geminiAnalysis.hasNarration} → speech: ${hasNarration ? "SPEAKING" : "SILENT"}, takes: ${geminiSceneCount}${referenceVoiceStyle ? `, voice: ${referenceVoiceStyle.description.slice(0, 80)}` : ""}`, {
@@ -942,7 +946,8 @@ export async function runVideoPipeline(
       characterName,
       referenceScene,
       takeCount,
-      referenceVoiceStyle
+      referenceVoiceStyle,
+      referenceScenes.length > 0 ? referenceScenes : null
     );
     await log(videoId, "generate_veo_prompts", "completed", undefined, veoPrompts, Date.now() - t5);
 

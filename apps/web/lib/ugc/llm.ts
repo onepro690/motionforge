@@ -273,6 +273,12 @@ export interface VoiceStyleInput {
   description: string;
 }
 
+export interface SceneBreakdownInput {
+  timeRange: string;
+  action: string;
+  visuals: string;
+}
+
 export async function generateVeoPrompts(
   productName: string,
   brief: CreativeBrief,
@@ -281,7 +287,8 @@ export async function generateVeoPrompts(
   characterName: string,
   referenceScene: ReferenceScene | null,
   takeCount: number = 3,
-  voiceStyle: VoiceStyleInput | null = null
+  voiceStyle: VoiceStyleInput | null = null,
+  scenes: SceneBreakdownInput[] | null = null
 ): Promise<VeoPrompts> {
   const openai = getOpenAI();
 
@@ -293,6 +300,17 @@ export async function generateVeoPrompts(
     ? JSON.stringify(referenceScene, null, 2)
     : "(sem análise visual — use o visualStyle do brief como fallback)";
 
+  // Gera lista detalhada de "o que acontece em cada take no vídeo de referência".
+  // Crítico quando os takes são visualmente DIFERENTES (ex: take 1 = multidão
+  // gritando, take 2 = uma pessoa falando). Sem isso o GPT-4o gera prompts
+  // genéricos que ignoram as diferenças entre cenas.
+  const perTakeSceneBlock = scenes && scenes.length > 0
+    ? scenes
+        .slice(0, takeCount)
+        .map((s, idx) => `Take ${idx + 1} (${s.timeRange}): ${s.action}. Visuals: ${s.visuals}`)
+        .join("\n")
+    : "(usando a mesma cena para todos os takes)";
+
   const prompt = buildPrompt(templateContent, {
     product_name: productName,
     brief_data: JSON.stringify(brief, null, 2),
@@ -301,6 +319,7 @@ export async function generateVeoPrompts(
     persona_description: personaDesc,
     narration_mode: narrationMode,
     reference_scene: sceneBlock,
+    per_take_scenes: perTakeSceneBlock,
   });
 
   const { text } = await generateText({
@@ -345,13 +364,24 @@ export async function generateVeoPrompts(
 
   const noTextClause = ` ABSOLUTELY NO TEXT, NO CAPTIONS, NO SUBTITLES, NO WATERMARKS, NO LOGOS, NO SYMBOLS, NO WRITTEN WORDS, NO LETTERS, NO NUMBERS, NO EMOJIS anywhere in the video frame at any point. The video must be completely clean — pure visual content only, zero on-screen text or graphics of any kind.`;
 
+  const anatomyClause = ` ANATOMY AND COMPOSITION: The person's body must be anatomically correct — full body proportions, no cut-off limbs, no body parts clipping through furniture or objects, no warped torso, no fused hands, no extra fingers, no morphing faces mid-shot. The person stays physically separate from surrounding objects (tables, chairs, walls) — no intersection or clipping. Framing must be stable: do NOT zoom in and crop out the person's body awkwardly, do NOT cut the head off at the top of the frame, do NOT have parts of the body disappear or glitch during motion.`;
+
   const result: VeoPrompts = {};
   for (let i = 0; i < takeCount; i++) {
     const key = `take${i + 1}`;
     const rawPrompt = raw[key] ?? raw[`take${i + 1}`];
     const defaultAction = i === 0 ? "intro shot" : i === takeCount - 1 ? `closing beat with ${productName} visible` : "demonstration";
     const fallback = `${baseScene} Take ${i + 1} — ${referenceScene?.action ?? defaultAction}, person interacts with the product naturally.`;
-    let prompt = enforce(rawPrompt ?? fallback) + consistencyClause + noTextClause;
+    let prompt = enforce(rawPrompt ?? fallback) + consistencyClause + noTextClause + anatomyClause;
+
+    // Injeta a descrição EXATA da cena correspondente no vídeo de referência.
+    // Resolve caso onde take N é VISUALMENTE diferente (ex: take 1 tem muita
+    // gente gritando, take 2 tem só uma pessoa falando). Sem isso, o GPT-4o
+    // só vê a cena da thumbnail e gera o mesmo visual pra todos os takes.
+    if (scenes && scenes[i]) {
+      const sc = scenes[i];
+      prompt += ` REFERENCE SCENE FOR THIS TAKE (${sc.timeRange}) — the reference video at this exact moment shows: ${sc.visuals}. The action happening is: ${sc.action}. CRITICAL: Reproduce THIS specific scene's visuals, composition, number of people, their poses, expressions, camera framing, and energy EXACTLY as described. Do NOT use the visual from a different take — each take has its own distinct scene. If the reference shows multiple people, show multiple people. If the reference shows one person, show one person. Match the crowd size, position, and energy of THIS specific moment in the reference.`;
+    }
 
     // Quando é creator_speaking, injeta o texto EXATO do transcript de referência
     // diretamente no prompt — não confia no GPT-4o para reproduzir palavra por palavra.

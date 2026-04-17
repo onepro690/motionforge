@@ -124,8 +124,12 @@ PRODUTO: {{product_name}}
 BRIEF CRIATIVO: {{brief_data}}
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-RECEITA VISUAL EXTRAÍDA DO VÍDEO DE REFERÊNCIA (replique FIELMENTE):
+RECEITA VISUAL GERAL DO VÍDEO DE REFERÊNCIA (replique FIELMENTE):
 {{reference_scene}}
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+BREAKDOWN POR TAKE — o que acontece EM CADA TAKE no vídeo de referência (CADA TAKE PODE SER VISUALMENTE DIFERENTE, respeite isso):
+{{per_take_scenes}}
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 PERSONA NOVA (troque SÓ a pessoa — nada mais):
@@ -143,10 +147,13 @@ Se copy_by_take tem take1,take2,take3,take4 → retorne { "take1": "...", "take2
 Se copy_by_take tem take1,take2,take3 → retorne { "take1": "...", "take2": "...", "take3": "..." }
 
 REGRAS CRÍTICAS (OBEDEÇA LITERALMENTE):
-- TODOS os takes REPLICAM o cenário da referência: MESMO ambiente, MESMA roupa, MESMOS objetos, MESMA iluminação, MESMO enquadramento, MESMA paleta. NÃO invente cenário novo. NÃO mude roupa. NÃO mude background.
-- A ÚNICA coisa que muda é a identidade física da pessoa: use a persona nova.
+- CADA TAKE deve replicar EXATAMENTE a cena correspondente do breakdown acima. Se o breakdown diz que o take 1 tem MULTIDÃO gritando, o take 1 DEVE mostrar multidão gritando. Se o take 2 tem UMA pessoa falando sozinha, o take 2 DEVE mostrar apenas UMA pessoa. NUNCA misture ou troque o conteúdo dos takes.
+- Respeite NÚMERO de pessoas, POSIÇÃO no frame, ENERGIA da cena, ENQUADRAMENTO e COMPOSIÇÃO de cada take individualmente — NÃO invente nada.
+- O cenário/ambiente base pode se manter igual, mas AÇÃO, PESSOAS e ENERGIA variam por take conforme o breakdown descreve.
+- A persona nova (avatar) aparece nas cenas onde a referência mostra UMA pessoa em close. Em cenas com multidão, TODAS as pessoas devem existir (não apenas a persona).
 - Se "hasMultipleVariants" for true no reference_scene, CADA take deve mostrar a variante correta daquele momento (ex: take1=vestido rosa, take2=vestido azul, etc).
-- A pessoa DEVE ser IDÊNTICA em TODOS os takes — mesmo rosto, mesma cor de pele, mesmo cabelo, mesmo corpo.
+- A pessoa central (quando aparece sozinha) DEVE ser IDÊNTICA em TODOS os takes onde aparece — mesmo rosto, mesma cor de pele, mesmo cabelo, mesmo corpo.
+- PROIBIDO: corpos cortados, membros deformados, pessoas invadindo objetos (mesa, parede), glitches visuais. Respeite ANATOMIA e composição REAL.
 
 REGRA ABSOLUTA DE NARRAÇÃO (NÃO VIOLAR EM HIPÓTESE ALGUMA):
 - Se narration_mode == "voiceover_narrator" E os roteiros dos takes estão VAZIOS (strings vazias ""):
