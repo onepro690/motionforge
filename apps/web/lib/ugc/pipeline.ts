@@ -18,8 +18,31 @@ import ffmpeg from "fluent-ffmpeg";
 import { writeFile, readFile, unlink, mkdir } from "fs/promises";
 import { join } from "path";
 import { randomBytes } from "crypto";
+import { execFile } from "child_process";
 
 ffmpeg.setFfmpegPath(ffmpegInstaller.path);
+
+// Get video duration using ffmpeg (no ffprobe needed)
+function getVideoDurationFfmpeg(videoPath: string): Promise<number> {
+  return new Promise((resolve) => {
+    let stderr = "";
+    const proc = execFile(ffmpegInstaller.path, ["-i", videoPath, "-f", "null", "-"], { timeout: 15000 });
+    proc.stderr?.on("data", (chunk: string) => { stderr += chunk; });
+    proc.on("close", () => {
+      const match = stderr.match(/Duration:\s*(\d+):(\d+):(\d+)\.(\d+)/);
+      if (match) {
+        const hours = parseInt(match[1]);
+        const minutes = parseInt(match[2]);
+        const seconds = parseInt(match[3]);
+        const centis = parseInt(match[4]);
+        resolve(hours * 3600 + minutes * 60 + seconds + centis / 100);
+      } else {
+        resolve(0);
+      }
+    });
+    proc.on("error", () => resolve(0));
+  });
+}
 
 const PROJECT_ID = "gen-lang-client-0466084510";
 const LOCATION = "us-central1";
@@ -98,21 +121,47 @@ async function extractLastFrame(videoUrl: string): Promise<{ data: string; mimeT
   const framePath = join(tmpDir, "lastframe.jpg");
 
   try {
-    // Download video
-    const res = await fetch(videoUrl, { signal: AbortSignal.timeout(30000) });
-    if (!res.ok) return null;
-    await writeFile(videoPath, Buffer.from(await res.arrayBuffer()));
+    // Download video — tenta com e sem token
+    console.log(`[extractLastFrame] Downloading: ${videoUrl.substring(0, 80)}...`);
+    let res = await fetch(videoUrl, { signal: AbortSignal.timeout(30000) }).catch(() => null);
+    // Se 403, tenta com token do Blob
+    if (!res || !res.ok) {
+      const blobToken = process.env.BLOB_READ_WRITE_TOKEN;
+      if (blobToken && videoUrl.includes("blob.vercel-storage.com")) {
+        console.log(`[extractLastFrame] Got ${res?.status ?? "error"}, retrying with BLOB_READ_WRITE_TOKEN...`);
+        res = await fetch(videoUrl, {
+          signal: AbortSignal.timeout(30000),
+          headers: { "Authorization": `Bearer ${blobToken}` },
+        }).catch(() => null);
+      }
+    }
+    // Se ainda falha, tenta via download endpoint do Vercel Blob
+    if (!res || !res.ok) {
+      console.log(`[extractLastFrame] Still failing (${res?.status ?? "error"}), trying x-vercel-blob-download...`);
+      res = await fetch(videoUrl, {
+        signal: AbortSignal.timeout(30000),
+        headers: { "x-vercel-blob-download": "1" },
+      }).catch(() => null);
+    }
+    if (!res || !res.ok) {
+      console.error(`[extractLastFrame] Download failed after all attempts: ${res?.status ?? "error"}`);
+      return null;
+    }
+    const buf = await res.arrayBuffer();
+    console.log(`[extractLastFrame] Downloaded ${buf.byteLength} bytes`);
+    await writeFile(videoPath, Buffer.from(buf));
 
     // Get duration
-    const duration: number = await new Promise((resolve) => {
-      ffmpeg.ffprobe(videoPath, (_err, data) => {
-        resolve(data?.format?.duration ?? 0);
-      });
-    });
-    if (duration <= 0) return null;
+    const duration = await getVideoDurationFfmpeg(videoPath);
+    console.log(`[extractLastFrame] duration: ${duration}`);
+    if (duration <= 0) {
+      console.error(`[extractLastFrame] Invalid duration: ${duration}`);
+      return null;
+    }
 
     // Extract frame at (duration - 0.1s) to get the very last usable frame
     const seekTime = Math.max(0, duration - 0.1);
+    console.log(`[extractLastFrame] Extracting frame at ${seekTime}s (duration=${duration}s)`);
     await new Promise<void>((resolve, reject) => {
       ffmpeg(videoPath)
         .seekInput(seekTime)
@@ -125,18 +174,100 @@ async function extractLastFrame(videoUrl: string): Promise<{ data: string; mimeT
     });
 
     const frameBuffer = await readFile(framePath);
+    console.log(`[extractLastFrame] Frame extracted: ${frameBuffer.byteLength} bytes at ${seekTime}s`);
     return {
       data: frameBuffer.toString("base64"),
       mimeType: "image/jpeg",
     };
   } catch (err) {
-    console.error("[pipeline] extractLastFrame error:", err);
+    console.error("[extractLastFrame] FAILED:", err);
     return null;
   } finally {
     await unlink(videoPath).catch(() => {});
     await unlink(framePath).catch(() => {});
     await import("fs/promises").then((fs) => fs.rmdir(tmpDir).catch(() => {}));
   }
+}
+
+// ── Extract last frame from video buffer in memory ────────────────────────
+// Takes a video buffer already in memory, writes to /tmp, extracts last frame.
+// Avoids re-downloading from blob (which can return 403).
+
+async function extractLastFrameFromBuffer(videoBuffer: Buffer): Promise<{ data: string; mimeType: string } | null> {
+  const id = randomBytes(6).toString("hex");
+  const tmpDir = join("/tmp", `lastframe-buf-${id}`);
+  await mkdir(tmpDir, { recursive: true });
+  const videoPath = join(tmpDir, "video.mp4");
+  const framePath = join(tmpDir, "lastframe.jpg");
+
+  try {
+    await writeFile(videoPath, videoBuffer);
+    console.log(`[extractLastFrameFromBuffer] Wrote ${videoBuffer.byteLength} bytes to ${videoPath}`);
+
+    const duration = await getVideoDurationFfmpeg(videoPath);
+    if (duration <= 0) {
+      console.error(`[extractLastFrameFromBuffer] Invalid duration: ${duration}`);
+      return null;
+    }
+
+    const seekTime = Math.max(0, duration - 0.1);
+    console.log(`[extractLastFrameFromBuffer] Extracting frame at ${seekTime}s (duration=${duration}s)`);
+    await new Promise<void>((resolve, reject) => {
+      ffmpeg(videoPath)
+        .seekInput(seekTime)
+        .frames(1)
+        .output(framePath)
+        .outputOptions(["-q:v", "2"])
+        .on("end", () => resolve())
+        .on("error", (err: Error) => reject(err))
+        .run();
+    });
+
+    const frameBuffer = await readFile(framePath);
+    console.log(`[extractLastFrameFromBuffer] Frame extracted: ${frameBuffer.byteLength} bytes`);
+    return { data: frameBuffer.toString("base64"), mimeType: "image/jpeg" };
+  } catch (err) {
+    console.error("[extractLastFrameFromBuffer] FAILED:", err);
+    return null;
+  } finally {
+    await unlink(videoPath).catch(() => {});
+    await unlink(framePath).catch(() => {});
+    await import("fs/promises").then((fs) => fs.rmdir(tmpDir).catch(() => {}));
+  }
+}
+
+// ── Persist last frame to Vercel Blob from a buffer ───────────────────────
+
+async function persistLastFrame(frame: { data: string; mimeType: string }, takeId: string): Promise<string | null> {
+  try {
+    const blob = await put(`ugc-lastframe-${takeId}.jpg`, Buffer.from(frame.data, "base64"), {
+      access: "public",
+      contentType: "image/jpeg",
+      addRandomSuffix: false,
+    });
+    console.log(`[persistLastFrame] Saved: ${blob.url}`);
+    await prisma.ugcGeneratedTake.update({
+      where: { id: takeId },
+      data: { lastFrameUrl: blob.url },
+    });
+    return blob.url;
+  } catch (err) {
+    console.error(`[persistLastFrame] Upload failed:`, err);
+    return null;
+  }
+}
+
+// ── Extract last frame from URL (downloads first) ────────────────────────
+// Fallback for when we don't have the buffer in memory.
+// Uses BLOB_READ_WRITE_TOKEN for authenticated access if available.
+
+async function extractAndPersistLastFrame(videoUrl: string, takeId: string): Promise<string | null> {
+  const frame = await extractLastFrame(videoUrl);
+  if (!frame) {
+    console.error(`[extractAndPersistLastFrame] Failed for take ${takeId}`);
+    return null;
+  }
+  return persistLastFrame(frame, takeId);
 }
 
 // ── Template helper ────────────────────────────────────────────────────────
@@ -187,10 +318,9 @@ export async function runVideoPipeline(
 
     const modelId = settings?.defaultModel ?? "veo3-fast";
     const voice = settings?.defaultVoice ?? "nova";
-    // Limite alto de takes — o pipeline decide quantos realmente precisa baseado
-    // na análise do vídeo (cenas visuais + duração da fala). O max aqui é só
-    // safety cap, não deve restringir o resultado normal.
-    const maxTakes = 6;
+    // Para fala, o pipeline precisa de ceil(duração/8) takes no mínimo.
+    // Não pode limitar abaixo disso senão perde palavras. Safety cap alto.
+    const maxTakes = 15;
 
     // ── Step 2: Analyze creative (or use existing brief) ───────────────────
     const t2 = Date.now();
@@ -618,6 +748,22 @@ export async function runVideoPipeline(
             `${k}=${v.split(/\s+/).length}w`).join(", "));
       }
 
+      // ── Validação: verifica que TODAS as palavras do transcript estão nos takeScripts ──
+      const originalWords = script.fullScript.split(/\s+/).filter(w => w.length > 0);
+      const takeWords = Object.values(takeScripts).join(" ").split(/\s+/).filter(w => w.length > 0);
+      if (takeWords.length < originalWords.length) {
+        await log(videoId, "speech_validation", "failed",
+          `WORDS LOST! Original: ${originalWords.length} words, Takes: ${takeWords.length} words. Diff: ${originalWords.length - takeWords.length} missing.`);
+        // Força redistribuição: coloca TUDO nos takes disponíveis sem perder nada
+        const allText = script.fullScript;
+        const wordsPerTake = Math.ceil(originalWords.length / takeCount);
+        for (let i = 0; i < takeCount; i++) {
+          const start = i * wordsPerTake;
+          const end = Math.min((i + 1) * wordsPerTake, originalWords.length);
+          takeScripts[`take${i + 1}`] = originalWords.slice(start, end).join(" ");
+        }
+      }
+
       // Remove takes vazios do final
       const nonEmptyKeys = Object.keys(takeScripts).filter(k => takeScripts[k].length > 0);
       if (nonEmptyKeys.length < takeCount) {
@@ -853,14 +999,97 @@ export async function pollAndAssembleTakes(videoId: string): Promise<{
     return { allDone: false, failedCount: 0, status: video.status };
   }
 
+  const MAX_RETRIES = 2; // Cada take pode ser retentado até 2x (total 3 tentativas)
+
   // Check status of all GenerationJobs
   const accessToken = await getAccessToken().catch(() => null);
   let allCompleted = true;
   let failedCount = 0;
+  let permanentlyFailed = 0; // takes que excederam max retries
 
   for (const take of video.takes) {
     if (take.status === "COMPLETED") continue;
-    if (take.status === "FAILED") { failedCount++; continue; }
+    if (take.status === "FAILED") {
+      // ── Auto-retry: se o take falhou mas ainda tem retries disponíveis, resubmete ──
+      if (take.retryCount < MAX_RETRIES && accessToken) {
+        console.log(`[pollAndAssemble] Take ${take.takeIndex} failed (retry ${take.retryCount}/${MAX_RETRIES}), auto-retrying...`);
+        await log(videoId, `retry_take_${take.takeIndex}`, "started",
+          `Retry ${take.retryCount + 1}/${MAX_RETRIES}: ${take.errorMessage ?? "unknown error"}`);
+
+        // Determina a imagem para o retry — prioriza lastFrameUrl do take anterior
+        let retryImage: { data: string; mimeType: string } | null = null;
+        const sortedForRetry = [...video.takes].sort((a, b) => a.takeIndex - b.takeIndex);
+
+        if (take.takeIndex > 0) {
+          const prevCompleted = sortedForRetry
+            .filter(t => t.takeIndex < take.takeIndex && t.status === "COMPLETED")
+            .pop();
+          // 1) lastFrameUrl persistido
+          if (prevCompleted?.lastFrameUrl) {
+            retryImage = await imageUrlToBase64(prevCompleted.lastFrameUrl).catch(() => null);
+          }
+          // 2) Extrai ao vivo
+          if (!retryImage && prevCompleted?.videoUrl) {
+            retryImage = await extractLastFrame(prevCompleted.videoUrl).catch(() => null);
+          }
+        }
+        // 3) Fallback: imagem editada (Nano Banana)
+        if (!retryImage) {
+          const editedUrl = take.editedImageUrl || sortedForRetry.find(t => t.takeIndex === 0)?.editedImageUrl;
+          if (editedUrl) retryImage = await imageUrlToBase64(editedUrl).catch(() => null);
+        }
+        // 4) Fallback: referenceFrame raw
+        if (!retryImage && take.referenceFrameUrl) {
+          retryImage = await imageUrlToBase64(take.referenceFrameUrl).catch(() => null);
+        }
+
+        const retryPrompt = take.veoPrompt ?? `Vertical 9:16 smartphone UGC video. Take ${take.takeIndex + 1}.`;
+        try {
+          const newOp = await submitVeoTake(retryPrompt, "veo3-fast", accessToken!, retryImage);
+          // Cria novo GenerationJob para o retry
+          const newGenJob = await prisma.generationJob.create({
+            data: {
+              userId: video.userId,
+              status: "PROCESSING",
+              provider: "veo3-fast",
+              inputImageUrl: take.referenceFrameUrl ?? "",
+              promptText: retryPrompt,
+              generatedPrompt: retryPrompt,
+              aspectRatio: "RATIO_9_16",
+              maxDuration: 8,
+              externalTaskId: newOp,
+              startedAt: new Date(),
+            },
+          });
+          await prisma.ugcGeneratedTake.update({
+            where: { id: take.id },
+            data: {
+              status: "PROCESSING",
+              errorMessage: null,
+              retryCount: take.retryCount + 1,
+              veoJobId: newGenJob.id,
+            },
+          });
+          await log(videoId, `retry_take_${take.takeIndex}`, "completed",
+            `Resubmitted (attempt ${take.retryCount + 1})`);
+          allCompleted = false;
+          continue;
+        } catch (retryErr) {
+          console.error(`[pollAndAssemble] Auto-retry failed for take ${take.takeIndex}:`, retryErr);
+          await log(videoId, `retry_take_${take.takeIndex}`, "failed", String(retryErr));
+          // Mantém como FAILED, será retentado no próximo ciclo se ainda tiver retries
+          if (take.retryCount + 1 >= MAX_RETRIES) {
+            permanentlyFailed++;
+          }
+          failedCount++;
+          continue;
+        }
+      }
+      // Excedeu max retries — falha permanente
+      permanentlyFailed++;
+      failedCount++;
+      continue;
+    }
     if (!take.veoJobId || !accessToken) { allCompleted = false; continue; }
 
     const genJob = await prisma.generationJob.findUnique({ where: { id: take.veoJobId } });
@@ -871,14 +1100,52 @@ export async function pollAndAssembleTakes(videoId: string): Promise<{
         where: { id: take.id },
         data: { status: "COMPLETED", videoUrl: genJob.outputVideoUrl },
       });
+      // Se não tem lastFrameUrl, re-poll o Vertex para pegar o video original e extrair frame
+      if (!take.lastFrameUrl && genJob.externalTaskId && accessToken) {
+        console.log(`[pollAndAssemble] Take ${take.takeIndex} needs lastFrame, re-polling Vertex for raw video...`);
+        try {
+          const opName = genJob.externalTaskId;
+          const mm = opName.match(/publishers\/google\/models\/([^/]+)\//);
+          const mid = mm?.[1] ?? "veo-3.0-fast-generate-001";
+          const fetchUrl = `https://us-central1-aiplatform.googleapis.com/v1/projects/${process.env.GOOGLE_CLOUD_PROJECT ?? PROJECT_ID}/locations/us-central1/publishers/google/models/${mid}:fetchPredictOperation`;
+          const opRes = await fetch(fetchUrl, {
+            method: "POST",
+            headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" },
+            body: JSON.stringify({ operationName: opName }),
+          });
+          const opData = (await opRes.json()) as { response?: { videos?: Array<{ uri?: string; bytesBase64Encoded?: string }> } };
+          const entry = opData.response?.videos?.[0];
+          let videoBuf: Buffer | null = null;
+          if (entry?.bytesBase64Encoded) {
+            videoBuf = Buffer.from(entry.bytesBase64Encoded, "base64");
+          } else if (entry?.uri) {
+            const ws = entry.uri.startsWith("gs://") ? entry.uri.slice(5) : entry.uri;
+            const si = ws.indexOf("/");
+            const bkt = ws.slice(0, si);
+            const obj = encodeURIComponent(ws.slice(si + 1));
+            const gcsRes = await fetch(`https://storage.googleapis.com/storage/v1/b/${bkt}/o/${obj}?alt=media`, {
+              headers: { Authorization: `Bearer ${accessToken}` },
+            });
+            if (gcsRes.ok) videoBuf = Buffer.from(await gcsRes.arrayBuffer());
+          }
+          if (videoBuf) {
+            const lastFrame = await extractLastFrameFromBuffer(videoBuf);
+            if (lastFrame) await persistLastFrame(lastFrame, take.id);
+          }
+        } catch (e) {
+          console.error(`[pollAndAssemble] re-poll for lastFrame failed for take ${take.takeIndex}:`, e);
+        }
+      }
       continue;
     }
     if (genJob.status === "FAILED") {
+      // Marca take como FAILED — o auto-retry será feito no próximo ciclo de polling
       await prisma.ugcGeneratedTake.update({
         where: { id: take.id },
         data: { status: "FAILED", errorMessage: genJob.errorMessage },
       });
       failedCount++;
+      allCompleted = false; // Vai ser retentado no próximo ciclo
       continue;
     }
 
@@ -905,31 +1172,11 @@ export async function pollAndAssembleTakes(videoId: string): Promise<{
 
       if (opData.error) {
         const errMsg = opData.error.message ?? "";
-        // Se Veo rejeitou a imagem por "usage guidelines", tenta com frame raw de referência
-        if (errMsg.includes("usage guidelines") || errMsg.includes("violat")) {
-          console.warn(`[pollAndAssemble] Take ${take.takeIndex} image rejected by Veo, retrying with reference frame...`);
-          try {
-            const retryPrompt = take.veoPrompt ?? `Vertical 9:16 smartphone UGC video. Take ${take.takeIndex + 1}.`;
-            // Tenta com o frame raw de referência — se este take não tem, usa o do take 0
-            let retryImage: { data: string; mimeType: string } | null = null;
-            const refUrl = take.referenceFrameUrl
-              ?? video.takes.find((t) => t.takeIndex === 0)?.referenceFrameUrl;
-            if (refUrl) {
-              console.log(`[pollAndAssemble] Using reference frame for retry: ${refUrl.substring(0, 60)}...`);
-              retryImage = await imageUrlToBase64(refUrl).catch(() => null);
-            }
-            const retryOp = await submitVeoTake(retryPrompt, "veo3-fast", accessToken!, retryImage);
-            await prisma.generationJob.update({ where: { id: genJob.id }, data: { externalTaskId: retryOp, status: "PROCESSING", errorMessage: null } });
-            await prisma.ugcGeneratedTake.update({ where: { id: take.id }, data: { status: "PROCESSING", errorMessage: null } });
-            allCompleted = false;
-            continue;
-          } catch (retryErr) {
-            console.error(`[pollAndAssemble] Retry also failed:`, retryErr);
-          }
-        }
+        // Marca como FAILED — o auto-retry será feito no próximo ciclo
         await prisma.generationJob.update({ where: { id: genJob.id }, data: { status: "FAILED", errorMessage: errMsg } });
         await prisma.ugcGeneratedTake.update({ where: { id: take.id }, data: { status: "FAILED", errorMessage: errMsg } });
         failedCount++;
+        allCompleted = false; // Vai ser retentado no próximo ciclo
         continue;
       }
 
@@ -939,8 +1186,9 @@ export async function pollAndAssembleTakes(videoId: string): Promise<{
       const rawUri = videoEntry?.uri;
 
       let videoUrl: string;
+      let videoBuffer: Buffer;
       if (rawBase64) {
-        const videoBuffer = Buffer.from(rawBase64, "base64");
+        videoBuffer = Buffer.from(rawBase64, "base64");
         const blob = await put(`ugc-take-${take.id}.mp4`, videoBuffer, { access: "public", contentType: "video/mp4", addRandomSuffix: false });
         videoUrl = blob.url;
       } else if (rawUri) {
@@ -953,31 +1201,73 @@ export async function pollAndAssembleTakes(videoId: string): Promise<{
           headers: { Authorization: `Bearer ${accessToken}` },
         });
         const buf = await gcsRes.arrayBuffer();
-        const blob = await put(`ugc-take-${take.id}.mp4`, Buffer.from(buf), { access: "public", contentType: "video/mp4", addRandomSuffix: false });
+        videoBuffer = Buffer.from(buf);
+        const blob = await put(`ugc-take-${take.id}.mp4`, videoBuffer, { access: "public", contentType: "video/mp4", addRandomSuffix: false });
         videoUrl = blob.url;
       } else {
-        await prisma.ugcGeneratedTake.update({ where: { id: take.id }, data: { status: "FAILED", errorMessage: "No video returned" } });
+        await prisma.ugcGeneratedTake.update({ where: { id: take.id }, data: { status: "FAILED", errorMessage: "Veo não retornou vídeo" } });
         failedCount++;
+        allCompleted = false;
         continue;
       }
 
       await prisma.generationJob.update({ where: { id: genJob.id }, data: { status: "COMPLETED", outputVideoUrl: videoUrl, completedAt: new Date() } });
       await prisma.ugcGeneratedTake.update({ where: { id: take.id }, data: { status: "COMPLETED", videoUrl } });
+
+      // Extrai último frame DIRETO DO BUFFER em memória (não re-baixa do blob — evita 403)
+      console.log(`[pollAndAssemble] Take ${take.takeIndex} completed, extracting last frame from buffer (${videoBuffer.byteLength} bytes)...`);
+      const lastFrame = await extractLastFrameFromBuffer(videoBuffer).catch((e) => {
+        console.error(`[pollAndAssemble] extractLastFrameFromBuffer failed for take ${take.takeIndex}:`, e);
+        return null;
+      });
+      if (lastFrame) {
+        await persistLastFrame(lastFrame, take.id).catch((e) =>
+          console.error(`[pollAndAssemble] persistLastFrame failed for take ${take.takeIndex}:`, e));
+      }
     } catch {
       allCompleted = false;
     }
   }
 
-  if (failedCount === video.takes.length) {
-    await prisma.ugcGeneratedVideo.update({ where: { id: videoId }, data: { status: "FAILED", errorMessage: "All takes failed" } });
+  // Se TODOS os takes falharam permanentemente (excederam retries), marca vídeo como FAILED
+  if (permanentlyFailed === video.takes.length) {
+    const failedReasons = video.takes
+      .filter(t => t.errorMessage)
+      .map(t => `Take ${t.takeIndex + 1}: ${t.errorMessage}`)
+      .join("; ");
+    await prisma.ugcGeneratedVideo.update({
+      where: { id: videoId },
+      data: { status: "FAILED", errorMessage: `Todos os takes falharam após ${MAX_RETRIES} tentativas. ${failedReasons}` },
+    });
     return { allDone: true, failedCount, status: "FAILED" };
+  }
+
+  // Se algum take falhou permanentemente mas outros completaram, marca vídeo como FAILED
+  // (não pode faltar nenhuma parte)
+  if (permanentlyFailed > 0) {
+    const allOthersDone = video.takes.every(t =>
+      t.status === "COMPLETED" || (t.status === "FAILED" && t.retryCount >= MAX_RETRIES)
+    );
+    if (allOthersDone) {
+      const failedTakes = video.takes
+        .filter(t => t.status === "FAILED")
+        .map(t => `Take ${t.takeIndex + 1}: ${t.errorMessage ?? "erro desconhecido"}`)
+        .join("; ");
+      await prisma.ugcGeneratedVideo.update({
+        where: { id: videoId },
+        data: { status: "FAILED", errorMessage: `Takes falharam após retentativas: ${failedTakes}` },
+      });
+      return { allDone: true, failedCount, status: "FAILED" };
+    }
   }
 
   // ── Encadeamento sequencial de takes de fala ──
   // Se há takes QUEUED (sem externalTaskId), verifica se o take anterior
   // completou. Se sim, extrai o último frame do vídeo anterior e submete
   // o próximo take com essa imagem como input.
-  const sortedTakes = [...video.takes].sort((a, b) => a.takeIndex - b.takeIndex);
+  // Re-fetch takes pois o auto-retry acima pode ter alterado statuses
+  const freshTakesForChain = await prisma.ugcGeneratedTake.findMany({ where: { videoId }, orderBy: { takeIndex: "asc" } });
+  const sortedTakes = freshTakesForChain;
   for (const take of sortedTakes) {
     if (take.status !== "QUEUED") continue;
 
@@ -991,45 +1281,12 @@ export async function pollAndAssembleTakes(videoId: string): Promise<{
       continue;
     }
 
-    // Se o take anterior falhou, procura o último COMPLETED antes dele
-    // para não travar a cadeia inteira por causa de 1 take falhado
+    // Se o take anterior falhou, espera o auto-retry resolver (não pula — todas as partes são obrigatórias)
     if (prevTake.status === "FAILED") {
-      const lastCompleted = [...sortedTakes]
-        .filter(t => t.takeIndex < take.takeIndex && t.status === "COMPLETED" && t.videoUrl)
-        .pop();
-      if (lastCompleted) {
-        // Continua encadeando a partir do último completado
-        console.log(`[pollAndAssemble] Take ${prevTake.takeIndex} failed, chaining from last completed take ${lastCompleted.takeIndex}`);
-        // Substitui prevTake efetivamente — cai no fluxo normal abaixo
-        Object.assign(prevTake, lastCompleted);
-      } else {
-        // Nenhum take anterior completou — usa a imagem editada
-        const editedUrl = take.editedImageUrl || sortedTakes.find(t => t.takeIndex === 0)?.editedImageUrl;
-        if (editedUrl) {
-          console.log(`[pollAndAssemble] No completed takes before ${take.takeIndex}, using edited image`);
-          const chainImg = await imageUrlToBase64(editedUrl).catch(() => null);
-          if (chainImg) {
-            const takePrompt = take.veoPrompt ?? `Vertical 9:16 smartphone UGC video. Take ${take.takeIndex + 1}.`;
-            try {
-              const opName = await submitVeoTake(takePrompt, "veo3-fast", accessToken!, chainImg);
-              await prisma.generationJob.update({ where: { id: genJob.id }, data: { externalTaskId: opName, status: "PROCESSING" } });
-              await prisma.ugcGeneratedTake.update({ where: { id: take.id }, data: { status: "PROCESSING" } });
-              console.log(`[pollAndAssemble] Chained take ${take.takeIndex} submitted with edited image (prev failed)`);
-            } catch (err) {
-              await prisma.generationJob.update({ where: { id: genJob.id }, data: { status: "FAILED", errorMessage: String(err) } });
-              await prisma.ugcGeneratedTake.update({ where: { id: take.id }, data: { status: "FAILED", errorMessage: String(err) } });
-              failedCount++;
-            }
-            allCompleted = false;
-            break;
-          }
-        }
-        // Sem fallback — marca como falhou
-        await prisma.generationJob.update({ where: { id: genJob.id }, data: { status: "FAILED", errorMessage: "Previous take failed, no fallback" } });
-        await prisma.ugcGeneratedTake.update({ where: { id: take.id }, data: { status: "FAILED", errorMessage: "Previous take failed" } });
-        failedCount++;
-        continue;
-      }
+      // O auto-retry do loop acima vai cuidar de resubmeter o prevTake
+      // Enquanto ele não completar, este take fica QUEUED esperando
+      allCompleted = false;
+      continue;
     }
 
     if (prevTake.status !== "COMPLETED" || !prevTake.videoUrl) {
@@ -1037,42 +1294,82 @@ export async function pollAndAssembleTakes(videoId: string): Promise<{
       continue; // Anterior ainda não completou
     }
 
-    // Extrai último frame do take anterior como input image
-    console.log(`[pollAndAssemble] Extracting last frame from take ${prevTake.takeIndex} for take ${take.takeIndex}...`);
-    let chainImage = await extractLastFrame(prevTake.videoUrl).catch((e) => {
-      console.error(`[pollAndAssemble] extractLastFrame failed:`, e);
-      return null;
-    });
+    // ── Busca ÚLTIMO FRAME do take anterior para encadear ──
+    // OBRIGATÓRIO: cada take DEVE começar do último frame do anterior.
+    // Se não conseguir extrair, NÃO usa fallback — espera próximo ciclo.
+    let chainImage: { data: string; mimeType: string } | null = null;
+    let chainSource = "";
 
-    // Fallback 1: extrai último frame do vídeo OUTPUT do take 0 (avatar correto)
-    if (!chainImage) {
-      const take0 = sortedTakes.find(t => t.takeIndex === 0);
-      if (take0?.videoUrl) {
-        console.log(`[pollAndAssemble] Fallback 1: extracting last frame from take 0 output video`);
-        chainImage = await extractLastFrame(take0.videoUrl).catch((e) => {
-          console.error(`[pollAndAssemble] Fallback 1 extractLastFrame from take 0 failed:`, e);
-          return null;
-        });
+    // 1) lastFrameUrl persistido no DB (melhor opção — já extraído e salvo como blob)
+    if (prevTake.lastFrameUrl) {
+      chainImage = await imageUrlToBase64(prevTake.lastFrameUrl).catch(() => null);
+      if (chainImage) chainSource = `persisted lastFrameUrl from take ${prevTake.takeIndex}`;
+    }
+
+    // 2) Se não tem lastFrameUrl, tenta extrair ao vivo
+    if (!chainImage && prevTake.videoUrl) {
+      console.log(`[pollAndAssemble] No lastFrameUrl for take ${prevTake.takeIndex}, trying extractLastFrame...`);
+      chainImage = await extractLastFrame(prevTake.videoUrl).catch(() => null);
+      if (chainImage) {
+        chainSource = `live-extracted from take ${prevTake.takeIndex} video`;
+        // Salva para futuro uso
+        await persistLastFrame(chainImage, prevTake.id).catch(() => {});
       }
     }
 
-    // Fallback 2: usa a imagem editada pelo Nano Banana (avatar correto)
-    if (!chainImage) {
-      const editedUrl = sortedTakes.find(t => t.takeIndex === 0)?.editedImageUrl
-        || take.editedImageUrl;
-      if (editedUrl) {
-        console.log(`[pollAndAssemble] Fallback 2: using Nano Banana edited image`);
-        chainImage = await imageUrlToBase64(editedUrl).catch(() => null);
+    // 3) Se blob deu 403, tenta re-poll do Vertex AI para pegar o video original
+    if (!chainImage && prevTake.veoJobId && accessToken) {
+      console.log(`[pollAndAssemble] Blob failed, re-polling Vertex for take ${prevTake.takeIndex} raw video...`);
+      try {
+        const prevGenJob = await prisma.generationJob.findUnique({ where: { id: prevTake.veoJobId } });
+        if (prevGenJob?.externalTaskId) {
+          const mm = prevGenJob.externalTaskId.match(/publishers\/google\/models\/([^/]+)\//);
+          const mid = mm?.[1] ?? "veo-3.0-fast-generate-001";
+          const fetchUrl = `https://us-central1-aiplatform.googleapis.com/v1/projects/${process.env.GOOGLE_CLOUD_PROJECT ?? PROJECT_ID}/locations/us-central1/publishers/google/models/${mid}:fetchPredictOperation`;
+          const opRes = await fetch(fetchUrl, {
+            method: "POST",
+            headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" },
+            body: JSON.stringify({ operationName: prevGenJob.externalTaskId }),
+          });
+          const opData = (await opRes.json()) as { response?: { videos?: Array<{ uri?: string; bytesBase64Encoded?: string }> } };
+          const entry = opData.response?.videos?.[0];
+          let videoBuf: Buffer | null = null;
+          if (entry?.bytesBase64Encoded) {
+            videoBuf = Buffer.from(entry.bytesBase64Encoded, "base64");
+          } else if (entry?.uri) {
+            const ws = entry.uri.startsWith("gs://") ? entry.uri.slice(5) : entry.uri;
+            const si = ws.indexOf("/");
+            const bkt = ws.slice(0, si);
+            const obj = encodeURIComponent(ws.slice(si + 1));
+            const gcsRes = await fetch(`https://storage.googleapis.com/storage/v1/b/${bkt}/o/${obj}?alt=media`, {
+              headers: { Authorization: `Bearer ${accessToken}` },
+            });
+            if (gcsRes.ok) videoBuf = Buffer.from(await gcsRes.arrayBuffer());
+          }
+          if (videoBuf) {
+            const lastFrame = await extractLastFrameFromBuffer(videoBuf);
+            if (lastFrame) {
+              chainImage = lastFrame;
+              chainSource = `re-polled from Vertex AI for take ${prevTake.takeIndex}`;
+              await persistLastFrame(lastFrame, prevTake.id).catch(() => {});
+            }
+          }
+        }
+      } catch (e) {
+        console.error(`[pollAndAssemble] Vertex re-poll failed:`, e);
       }
     }
 
+    // 4) Se NADA funcionou, NÃO usa Nano Banana — espera próximo polling cycle
     if (!chainImage) {
-      console.error(`[pollAndAssemble] No image available for chained take ${take.takeIndex}`);
-      await prisma.generationJob.update({ where: { id: genJob.id }, data: { status: "FAILED", errorMessage: "No chain image from previous take" } });
-      await prisma.ugcGeneratedTake.update({ where: { id: take.id }, data: { status: "FAILED", errorMessage: "Could not extract frame from previous take" } });
-      failedCount++;
-      continue;
+      console.warn(`[pollAndAssemble] Could not get last frame from take ${prevTake.takeIndex} for take ${take.takeIndex} — waiting for next poll cycle`);
+      await log(videoId, `chain_take_${take.takeIndex}`, "started",
+        `Waiting: could not extract last frame from take ${prevTake.takeIndex}. Will retry next cycle.`);
+      allCompleted = false;
+      break;
     }
+
+    console.log(`[pollAndAssemble] Chain image for take ${take.takeIndex}: ${chainSource}`);
 
     // Submete o take com o último frame do anterior
     const takePrompt = take.veoPrompt ?? `Vertical 9:16 smartphone UGC video. Take ${take.takeIndex + 1}.`;
@@ -1080,7 +1377,9 @@ export async function pollAndAssembleTakes(videoId: string): Promise<{
       const opName = await submitVeoTake(takePrompt, "veo3-fast", accessToken!, chainImage);
       await prisma.generationJob.update({ where: { id: genJob.id }, data: { externalTaskId: opName, status: "PROCESSING" } });
       await prisma.ugcGeneratedTake.update({ where: { id: take.id }, data: { status: "PROCESSING" } });
-      console.log(`[pollAndAssemble] Chained take ${take.takeIndex} submitted with last frame from take ${prevTake.takeIndex}`);
+      await log(videoId, `chain_take_${take.takeIndex}`, "completed",
+        `Submitted with LAST FRAME from take ${prevTake.takeIndex} (${chainSource}, ${chainImage.data.length} bytes base64)`);
+      console.log(`[pollAndAssemble] Chained take ${take.takeIndex} submitted with ${chainSource}`);
     } catch (err) {
       console.error(`[pollAndAssemble] Failed to submit chained take ${take.takeIndex}:`, err);
       await prisma.generationJob.update({ where: { id: genJob.id }, data: { status: "FAILED", errorMessage: String(err) } });
@@ -1095,17 +1394,24 @@ export async function pollAndAssembleTakes(videoId: string): Promise<{
     return { allDone: false, failedCount, status: "GENERATING_TAKES" };
   }
 
-  // All done — assemble
+  // All done — verify ALL takes are COMPLETED before assembling (não pode faltar nenhuma parte)
+  const freshTakes = await prisma.ugcGeneratedTake.findMany({
+    where: { videoId },
+    orderBy: { takeIndex: "asc" },
+  });
+  const allTakesCompleted = freshTakes.every(t => t.status === "COMPLETED");
+  if (!allTakesCompleted) {
+    // Algum take ainda não completou — não deve ter chegado aqui, mas safety check
+    const missing = freshTakes.filter(t => t.status !== "COMPLETED");
+    console.warn(`[pollAndAssemble] Assembly blocked: ${missing.length} takes not completed:`, missing.map(t => `take${t.takeIndex}=${t.status}`));
+    return { allDone: false, failedCount, status: "GENERATING_TAKES" };
+  }
+
   await prisma.ugcGeneratedVideo.update({ where: { id: videoId }, data: { status: "ASSEMBLING" } });
-  await log(videoId, "assemble", "started");
+  await log(videoId, "assemble", "started", `All ${freshTakes.length} takes completed, assembling...`);
 
   try {
-    const completedTakes = await prisma.ugcGeneratedTake.findMany({
-      where: { videoId, status: "COMPLETED" },
-      orderBy: { takeIndex: "asc" },
-    });
-
-    const takeInfos = completedTakes
+    const takeInfos = freshTakes
       .filter((t) => t.videoUrl)
       .map((t) => ({ url: t.videoUrl! }));
 

@@ -34,7 +34,7 @@ export async function GET(request: NextRequest) {
         product: { select: { name: true, thumbnailUrl: true, score: true } },
         _count: { select: { takes: true } },
         takes: {
-          select: { takeIndex: true, status: true, durationSeconds: true },
+          select: { takeIndex: true, status: true, durationSeconds: true, errorMessage: true, retryCount: true },
           orderBy: { takeIndex: "asc" },
         },
       },

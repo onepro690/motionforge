@@ -19,6 +19,7 @@
     "typescript": "^5.0.0"
   },
   "dependencies": {
+    "@ffprobe-installer/ffprobe": "^2.1.2",
     "tiktok-live-connector": "^2.1.1-beta1"
   }
 }

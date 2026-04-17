@@ -380,8 +380,10 @@ model UgcGeneratedTake {
   videoUrl          String?
   durationSeconds   Float?
   errorMessage      String?
+  retryCount        Int       @default(0)
   referenceFrameUrl String?
   editedImageUrl    String?
+  lastFrameUrl      String?
   createdAt         DateTime  @default(now())
   updatedAt         DateTime  @updatedAt
 

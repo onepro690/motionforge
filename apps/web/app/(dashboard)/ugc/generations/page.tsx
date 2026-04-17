@@ -3,7 +3,7 @@ import { useEffect, useState, useCallback } from "react";
 import Link from "next/link";
 import {
   Video, Loader2, ChevronLeft, ChevronRight, Play, Download,
-  Eye, Clock, CheckCircle, XCircle, RotateCcw, AlertCircle, Zap, Trash2
+  Eye, Clock, CheckCircle, XCircle, RotateCcw, AlertCircle, Zap, Trash2, Scissors
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
@@ -19,6 +19,8 @@ interface TakeStatus {
   takeIndex: number;
   status: string;
   durationSeconds: number | null;
+  errorMessage: string | null;
+  retryCount: number;
 }
 
 interface GeneratedVideo {
@@ -145,11 +147,13 @@ function VideoCard({ video, onRefresh, onDeleted }: { video: GeneratedVideo; onR
         </div>
 
         {/* Take progress */}
-        {isInProgress && video.takes && video.takes.length > 0 && (
+        {video.takes && video.takes.length > 0 && (isInProgress || video.status === "FAILED") && (
           <div className="space-y-1.5">
             <div className="flex gap-1">
               {video.takes.map((take) => {
+                const isRetrying = take.status === "PROCESSING" && take.retryCount > 0;
                 const bg = take.status === "COMPLETED" ? "bg-emerald-500"
+                  : isRetrying ? "bg-orange-400 animate-pulse"
                   : take.status === "PROCESSING" ? "bg-cyan-400 animate-pulse"
                   : take.status === "FAILED" ? "bg-red-500"
                   : "bg-white/10";
@@ -157,7 +161,7 @@ function VideoCard({ video, onRefresh, onDeleted }: { video: GeneratedVideo; onR
                   <div
                     key={take.takeIndex}
                     className={`flex-1 h-1.5 rounded-full ${bg}`}
-                    title={`Take ${take.takeIndex + 1}: ${take.status}`}
+                    title={`Take ${take.takeIndex + 1}: ${take.status}${take.retryCount > 0 ? ` (tentativa ${take.retryCount + 1})` : ""}${take.errorMessage ? ` — ${take.errorMessage}` : ""}`}
                   />
                 );
               })}
@@ -167,13 +171,21 @@ function VideoCard({ video, onRefresh, onDeleted }: { video: GeneratedVideo; onR
                 const completed = video.takes.filter(t => t.status === "COMPLETED").length;
                 const processing = video.takes.filter(t => t.status === "PROCESSING").length;
                 const failed = video.takes.filter(t => t.status === "FAILED").length;
+                const retrying = video.takes.filter(t => t.status === "PROCESSING" && t.retryCount > 0).length;
                 const total = video.takes.length;
+                if (retrying > 0) return `Retentando ${retrying} take${retrying > 1 ? "s" : ""}...`;
                 if (processing > 0) return `Take ${completed + 1}/${total} gerando...`;
                 if (completed === total) return `${total} takes prontos, montando...`;
                 if (failed > 0) return `${completed}/${total} prontos, ${failed} falhou`;
                 return `${completed}/${total} prontos, aguardando...`;
               })()}
             </p>
+            {/* Show error messages for failed takes */}
+            {video.takes.filter(t => t.status === "FAILED" && t.errorMessage).map((take) => (
+              <p key={take.takeIndex} className="text-xs text-red-400/80 truncate" title={take.errorMessage!}>
+                Take {take.takeIndex + 1}: {take.errorMessage}
+              </p>
+            ))}
           </div>
         )}
 
@@ -200,14 +212,21 @@ function VideoCard({ video, onRefresh, onDeleted }: { video: GeneratedVideo; onR
             </Button>
           </Link>
           {video.finalVideoUrl && (
-            <DownloadButton
-              url={video.finalVideoUrl}
-              filename={`ugc-${video.id.slice(-8)}.mp4`}
-              size="sm"
-              variant="outline"
-              className="border-white/10 text-white/60 hover:text-white text-xs h-8 px-2"
-              iconOnly
-            />
+            <>
+              <Link href={`/ugc/edit?id=${video.id}`}>
+                <Button size="sm" variant="outline" className="border-white/10 text-white/60 hover:text-white text-xs h-8 px-2" title="Editar">
+                  <Scissors className="w-3 h-3" />
+                </Button>
+              </Link>
+              <DownloadButton
+                url={video.finalVideoUrl}
+                filename={`ugc-${video.id.slice(-8)}.mp4`}
+                size="sm"
+                variant="outline"
+                className="border-white/10 text-white/60 hover:text-white text-xs h-8 px-2"
+                iconOnly
+              />
+            </>
           )}
           {isInProgress && (
             <Button size="sm" variant="outline" className="border-white/10 text-white/60 hover:text-white text-xs h-8 px-2" onClick={onRefresh}>

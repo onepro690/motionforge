@@ -8,8 +8,31 @@ import { writeFile, readFile, unlink, mkdir } from "fs/promises";
 import { join } from "path";
 import { randomBytes } from "crypto";
 import { put } from "@vercel/blob";
+import { execFile } from "child_process";
 
 ffmpeg.setFfmpegPath(ffmpegInstaller.path);
+
+// Get video duration using ffmpeg (no ffprobe needed)
+function getVideoDurationFfmpeg(videoPath: string): Promise<number> {
+  return new Promise((resolve) => {
+    let stderr = "";
+    const proc = execFile(ffmpegInstaller.path, ["-i", videoPath, "-f", "null", "-"], { timeout: 15000 });
+    proc.stderr?.on("data", (chunk: string) => { stderr += chunk; });
+    proc.on("close", () => {
+      const match = stderr.match(/Duration:\s*(\d+):(\d+):(\d+)\.(\d+)/);
+      if (match) {
+        const hours = parseInt(match[1]);
+        const minutes = parseInt(match[2]);
+        const seconds = parseInt(match[3]);
+        const centis = parseInt(match[4]);
+        resolve(hours * 3600 + minutes * 60 + seconds + centis / 100);
+      } else {
+        resolve(0);
+      }
+    });
+    proc.on("error", () => resolve(0));
+  });
+}
 
 interface TakeInfo {
   url: string;
@@ -78,11 +101,7 @@ async function mixAudio(
 
 // Get video duration in seconds
 async function getVideoDuration(videoPath: string): Promise<number> {
-  return new Promise((resolve) => {
-    ffmpeg.ffprobe(videoPath, (_err, data) => {
-      resolve(data?.format?.duration ?? 0);
-    });
-  });
+  return getVideoDurationFfmpeg(videoPath);
 }
 
 // Trim trailing silence from a video.
@@ -105,9 +124,7 @@ async function trimTrailingSilence(inputPath: string, outputPath: string): Promi
 
     // Parse silence_end timestamps — find the last one
     const silenceEndMatches = [...silenceInfo.matchAll(/silence_end:\s*([\d.]+)/g)];
-    const duration = await new Promise<number>((resolve) => {
-      ffmpeg.ffprobe(inputPath, (_err, data) => resolve(data?.format?.duration ?? 0));
-    });
+    const duration = await getVideoDurationFfmpeg(inputPath);
 
     if (silenceEndMatches.length === 0 || duration <= 0) {
       // No silence detected or can't get duration — use original

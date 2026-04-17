@@ -3,7 +3,7 @@ import { useEffect, useState, useCallback } from "react";
 import { useSearchParams, useRouter } from "next/navigation";
 import {
   CheckCircle, XCircle, RotateCcw, Loader2, Video, Play, Pause,
-  ChevronDown, ChevronUp, Download, FileText, Code, Activity
+  ChevronDown, ChevronUp, Download, FileText, Code, Activity, Scissors
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
@@ -304,16 +304,29 @@ export default function ReviewPage() {
                       v{video.version} • {video.durationSeconds ? `${Math.round(video.durationSeconds)}s` : "?"} • {video.takeCount} takes
                     </p>
                   </div>
-                  {video.finalVideoUrl && (
-                    <DownloadButton
-                      url={video.finalVideoUrl}
-                      filename={`ugc-${video.id.slice(-8)}.mp4`}
-                      label="Download"
-                      size="sm"
-                      variant="outline"
-                      className="border-white/10 text-white/60 hover:text-white"
-                    />
-                  )}
+                  <div className="flex gap-2">
+                    {video.finalVideoUrl && (
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        className="border-white/10 text-white/60 hover:text-white"
+                        onClick={() => router.push(`/ugc/edit?id=${video.id}`)}
+                      >
+                        <Scissors className="w-3.5 h-3.5 mr-1.5" />
+                        Editar
+                      </Button>
+                    )}
+                    {video.finalVideoUrl && (
+                      <DownloadButton
+                        url={video.finalVideoUrl}
+                        filename={`ugc-${video.id.slice(-8)}.mp4`}
+                        label="Download"
+                        size="sm"
+                        variant="outline"
+                        className="border-white/10 text-white/60 hover:text-white"
+                      />
+                    )}
+                  </div>
                 </div>
 
                 {/* Tabs */}
