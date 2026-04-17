@@ -70,6 +70,9 @@ function EditPageContent() {
   const [selectEnd, setSelectEnd] = useState<number | null>(null);
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const timelineRef = useRef<HTMLDivElement | null>(null);
+  const seekbarRef = useRef<HTMLDivElement | null>(null);
+  const cutsRef = useRef<CutRegion[]>([]);
+  useEffect(() => { cutsRef.current = cuts; }, [cuts]);
 
   const load = useCallback(async () => {
     if (!videoId) return;
@@ -84,13 +87,28 @@ function EditPageContent() {
 
   useEffect(() => { load(); }, [load]);
 
-  const getTimeFromX = useCallback((clientX: number) => {
-    const el = timelineRef.current;
+  const getTimeFromX = useCallback((clientX: number, bar?: HTMLDivElement | null) => {
+    const el = bar ?? timelineRef.current;
     if (!el || duration <= 0) return 0;
     const rect = el.getBoundingClientRect();
     const ratio = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
     return ratio * duration;
   }, [duration]);
+
+  // Skip over cut regions during playback.
+  const handleTimeUpdate = () => {
+    const el = videoRef.current;
+    if (!el) return;
+    const t = el.currentTime;
+    for (const c of cutsRef.current) {
+      if (t >= c.start - 0.02 && t < c.end) {
+        el.currentTime = Math.min(duration || c.end, c.end + 0.01);
+        setCurrentTime(el.currentTime);
+        return;
+      }
+    }
+    setCurrentTime(t);
+  };
 
   const handleVideoLoaded = () => {
     const el = videoRef.current;
@@ -205,12 +223,48 @@ function EditPageContent() {
               preload="metadata"
               onLoadedMetadata={handleVideoLoaded}
               onDurationChange={handleVideoLoaded}
-              onTimeUpdate={() => { const el = videoRef.current; if (el) setCurrentTime(el.currentTime); }}
+              onTimeUpdate={handleTimeUpdate}
               onPlay={() => setPlaying(true)}
               onPause={() => setPlaying(false)}
               onEnded={() => setPlaying(false)}
               playsInline
               controls={false}
+            />
+          </div>
+          <div
+            ref={seekbarRef}
+            className="relative h-2.5 bg-white/10 cursor-pointer group/seek touch-none"
+            onPointerDown={(e) => {
+              if (e.button !== 0 || duration <= 0) return;
+              e.preventDefault();
+              const el = videoRef.current;
+              if (!el) return;
+              const seek = (cx: number) => {
+                const t = getTimeFromX(cx, seekbarRef.current);
+                el.currentTime = t;
+                setCurrentTime(t);
+              };
+              seek(e.clientX);
+              const onMove = (ev: PointerEvent) => seek(ev.clientX);
+              const onUp = () => {
+                window.removeEventListener("pointermove", onMove);
+                window.removeEventListener("pointerup", onUp);
+              };
+              window.addEventListener("pointermove", onMove);
+              window.addEventListener("pointerup", onUp);
+            }}
+          >
+            <div className="absolute inset-y-0 left-0 bg-violet-500/80" style={{ width: `${pct(currentTime)}%` }} />
+            {cuts.map(cut => (
+              <div
+                key={cut.id}
+                className="absolute inset-y-0 bg-red-500/60"
+                style={{ left: `${pct(cut.start)}%`, width: `${pct(cut.end - cut.start)}%` }}
+              />
+            ))}
+            <div
+              className="absolute top-1/2 -translate-y-1/2 w-3 h-3 rounded-full bg-white shadow opacity-0 group-hover/seek:opacity-100 transition-opacity pointer-events-none"
+              style={{ left: `calc(${pct(currentTime)}% - 6px)` }}
             />
           </div>
           <div className="flex items-center justify-between px-3 py-2 bg-black/80">
