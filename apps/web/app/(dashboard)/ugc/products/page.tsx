@@ -121,19 +121,21 @@ export default function ProductsPage() {
 
   // Abre o picker de personagem antes de gerar
   const startGeneration = (productId: string, action: "approve" | "regen") => {
-    if (characters.length === 0) {
-      toast.error("Nenhum personagem criado. Vá em Personagens e crie um avatar primeiro.");
-      return;
-    }
     setCharPickerProductId(productId);
     setCharPickerAction(action);
   };
 
-  // Gera vídeo com personagem selecionado
-  const generateWithCharacter = async (characterId: string) => {
+  // Gera vídeo (com personagem OU modo sem avatar / phenotype swap)
+  const generateWithCharacter = async (
+    opts: { characterId: string } | { noAvatar: true }
+  ) => {
     const productId = charPickerProductId;
     if (!productId) return;
     setCharPickerProductId(null);
+
+    const payload: Record<string, unknown> = { productIds: [productId], count: 1 };
+    if ("characterId" in opts) payload.characterId = opts.characterId;
+    if ("noAvatar" in opts) payload.noAvatar = true;
 
     if (charPickerAction === "approve") {
       setActionLoading(productId);
@@ -149,7 +151,7 @@ export default function ProductsPage() {
         const genRes = await fetch("/api/ugc/generate", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ productIds: [productId], count: 1, characterId }),
+          body: JSON.stringify(payload),
         });
         const genText = await genRes.text();
         let genJson: { videosCreated?: number; error?: string } = {};
@@ -169,7 +171,7 @@ export default function ProductsPage() {
         const res = await fetch("/api/ugc/generate", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ productIds: [productId], count: 1, characterId }),
+          body: JSON.stringify(payload),
         });
         const text = await res.text();
         let json: { videosCreated?: number; error?: string } = {};
@@ -521,17 +523,35 @@ export default function ProductsPage() {
             <div className="flex items-center justify-between">
               <h3 className="text-lg font-bold text-white flex items-center gap-2">
                 <UserCircle className="w-5 h-5 text-violet-400" />
-                Escolha o Personagem
+                Como gerar o vídeo?
               </h3>
               <button onClick={() => setCharPickerProductId(null)} className="text-white/40 hover:text-white">
                 <X className="w-5 h-5" />
               </button>
             </div>
-            <p className="text-sm text-white/40">
-              Selecione qual avatar será usado neste vídeo. O personagem substitui a pessoa do vídeo de referência.
-            </p>
+
+            {/* Opção "Sem avatar" — destaque no topo */}
+            <button
+              onClick={() => generateWithCharacter({ noAvatar: true })}
+              className="w-full rounded-xl border border-violet-500/40 bg-violet-500/10 hover:bg-violet-500/20 transition-colors p-4 text-left flex items-center gap-3"
+            >
+              <div className="w-10 h-10 rounded-full bg-violet-500/20 flex items-center justify-center flex-shrink-0">
+                <Sparkles className="w-5 h-5 text-violet-300" />
+              </div>
+              <div className="flex-1 min-w-0">
+                <p className="text-sm font-semibold text-white">Sem avatar — só trocar fenótipo</p>
+                <p className="text-xs text-white/50 mt-0.5">Copia o vídeo 100% e só muda o rosto/etnia/cabelo das pessoas via prompt.</p>
+              </div>
+            </button>
+
+            <div className="flex items-center gap-3">
+              <div className="flex-1 h-px bg-white/[0.06]" />
+              <span className="text-[10px] uppercase tracking-wider text-white/30">ou com personagem fixo</span>
+              <div className="flex-1 h-px bg-white/[0.06]" />
+            </div>
+
             {characters.length === 0 ? (
-              <div className="text-center py-6">
+              <div className="text-center py-4">
                 <UserCircle className="w-8 h-8 text-white/20 mx-auto mb-2" />
                 <p className="text-sm text-white/40">Nenhum personagem criado</p>
                 <Link href="/ugc/personagens">
@@ -541,11 +561,11 @@ export default function ProductsPage() {
                 </Link>
               </div>
             ) : (
-              <div className="grid grid-cols-3 gap-3 max-h-80 overflow-y-auto">
+              <div className="grid grid-cols-3 gap-3 max-h-72 overflow-y-auto">
                 {characters.map((char) => (
                   <button
                     key={char.id}
-                    onClick={() => generateWithCharacter(char.id)}
+                    onClick={() => generateWithCharacter({ characterId: char.id })}
                     className="group rounded-xl overflow-hidden border-2 border-transparent hover:border-violet-500 transition-all"
                   >
                     <div className="aspect-[3/4] relative">

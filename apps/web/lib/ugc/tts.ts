@@ -12,6 +12,10 @@ export async function generateNarration(
   if (!script || !script.trim()) {
     return null;
   }
+  // OpenAI TTS (tts-1-hd) em PT-BR pronuncia "carrinho" como "carinho" (R simples).
+  // Workaround: respelling fonético. "carrrinho" força o TTS a acentuar o RR com
+  // som aspirado, que é como PT-BR brasileiro pronuncia de fato.
+  script = script.replace(/\bcarrinho\b/gi, "carrrinho");
   const apiKey = process.env.OPENAI_API_KEY;
   if (!apiKey) {
     console.warn("[ugc/tts] OPENAI_API_KEY not set — skipping audio generation");

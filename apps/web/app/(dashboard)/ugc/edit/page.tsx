@@ -255,7 +255,17 @@ function EditPageContent() {
   if (loading) return <div className="flex justify-center py-16"><Loader2 className="w-6 h-6 text-violet-400 animate-spin" /></div>;
   if (!video) return <div className="flex items-center justify-center py-16"><p className="text-white/40 text-sm">Video nao encontrado</p></div>;
 
-  const completedTakes = video.takes.filter(t => t.status === "COMPLETED" && t.videoUrl);
+  const completedTakes = (video.takes ?? []).filter(t => t.status === "COMPLETED" && t.videoUrl);
+  if (completedTakes.length === 0) {
+    return (
+      <div className="space-y-3 py-16 flex flex-col items-center justify-center">
+        <p className="text-white/40 text-sm">Nenhum take completo para editar ainda.</p>
+        <Button size="sm" variant="outline" className="border-white/10 text-white/60 hover:text-white" onClick={() => router.push(`/ugc/review?id=${video.id}`)}>
+          <ArrowLeft className="w-4 h-4 mr-1.5" /> Voltar
+        </Button>
+      </div>
+    );
+  }
   const totalCutDuration = cuts.reduce((acc, c) => acc + (c.end - c.start), 0);
 
   return (

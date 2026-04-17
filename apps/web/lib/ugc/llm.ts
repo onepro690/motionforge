@@ -262,6 +262,17 @@ Regras:
 
 export type VeoPrompts = Record<string, string>;
 
+export interface VoiceStyleInput {
+  pitch: string;
+  pace: string;
+  energy: string;
+  emotion: string;
+  accentRegion: string;
+  gender: string;
+  ageRange: string;
+  description: string;
+}
+
 export async function generateVeoPrompts(
   productName: string,
   brief: CreativeBrief,
@@ -269,7 +280,8 @@ export async function generateVeoPrompts(
   templateContent: string,
   characterName: string,
   referenceScene: ReferenceScene | null,
-  takeCount: number = 3
+  takeCount: number = 3,
+  voiceStyle: VoiceStyleInput | null = null
 ): Promise<VeoPrompts> {
   const openai = getOpenAI();
 
@@ -346,6 +358,24 @@ export async function generateVeoPrompts(
     const takeScript = copyByTake[key]?.trim();
     if (narrationMode === "creator_speaking" && takeScript) {
       prompt += ` The person speaks DIRECTLY to camera with natural lip-sync, pronouncing each word clearly and naturally in Brazilian Portuguese. They say EXACTLY these words (do NOT change, paraphrase, or omit any word): "${takeScript}". IMPORTANT: The input reference image defines EVERYTHING about the scene — the ONLY thing that changes is the person's mouth moving to speak these words. Do NOT alter the person's appearance, outfit, background, lighting, or any other visual element.`;
+
+      // Instruções de pronúncia para palavras PT-BR que Veo 3 costuma errar.
+      // "carrinho" (RR forte) vs "carinho" (R fraco) — são palavras DIFERENTES.
+      const pronunciationNotes: string[] = [];
+      if (/\bcarrinho\b/i.test(takeScript)) {
+        pronunciationNotes.push(
+          `The word "carrinho" has a DOUBLE R (RR) which in Brazilian Portuguese is pronounced as a strong aspirated H sound (like English "hat" or Spanish "jota"). Say it as "kah-HEE-nyoo" with a strong guttural H at the start of the second syllable. DO NOT pronounce it as "kah-REE-nyoo" (single soft R) — that would be "carinho" (affection), a completely different word. The RR must sound harsh and aspirated, NOT soft.`
+        );
+      }
+      if (pronunciationNotes.length > 0) {
+        prompt += ` PRONUNCIATION GUIDE: ${pronunciationNotes.join(" ")}`;
+      }
+
+      // Match tom/entonação do vídeo de referência — todos os takes usam a MESMA
+      // voz para que o vídeo final soe coerente do início ao fim.
+      if (voiceStyle) {
+        prompt += ` VOICE STYLE — match the reference video's speaker EXACTLY. The speaker is ${voiceStyle.gender}, ${voiceStyle.ageRange}, with ${voiceStyle.pitch} pitch, ${voiceStyle.pace} pace, ${voiceStyle.energy} energy level, conveying ${voiceStyle.emotion}. Accent: ${voiceStyle.accentRegion}. Detailed voice characterization: ${voiceStyle.description}. CRITICAL: Use this EXACT voice, tone, pace, pitch, energy, and intonation for the ENTIRE take. All takes in this video MUST use the SAME voice — do not vary tone or style between takes, the whole video must sound like ONE continuous recording of the SAME person speaking in the SAME mood.`;
+      }
     }
 
     // ── Instruções de continuidade entre takes ──

@@ -10,8 +10,8 @@ import { generateNarration } from "./tts";
 import { assembleTakes } from "./assembler";
 import { getAntiRepeatContext, recordUsedElements, getNegativePatterns } from "./anti-repeat";
 import { DEFAULT_PROMPT_TEMPLATES } from "./defaults";
-import { ensureReferenceTranscript, fetchTikwmDetail, extractKeyFrames, analyzeReferenceVideoWithGemini, TranscriptSegment } from "./reference-video";
-import { swapPersonWithAvatar, imageUrlToBase64 } from "./nano-banana";
+import { ensureReferenceTranscript, fetchTikwmDetail, extractKeyFrames, analyzeReferenceVideoWithGemini, TranscriptSegment, VoiceStyle } from "./reference-video";
+import { swapPersonWithAvatar, swapAllPhenotypes, imageUrlToBase64 } from "./nano-banana";
 
 import ffmpegInstaller from "@ffmpeg-installer/ffmpeg";
 import ffmpeg from "fluent-ffmpeg";
@@ -416,9 +416,8 @@ export async function runVideoPipeline(
   const userId = video.userId;
   const product = video.product;
   const characterImageUrl = video.character?.imageUrl ?? null;
-  if (!characterImageUrl) {
-    throw new Error("Nenhum personagem selecionado. Crie um personagem em Personagens antes de gerar.");
-  }
+  // Sem personagem = modo "phenotype swap" (troca fenótipo de todos via prompt).
+  const phenotypeOnlyMode = !characterImageUrl;
 
   await prisma.ugcGeneratedVideo.update({
     where: { id: videoId },
@@ -555,6 +554,7 @@ export async function runVideoPipeline(
 
     let hasNarration = false;
     let geminiSceneCount = 3; // fallback se Gemini não funcionar
+    let referenceVoiceStyle: VoiceStyle | null = null;
     if (refPlayUrl_narration) {
       await log(videoId, "narration_detection", "started", "Gemini analyzing video for speech vs music + scene count");
 
@@ -576,10 +576,14 @@ export async function runVideoPipeline(
         if (geminiAnalysis.sceneCount && geminiAnalysis.sceneCount > 0) {
           geminiSceneCount = geminiAnalysis.sceneCount;
         }
+        if (hasNarration && geminiAnalysis.voiceStyle) {
+          referenceVoiceStyle = geminiAnalysis.voiceStyle;
+        }
         await log(videoId, "narration_detection", "completed",
-          `Gemini says: narrationStyle=${geminiAnalysis.narrationStyle}, sceneCount=${geminiAnalysis.sceneCount}, hasNarration=${geminiAnalysis.hasNarration} → speech: ${hasNarration ? "SPEAKING" : "SILENT"}, takes: ${geminiSceneCount}`, {
+          `Gemini says: narrationStyle=${geminiAnalysis.narrationStyle}, sceneCount=${geminiAnalysis.sceneCount}, hasNarration=${geminiAnalysis.hasNarration} → speech: ${hasNarration ? "SPEAKING" : "SILENT"}, takes: ${geminiSceneCount}${referenceVoiceStyle ? `, voice: ${referenceVoiceStyle.description.slice(0, 80)}` : ""}`, {
           narrationStyle: geminiAnalysis.narrationStyle,
           narrationSummary: geminiAnalysis.narrationSummary,
+          voiceStyle: geminiAnalysis.voiceStyle,
           sceneCount: geminiAnalysis.sceneCount,
           scenes: geminiAnalysis.scenes,
         });
@@ -692,30 +696,47 @@ export async function runVideoPipeline(
         const editedByFrame: Record<number, { data: string; mimeType: string } | null> = {};
         const editedUrlByFrame: Record<number, string | null> = {};
 
-        // Edita apenas os frames visuais distintos
-        for (let fi = 0; fi < distinctFrameCount; fi++) {
-          const hasPrevRef: boolean = fi > 0 && !!take1ResultUrl;
+        // Edita os frames visuais distintos.
+        // Frame 0 roda SEQUENCIAL (estabelece a referência de consistência).
+        // Frames 1..N-1 rodam em PARALELO (todos usam take1ResultUrl, não dependem entre si).
+        const mode = phenotypeOnlyMode ? "phenotype-only" : "avatar-swap";
+
+        const editFrame = async (fi: number, prevRefUrl: string | null) => {
           await log(videoId, `nano_banana_frame${fi + 1}`, "started",
-            hasPrevRef ? `frame ${fi + 1} + avatar + take1 result → swap (3 images)` : `frame ${fi + 1} + avatar → swap (2 images)`);
-          const edited: { url: string; mimeType: string } | null = await swapPersonWithAvatar(
-            keyframes.frames[fi].url,
-            characterImageUrl,
-            hasPrevRef ? take1ResultUrl : null
-          ).catch((e) => {
-            console.error(`[pipeline] nano_banana frame${fi + 1} error:`, e);
-            return null;
-          });
+            `[${mode}] frame ${fi + 1}${prevRefUrl ? " + prev take result" : ""}`);
+          const edited: { url: string; mimeType: string } | null = phenotypeOnlyMode
+            ? await swapAllPhenotypes(keyframes.frames[fi].url, prevRefUrl)
+                .catch((e) => { console.error(`[pipeline] phenotype swap frame${fi + 1} error:`, e); return null; })
+            : await swapPersonWithAvatar(keyframes.frames[fi].url, characterImageUrl!, prevRefUrl)
+                .catch((e) => { console.error(`[pipeline] nano_banana frame${fi + 1} error:`, e); return null; });
           if (edited) {
             editedByFrame[fi] = await imageUrlToBase64(edited.url);
             editedUrlByFrame[fi] = edited.url;
-            if (fi === 0) take1ResultUrl = edited.url;
             await log(videoId, `nano_banana_frame${fi + 1}`, "completed", edited.url);
+            return edited.url;
           } else {
             const rawFrame = await imageUrlToBase64(keyframes.frames[fi].url);
             editedByFrame[fi] = rawFrame;
             editedUrlByFrame[fi] = null;
             await log(videoId, `nano_banana_frame${fi + 1}`, "failed",
               rawFrame ? `using raw frame: ${keyframes.frames[fi].url}` : "all image methods failed");
+            return null;
+          }
+        };
+
+        if (distinctFrameCount > 0) {
+          take1ResultUrl = await editFrame(0, null);
+          if (distinctFrameCount > 1) {
+            const parallelStart = Date.now();
+            await log(videoId, `nano_banana_parallel`, "started",
+              `editing ${distinctFrameCount - 1} remaining frames in parallel`);
+            await Promise.all(
+              Array.from({ length: distinctFrameCount - 1 }, (_, idx) =>
+                editFrame(idx + 1, take1ResultUrl)
+              )
+            );
+            await log(videoId, `nano_banana_parallel`, "completed",
+              `${distinctFrameCount - 1} frames done in ${Date.now() - parallelStart}ms`);
           }
         }
 
@@ -736,8 +757,11 @@ export async function runVideoPipeline(
 
     // Fallback: se não extraiu frames por take, tenta a thumbnail original
     if (!perTakeImages.take1 && bestReference?.thumbnailUrl) {
-      await log(videoId, "nano_banana_edit", "started", "fallback — single thumbnail + avatar");
-      const edited = await swapPersonWithAvatar(bestReference.thumbnailUrl, characterImageUrl).catch(() => null);
+      await log(videoId, "nano_banana_edit", "started",
+        phenotypeOnlyMode ? "fallback — thumbnail + phenotype swap" : "fallback — single thumbnail + avatar");
+      const edited = phenotypeOnlyMode
+        ? await swapAllPhenotypes(bestReference.thumbnailUrl).catch(() => null)
+        : await swapPersonWithAvatar(bestReference.thumbnailUrl, characterImageUrl!).catch(() => null);
       if (edited) {
         editedImage = await imageUrlToBase64(edited.url);
         editedImageUrl = edited.url;
@@ -917,7 +941,8 @@ export async function runVideoPipeline(
       veoTemplate,
       characterName,
       referenceScene,
-      takeCount
+      takeCount,
+      referenceVoiceStyle
     );
     await log(videoId, "generate_veo_prompts", "completed", undefined, veoPrompts, Date.now() - t5);
 

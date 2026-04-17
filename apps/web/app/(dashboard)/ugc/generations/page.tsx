@@ -257,8 +257,8 @@ export default function GenerationsPage() {
   const [statusFilter, setStatusFilter] = useState("");
   const [generating, setGenerating] = useState(false);
 
-  const load = useCallback(async () => {
-    setLoading(true);
+  const load = useCallback(async (showSpinner = true) => {
+    if (showSpinner) setLoading(true);
     try {
       const params = new URLSearchParams({ page: String(page), limit: "12" });
       if (statusFilter) params.set("status", statusFilter);
@@ -269,17 +269,17 @@ export default function GenerationsPage() {
         setTotal(data.total);
       }
     } finally {
-      setLoading(false);
+      if (showSpinner) setLoading(false);
     }
   }, [page, statusFilter]);
 
   useEffect(() => { load(); }, [load]);
 
-  // Auto-refresh for in-progress videos
+  // Auto-refresh for in-progress videos — silencioso, sem piscar a tela
   useEffect(() => {
     const hasInProgress = videos.some((v) => IN_PROGRESS.includes(v.status));
     if (!hasInProgress) return;
-    const timer = setTimeout(load, 5000);
+    const timer = setTimeout(() => load(false), 5000);
     return () => clearTimeout(timer);
   }, [videos, load]);
 

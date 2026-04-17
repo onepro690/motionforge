@@ -452,10 +452,22 @@ export interface SceneBreakdown {
   visuals: string;
 }
 
+export interface VoiceStyle {
+  pitch: "low" | "medium" | "high";
+  pace: "slow" | "medium" | "fast";
+  energy: "calm" | "casual" | "enthusiastic" | "hyped";
+  emotion: string;         // ex: "excited surprise", "confident", "chill"
+  accentRegion: string;    // ex: "Brazilian Portuguese, São Paulo casual", "carioca"
+  gender: "feminine" | "masculine" | "neutral";
+  ageRange: string;        // ex: "young adult 20-30", "teen"
+  description: string;     // resumo livre: "voz feminina jovem, animada, fala rápida, entonação ascendente no fim das frases, sotaque paulista casual"
+}
+
 export interface ReferenceVideoAnalysis {
   hasNarration: boolean;
   narrationStyle: "direct_speech" | "voiceover" | "none";
   narrationSummary: string;
+  voiceStyle: VoiceStyle | null;
   sceneCount: number;
   scenes: SceneBreakdown[];
   keyVisualSequence: string;
@@ -497,6 +509,16 @@ Retorne APENAS um JSON com esta estrutura:
   "hasNarration": true|false,
   "narrationStyle": "direct_speech" | "voiceover" | "none",
   "narrationSummary": "resumo do que a pessoa/narrador fala, ou string vazia se none",
+  "voiceStyle": {
+    "pitch": "low" | "medium" | "high",
+    "pace": "slow" | "medium" | "fast",
+    "energy": "calm" | "casual" | "enthusiastic" | "hyped",
+    "emotion": "descrição curta da emoção dominante (ex: 'animação genuína', 'confiança casual', 'surpresa empolgada', 'explicação séria')",
+    "accentRegion": "sotaque / região do português brasileiro (ex: 'paulista casual', 'carioca', 'nordestino', 'português neutro')",
+    "gender": "feminine" | "masculine" | "neutral",
+    "ageRange": "faixa etária aparente pela voz (ex: 'jovem adulta 20-30', 'adolescente 15-20', 'adulta 30-40')",
+    "description": "descrição LIVRE e DETALHADA do jeito de falar: tom, ritmo, pausas, entonação, ênfases, tiques verbais, cadência, volume. Seja específico — isto vai ser usado pra replicar a voz. Ex: 'voz feminina jovem, animada, fala rápida, entonação ascendente no fim das frases com emoção genuína, sotaque paulista casual, enfatiza adjetivos esticando a vogal (MUI-to bom)'"
+  },
   "sceneCount": N,
   "scenes": [
     { "timeRange": "0-Xs", "action": "ação EXATA (ex: segura o vestido rosa na frente do corpo)", "visuals": "visual DETALHADO: cor EXATA da roupa/produto, posição da pessoa, objetos, fundo (ex: 'mulher segura vestido ROSA em cabide, fundo branco, espelho à esquerda')" },
@@ -513,6 +535,7 @@ REGRAS CRÍTICAS:
 - "voiceover" = narrador em off, pessoa não fala com a câmera.
 - "none" = só música/ambient, ninguém fala.
 - Se o áudio é SÓ música (mesmo com letra cantada) e ninguém narra o produto → "none".
+- Quando hasNarration=true, voiceStyle DEVE ser preenchido ouvindo o áudio REAL do vídeo. Não use valores genéricos — analise pitch, cadência, entonação, energia, sotaque COMO ELES REALMENTE SOAM. Quando hasNarration=false, voiceStyle=null.
 - "sceneCount" = número TOTAL de cenas distintas. Se o vídeo mostra 4 roupas diferentes, sceneCount=4. Se mostra 2 ângulos do mesmo look, sceneCount=2. CONTE EXATAMENTE quantas cenas tem.
 - O array "scenes" DEVE ter EXATAMENTE sceneCount elementos — um por cena. NÃO agrupe cenas. Se tem 4 trocas de roupa, retorne 4 cenas, NÃO 3.
 - CADA "visuals" de cada cena DEVE descrever a COR ou VARIANTE EXATA do produto visível NAQUELE MOMENTO do vídeo. Nunca use descrições genéricas — diga "vestido ROSA", "tênis BRANCO", etc.

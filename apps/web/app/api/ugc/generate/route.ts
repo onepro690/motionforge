@@ -18,6 +18,7 @@ const schema = z.object({
   productIds: z.array(z.string()).optional(), // specific products to use
   count: z.number().int().min(1).max(10).default(1),
   characterId: z.string().optional(), // personagem a usar como avatar
+  noAvatar: z.boolean().optional(), // sem avatar — só troca fenótipo via prompt
 });
 
 export async function POST(request: NextRequest) {
@@ -32,21 +33,23 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: "Invalid input", details: parsed.error.message }, { status: 400 });
     }
 
-    const { productIds, count, characterId } = parsed.data;
+    const { productIds, count, characterId, noAvatar } = parsed.data;
 
-    // Valida personagem se fornecido
-    if (characterId) {
-      const character = await prisma.ugcCharacter.findUnique({ where: { id: characterId } });
-      if (!character || character.userId !== userId) {
-        return NextResponse.json({ error: "Personagem não encontrado" }, { status: 400 });
-      }
-    } else {
-      // Verifica se tem pelo menos um personagem
-      const anyChar = await prisma.ugcCharacter.findFirst({ where: { userId } });
-      if (!anyChar) {
-        return NextResponse.json({
-          error: "Nenhum personagem criado. Vá em Personagens e crie um avatar primeiro.",
-        }, { status: 400 });
+    // Valida personagem se fornecido (pulado quando noAvatar=true)
+    if (!noAvatar) {
+      if (characterId) {
+        const character = await prisma.ugcCharacter.findUnique({ where: { id: characterId } });
+        if (!character || character.userId !== userId) {
+          return NextResponse.json({ error: "Personagem não encontrado" }, { status: 400 });
+        }
+      } else {
+        // Verifica se tem pelo menos um personagem
+        const anyChar = await prisma.ugcCharacter.findFirst({ where: { userId } });
+        if (!anyChar) {
+          return NextResponse.json({
+            error: "Nenhum personagem criado. Vá em Personagens e crie um avatar primeiro.",
+          }, { status: 400 });
+        }
       }
     }
 
@@ -82,8 +85,10 @@ export async function POST(request: NextRequest) {
 
     const createdVideos: string[] = [];
 
-    // Se não especificou characterId, pega o primeiro personagem do usuário
-    const finalCharacterId = characterId ?? (await prisma.ugcCharacter.findFirst({ where: { userId } }))?.id ?? null;
+    // noAvatar=true → sem personagem; caso contrário, usa o fornecido ou o primeiro do usuário
+    const finalCharacterId = noAvatar
+      ? null
+      : characterId ?? (await prisma.ugcCharacter.findFirst({ where: { userId } }))?.id ?? null;
 
     for (let i = 0; i < Math.min(toGenerate, approvedProducts.length); i++) {
       const product = approvedProducts[i % approvedProducts.length];
