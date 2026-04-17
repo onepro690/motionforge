@@ -418,6 +418,9 @@ export async function runVideoPipeline(
   const characterImageUrl = video.character?.imageUrl ?? null;
   // Sem personagem = modo "phenotype swap" (troca fenótipo de todos via prompt).
   const phenotypeOnlyMode = !characterImageUrl;
+  // "continuous" = encadeia takes pelo último frame (padrão, fala suave)
+  // "hard_cuts"  = cada take em paralelo com frame próprio (imita cortes secos)
+  const transitionMode: string = (video as unknown as { transitionMode?: string }).transitionMode ?? "continuous";
 
   await prisma.ugcGeneratedVideo.update({
     where: { id: videoId },
@@ -989,6 +992,9 @@ export async function runVideoPipeline(
     // a cada geração.
     const productImageUrl = product.thumbnailUrl ?? product.detectedVideos[0]?.thumbnailUrl ?? "";
 
+    await log(videoId, "submit_takes", "started",
+      `Mode: transitionMode=${transitionMode}, hasNarration=${hasNarration}, will ${hasNarration && transitionMode === "continuous" ? "CHAIN sequentially" : "submit in PARALLEL (hard cuts)"}`);
+
     const accessToken = await getAccessToken();
 
     // Per-take duration: Veo image-to-video only supports [4, 6, 8] seconds.
@@ -1041,13 +1047,15 @@ export async function runVideoPipeline(
         },
       });
 
-      // ── Submissão: speech vs silent ──
-      // SPEECH: takes são SEQUENCIAIS — só submete take 1 agora.
+      // ── Submissão: continuous chain vs hard cuts ──
+      // CONTINUOUS (fala): takes são SEQUENCIAIS — só submete take 1 agora.
       //   Takes 2+ ficam QUEUED e serão submetidos pelo polling quando o
       //   anterior completar (usando o último frame como input image).
-      // SILENT: todos os takes são submetidos em paralelo.
+      // HARD_CUTS ou SILENT: todos os takes submetidos em paralelo, cada um
+      //   com seu próprio frame de referência (imita cortes secos).
+      const useContinuousChain = hasNarration && transitionMode === "continuous";
 
-      if (hasNarration && i > 0) {
+      if (useContinuousChain && i > 0) {
         // Take de fala 2+: fica esperando — será submetido pelo polling
         await log(videoId, `submit_take_${takeKey}`, "started",
           `QUEUED — waiting for take ${i} to complete (sequential speech chain)`);
@@ -1057,9 +1065,10 @@ export async function runVideoPipeline(
       // Escolhe a imagem certa pro take
       const take1Image = perTakeImages["take1"] || editedImage;
       let takeImage: { data: string; mimeType: string } | null;
-      if (hasNarration) {
+      if (useContinuousChain) {
         takeImage = take1Image;
       } else {
+        // HARD_CUTS ou SILENT: cada take usa seu próprio frame visual
         takeImage = perTakeImages[takeKey] || editedImage;
       }
 

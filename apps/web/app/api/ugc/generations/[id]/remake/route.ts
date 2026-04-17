@@ -55,6 +55,7 @@ export async function POST(
       userId,
       productId: original.productId,
       characterId: original.characterId,
+      transitionMode: original.transitionMode,
       status: "DRAFT_GENERATED",
       version: original.version + 1,
       parentVideoId: id,

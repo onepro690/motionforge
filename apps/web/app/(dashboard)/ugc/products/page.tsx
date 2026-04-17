@@ -90,6 +90,7 @@ export default function ProductsPage() {
   const [characters, setCharacters] = useState<Character[]>([]);
   const [charPickerProductId, setCharPickerProductId] = useState<string | null>(null);
   const [charPickerAction, setCharPickerAction] = useState<"approve" | "regen">("approve");
+  const [transitionMode, setTransitionMode] = useState<"continuous" | "hard_cuts">("continuous");
 
   const loadCharacters = useCallback(async () => {
     const res = await fetch("/api/ugc/characters");
@@ -133,7 +134,7 @@ export default function ProductsPage() {
     if (!productId) return;
     setCharPickerProductId(null);
 
-    const payload: Record<string, unknown> = { productIds: [productId], count: 1 };
+    const payload: Record<string, unknown> = { productIds: [productId], count: 1, transitionMode };
     if ("characterId" in opts) payload.characterId = opts.characterId;
     if ("noAvatar" in opts) payload.noAvatar = true;
 
@@ -528,6 +529,35 @@ export default function ProductsPage() {
               <button onClick={() => setCharPickerProductId(null)} className="text-white/40 hover:text-white">
                 <X className="w-5 h-5" />
               </button>
+            </div>
+
+            {/* Toggle de transição entre takes */}
+            <div className="rounded-xl border border-white/10 bg-white/[0.02] p-3 space-y-2">
+              <p className="text-[11px] uppercase tracking-wider text-white/40 font-semibold">Transição entre takes</p>
+              <div className="grid grid-cols-2 gap-2">
+                <button
+                  onClick={() => setTransitionMode("continuous")}
+                  className={`rounded-lg border p-2.5 text-left transition-colors ${
+                    transitionMode === "continuous"
+                      ? "border-emerald-500/50 bg-emerald-500/10"
+                      : "border-white/10 bg-white/[0.02] hover:bg-white/[0.05]"
+                  }`}
+                >
+                  <p className="text-xs font-semibold text-white">Contínuo</p>
+                  <p className="text-[10px] text-white/50 mt-0.5 leading-tight">Takes encadeados pelo último frame — fala suave sem pulos.</p>
+                </button>
+                <button
+                  onClick={() => setTransitionMode("hard_cuts")}
+                  className={`rounded-lg border p-2.5 text-left transition-colors ${
+                    transitionMode === "hard_cuts"
+                      ? "border-amber-500/50 bg-amber-500/10"
+                      : "border-white/10 bg-white/[0.02] hover:bg-white/[0.05]"
+                  }`}
+                >
+                  <p className="text-xs font-semibold text-white">Cortes secos</p>
+                  <p className="text-[10px] text-white/50 mt-0.5 leading-tight">Imita cortes da referência — mais rápido, cada take independente.</p>
+                </button>
+              </div>
             </div>
 
             {/* Opção "Sem avatar" — destaque no topo */}

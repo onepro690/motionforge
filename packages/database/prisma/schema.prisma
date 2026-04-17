@@ -337,6 +337,9 @@ model UgcGeneratedVideo {
   veoPrompts            Json?
   creativeBriefSnapshot Json?
   model                 String  @default("veo3-fast")
+  // "continuous" = cada take começa do último frame do anterior (suave)
+  // "hard_cuts"  = todos os takes submetidos em paralelo (imita cortes secos)
+  transitionMode        String  @default("continuous")
 
   finalVideoUrl   String?
   thumbnailUrl    String?
