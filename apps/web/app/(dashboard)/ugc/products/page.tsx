@@ -560,51 +560,48 @@ export default function ProductsPage() {
               </div>
             </div>
 
-            {/* Opção "Sem avatar" — destaque no topo */}
-            <button
-              onClick={() => generateWithCharacter({ noAvatar: true })}
-              className="w-full rounded-xl border border-violet-500/40 bg-violet-500/10 hover:bg-violet-500/20 transition-colors p-4 text-left flex items-center gap-3"
-            >
-              <div className="w-10 h-10 rounded-full bg-violet-500/20 flex items-center justify-center flex-shrink-0">
-                <Sparkles className="w-5 h-5 text-violet-300" />
-              </div>
-              <div className="flex-1 min-w-0">
-                <p className="text-sm font-semibold text-white">Sem avatar — só trocar fenótipo</p>
-                <p className="text-xs text-white/50 mt-0.5">Copia o vídeo 100% e só muda o rosto/etnia/cabelo das pessoas via prompt.</p>
-              </div>
-            </button>
+            <div className="grid grid-cols-3 gap-3 max-h-72 overflow-y-auto">
+              {/* Card "Sem avatar" — mesmo formato retângulo dos personagens */}
+              <button
+                onClick={() => generateWithCharacter({ noAvatar: true })}
+                className="group rounded-xl overflow-hidden border-2 border-violet-500/50 hover:border-violet-400 transition-all"
+                title="Copia o vídeo 100% e só troca o fenótipo via prompt (sem foto fixa)"
+              >
+                <div className="aspect-[3/4] relative bg-gradient-to-br from-violet-600/30 via-fuchsia-500/20 to-indigo-600/30 flex flex-col items-center justify-center gap-2">
+                  <div className="w-12 h-12 rounded-full bg-violet-500/30 flex items-center justify-center">
+                    <Sparkles className="w-6 h-6 text-violet-200" />
+                  </div>
+                  <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-transparent to-transparent" />
+                  <div className="absolute bottom-1.5 left-2 right-2">
+                    <p className="text-xs font-semibold text-white truncate">Sem avatar</p>
+                    <p className="text-[10px] text-violet-200/80 truncate">trocar fenótipo</p>
+                  </div>
+                </div>
+              </button>
 
-            <div className="flex items-center gap-3">
-              <div className="flex-1 h-px bg-white/[0.06]" />
-              <span className="text-[10px] uppercase tracking-wider text-white/30">ou com personagem fixo</span>
-              <div className="flex-1 h-px bg-white/[0.06]" />
+              {characters.map((char) => (
+                <button
+                  key={char.id}
+                  onClick={() => generateWithCharacter({ characterId: char.id })}
+                  className="group rounded-xl overflow-hidden border-2 border-transparent hover:border-violet-500 transition-all"
+                >
+                  <div className="aspect-[3/4] relative">
+                    <img src={char.imageUrl} alt={char.name} className="w-full h-full object-cover" />
+                    <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-transparent to-transparent" />
+                    <p className="absolute bottom-1.5 left-2 right-2 text-xs font-semibold text-white truncate">{char.name}</p>
+                  </div>
+                </button>
+              ))}
             </div>
 
-            {characters.length === 0 ? (
-              <div className="text-center py-4">
-                <UserCircle className="w-8 h-8 text-white/20 mx-auto mb-2" />
-                <p className="text-sm text-white/40">Nenhum personagem criado</p>
+            {characters.length === 0 && (
+              <div className="text-center py-2">
+                <p className="text-xs text-white/40 mb-2">Nenhum personagem criado ainda</p>
                 <Link href="/ugc/personagens">
-                  <Button size="sm" className="mt-3 bg-violet-600 hover:bg-violet-500 text-white">
+                  <Button size="sm" className="bg-violet-600 hover:bg-violet-500 text-white">
                     Criar Personagem
                   </Button>
                 </Link>
-              </div>
-            ) : (
-              <div className="grid grid-cols-3 gap-3 max-h-72 overflow-y-auto">
-                {characters.map((char) => (
-                  <button
-                    key={char.id}
-                    onClick={() => generateWithCharacter({ characterId: char.id })}
-                    className="group rounded-xl overflow-hidden border-2 border-transparent hover:border-violet-500 transition-all"
-                  >
-                    <div className="aspect-[3/4] relative">
-                      <img src={char.imageUrl} alt={char.name} className="w-full h-full object-cover" />
-                      <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-transparent to-transparent" />
-                      <p className="absolute bottom-1.5 left-2 right-2 text-xs font-semibold text-white truncate">{char.name}</p>
-                    </div>
-                  </button>
-                ))}
               </div>
             )}
           </div>
