@@ -259,6 +259,54 @@ async function extractLastFrame(videoUrl: string): Promise<{ data: string; mimeT
   }
 }
 
+// ── Extract frame at a specific offset (seconds before end) from a video URL ──
+// Used for retries when the last frame gets rejected by Veo content filter.
+// offsetFromEnd: seconds before the end (e.g., 0.5 = half second before end, 1.0 = 1s before end)
+async function extractFrameAtOffset(videoUrl: string, offsetFromEnd: number): Promise<{ data: string; mimeType: string } | null> {
+  const id = randomBytes(6).toString("hex");
+  const tmpDir = join("/tmp", `frame-offset-${id}`);
+  await mkdir(tmpDir, { recursive: true });
+  const videoPath = join(tmpDir, "video.mp4");
+  const framePath = join(tmpDir, "frame.jpg");
+
+  try {
+    let res = await fetch(videoUrl, { signal: AbortSignal.timeout(30000) }).catch(() => null);
+    if (!res || !res.ok) {
+      const blobToken = process.env.BLOB_READ_WRITE_TOKEN;
+      if (blobToken && videoUrl.includes("blob.vercel-storage.com")) {
+        res = await fetch(videoUrl, { signal: AbortSignal.timeout(30000), headers: { "Authorization": `Bearer ${blobToken}` } }).catch(() => null);
+      }
+    }
+    if (!res || !res.ok) return null;
+
+    await writeFile(videoPath, Buffer.from(await res.arrayBuffer()));
+    const duration = await getVideoDurationFfmpeg(videoPath);
+    if (duration <= 0) return null;
+
+    const seekTime = Math.max(0, duration - offsetFromEnd);
+    console.log(`[extractFrameAtOffset] Extracting frame at ${seekTime}s (duration=${duration}s, offset=${offsetFromEnd}s)`);
+    await new Promise<void>((resolve, reject) => {
+      ffmpeg(videoPath)
+        .seekInput(seekTime)
+        .frames(1)
+        .output(framePath)
+        .outputOptions(["-q:v", "2"])
+        .on("end", () => resolve())
+        .on("error", (err: Error) => reject(err))
+        .run();
+    });
+
+    const frameBuffer = await readFile(framePath);
+    return { data: frameBuffer.toString("base64"), mimeType: "image/jpeg" };
+  } catch {
+    return null;
+  } finally {
+    await unlink(videoPath).catch(() => {});
+    await unlink(framePath).catch(() => {});
+    await import("fs/promises").then(fs => fs.rmdir(tmpDir).catch(() => {}));
+  }
+}
+
 // ── Extract last frame from video buffer in memory ────────────────────────
 // Takes a video buffer already in memory, writes to /tmp, extracts last frame.
 // Avoids re-downloading from blob (which can return 403).
@@ -1069,7 +1117,7 @@ export async function pollAndAssembleTakes(videoId: string): Promise<{
     return { allDone: false, failedCount: 0, status: video.status };
   }
 
-  const MAX_RETRIES = 2; // Cada take pode ser retentado até 2x (total 3 tentativas)
+  const MAX_RETRIES = 3; // Cada take pode ser retentado até 3x (total 4 tentativas, cada com frame diferente)
 
   // Check status of all GenerationJobs
   const accessToken = await getAccessToken().catch(() => null);
@@ -1086,21 +1134,35 @@ export async function pollAndAssembleTakes(videoId: string): Promise<{
         await log(videoId, `retry_take_${take.takeIndex}`, "started",
           `Retry ${take.retryCount + 1}/${MAX_RETRIES}: ${take.errorMessage ?? "unknown error"}`);
 
-        // Determina a imagem para o retry — prioriza lastFrameUrl do take anterior
+        // Determina a imagem para o retry
+        // Se o erro foi de content policy ("usage guidelines"), tenta um frame
+        // em posição diferente para evitar o mesmo falso positivo.
         let retryImage: { data: string; mimeType: string } | null = null;
         const sortedForRetry = [...video.takes].sort((a, b) => a.takeIndex - b.takeIndex);
+        const isContentPolicyError = (take.errorMessage ?? "").includes("usage guidelines") || (take.errorMessage ?? "").includes("violat");
 
         if (take.takeIndex > 0) {
           const prevCompleted = sortedForRetry
             .filter(t => t.takeIndex < take.takeIndex && t.status === "COMPLETED")
             .pop();
-          // 1) lastFrameUrl persistido
-          if (prevCompleted?.lastFrameUrl) {
-            retryImage = await imageUrlToBase64(prevCompleted.lastFrameUrl).catch(() => null);
+
+          if (isContentPolicyError && prevCompleted?.videoUrl) {
+            // Content policy rejection — try a different frame each retry
+            // retry 0: 1.0s before end, retry 1: 2.0s before end
+            const offsets = [1.0, 2.0, 3.0];
+            const offset = offsets[Math.min(take.retryCount, offsets.length - 1)];
+            console.log(`[pollAndAssemble] Content policy error, trying frame at ${offset}s before end of take ${prevCompleted.takeIndex}`);
+            retryImage = await extractFrameAtOffset(prevCompleted.videoUrl, offset).catch(() => null);
           }
-          // 2) Extrai ao vivo
-          if (!retryImage && prevCompleted?.videoUrl) {
-            retryImage = await extractLastFrame(prevCompleted.videoUrl).catch(() => null);
+
+          // If not content policy or offset extraction failed, use normal lastFrame
+          if (!retryImage) {
+            if (prevCompleted?.lastFrameUrl) {
+              retryImage = await imageUrlToBase64(prevCompleted.lastFrameUrl).catch(() => null);
+            }
+            if (!retryImage && prevCompleted?.videoUrl) {
+              retryImage = await extractLastFrame(prevCompleted.videoUrl).catch(() => null);
+            }
           }
         }
         // 3) Fallback: imagem editada (Nano Banana)
