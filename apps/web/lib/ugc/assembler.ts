@@ -40,9 +40,17 @@ interface TakeInfo {
   intendedScript?: string | null;
 }
 
+export interface SpeechCoverage {
+  expectedWords: number;
+  foundWords: number;
+  coverage: number;     // 0..1
+  missingWords: string[];
+}
+
 export interface AssemblyResult {
   finalVideoUrl: string;
   durationSeconds: number;
+  coverage?: SpeechCoverage | null;
 }
 
 // Download a file from URL to a temp path
@@ -53,24 +61,83 @@ async function downloadFile(url: string, destPath: string): Promise<void> {
   await writeFile(destPath, Buffer.from(buffer));
 }
 
-// Concatenate multiple MP4 files using ffmpeg concat demuxer
+// Concatenate multiple MP4 files com acrossfade de 30ms entre os áudios.
+// Vídeo: concat duro (sem fade visual — queremos o corte limpo).
+// Áudio: acrossfade curto elimina o "pop" na fronteira do corte (problema
+// típico quando o Veo gera tomadas com níveis de ruído de fundo diferentes).
+// Para 1 input, só copia.
 async function concatVideos(inputPaths: string[], outputPath: string): Promise<void> {
-  const listPath = outputPath + ".list.txt";
-  const listContent = inputPaths.map((p) => `file '${p}'`).join("\n");
-  await writeFile(listPath, listContent, "utf8");
+  if (inputPaths.length === 0) {
+    throw new Error("concatVideos: no inputs");
+  }
 
-  await new Promise<void>((resolve, reject) => {
-    ffmpeg()
-      .input(listPath)
-      .inputOptions(["-f", "concat", "-safe", "0"])
-      .outputOptions(["-c:v", "libx264", "-c:a", "aac", "-movflags", "+faststart"])
-      .output(outputPath)
-      .on("end", () => resolve())
-      .on("error", (err: Error) => reject(err))
-      .run();
-  });
+  // Caso único: só re-muxa para garantir +faststart
+  if (inputPaths.length === 1) {
+    await new Promise<void>((resolve, reject) => {
+      ffmpeg(inputPaths[0])
+        .outputOptions(["-c:v", "libx264", "-c:a", "aac", "-movflags", "+faststart"])
+        .output(outputPath)
+        .on("end", () => resolve())
+        .on("error", (err: Error) => reject(err))
+        .run();
+    });
+    return;
+  }
 
-  await unlink(listPath).catch(() => {});
+  // Monta filter_complex: concat de vídeo + cadeia de acrossfade no áudio.
+  // Cada acrossfade encurta o áudio em FADE segundos por par — com FADE=0.03 e
+  // N takes, drift total = (N-1)*30ms (ex: 4 takes = 90ms). Aceitável.
+  const FADE = 0.03;
+  const videoLabels = inputPaths.map((_, i) => `[${i}:v]`).join("");
+  const concatFilter = `${videoLabels}concat=n=${inputPaths.length}:v=1:a=0[vout]`;
+
+  const audioChain: string[] = [];
+  let currentAudio = `[0:a]`;
+  for (let i = 1; i < inputPaths.length; i++) {
+    const outLabel = i === inputPaths.length - 1 ? `[aout]` : `[a${i}]`;
+    audioChain.push(`${currentAudio}[${i}:a]acrossfade=d=${FADE}:c1=tri:c2=tri${outLabel}`);
+    currentAudio = outLabel;
+  }
+
+  const filterComplex = [concatFilter, ...audioChain].join(";");
+
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const cmd = ffmpeg();
+      for (const p of inputPaths) cmd.input(p);
+      cmd
+        .complexFilter(filterComplex)
+        .outputOptions([
+          "-map", "[vout]",
+          "-map", "[aout]",
+          "-c:v", "libx264",
+          "-c:a", "aac",
+          "-movflags", "+faststart",
+        ])
+        .output(outputPath)
+        .on("end", () => resolve())
+        .on("error", (err: Error) => reject(err))
+        .run();
+    });
+  } catch (err) {
+    // Fallback: se o filter_complex falhar (ex: take sem faixa de áudio),
+    // cai pro concat demuxer clássico.
+    console.error("[assembler.concatVideos] filter_complex failed, falling back to demuxer:", err);
+    const listPath = outputPath + ".list.txt";
+    const listContent = inputPaths.map((p) => `file '${p}'`).join("\n");
+    await writeFile(listPath, listContent, "utf8");
+    await new Promise<void>((resolve, reject) => {
+      ffmpeg()
+        .input(listPath)
+        .inputOptions(["-f", "concat", "-safe", "0"])
+        .outputOptions(["-c:v", "libx264", "-c:a", "aac", "-movflags", "+faststart"])
+        .output(outputPath)
+        .on("end", () => resolve())
+        .on("error", (e: Error) => reject(e))
+        .run();
+    });
+    await unlink(listPath).catch(() => {});
+  }
 }
 
 // Substitui o áudio do vídeo pela narração. Antes a gente mixava 20% do
@@ -304,11 +371,45 @@ async function trimToScript(inputPath: string, outputPath: string, intendedScrip
   }
 }
 
+// Self-eval: transcreve o vídeo final e mede quantas palavras do script
+// consolidado realmente aparecem na transcrição. Retorna coverage 0..1.
+// Matching é normalizado (sem acentos, sem pontuação, case-insensitive).
+async function evaluateSpeechCoverage(finalVideoPath: string, expectedScript: string): Promise<SpeechCoverage | null> {
+  const trimmed = expectedScript.trim();
+  if (trimmed.length === 0) return null;
+
+  const words = await transcribeWordsWithWhisper(finalVideoPath);
+  if (!words) return null;
+
+  const expectedTokens = trimmed.split(/\s+/).map(normalizeWord).filter((w) => w.length > 0);
+  const transcribedSet = new Set(words.map((w) => normalizeWord(w.word)).filter((w) => w.length > 0));
+
+  if (expectedTokens.length === 0) return null;
+
+  let foundCount = 0;
+  const missing: string[] = [];
+  for (const w of expectedTokens) {
+    if (transcribedSet.has(w)) {
+      foundCount++;
+    } else {
+      missing.push(w);
+    }
+  }
+
+  return {
+    expectedWords: expectedTokens.length,
+    foundWords: foundCount,
+    coverage: foundCount / expectedTokens.length,
+    missingWords: missing.slice(0, 30),
+  };
+}
+
 // Main assembly function
 export async function assembleTakes(
   takes: TakeInfo[],
   audioUrl: string | null,
-  videoId: string
+  videoId: string,
+  expectedScript?: string | null
 ): Promise<AssemblyResult> {
   const id = randomBytes(8).toString("hex");
   const tmpDir = join("/tmp", `ugc-assembly-${id}`);
@@ -362,6 +463,21 @@ export async function assembleTakes(
     }
 
     const durationSeconds = await getVideoDuration(finalPath);
+
+    // Self-eval: mede quantas palavras do script aparecem na transcrição do
+    // vídeo final. Low coverage = usuário deve saber antes de publicar.
+    let coverage: SpeechCoverage | null = null;
+    if (expectedScript && expectedScript.trim().length > 0) {
+      try {
+        coverage = await evaluateSpeechCoverage(finalPath, expectedScript);
+        if (coverage) {
+          console.log(`[assembler] speech coverage: ${(coverage.coverage * 100).toFixed(1)}% (${coverage.foundWords}/${coverage.expectedWords})${coverage.missingWords.length ? ` missing: ${coverage.missingWords.slice(0, 5).join(",")}` : ""}`);
+        }
+      } catch (err) {
+        console.error("[assembler] evaluateSpeechCoverage failed:", err);
+      }
+    }
+
     const videoBuffer = await readFile(finalPath);
 
     const blob = await put(`ugc-final-${videoId}.mp4`, videoBuffer, {
@@ -373,6 +489,7 @@ export async function assembleTakes(
     return {
       finalVideoUrl: blob.url,
       durationSeconds,
+      coverage,
     };
   } finally {
     // Cleanup temp files

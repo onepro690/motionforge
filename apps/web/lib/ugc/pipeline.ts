@@ -1653,7 +1653,26 @@ export async function pollAndAssembleTakes(videoId: string): Promise<{
       .map((t) => ({ url: t.videoUrl!, intendedScript: t.script ?? null }));
 
     const freshVideo = await prisma.ugcGeneratedVideo.findUnique({ where: { id: videoId } });
-    const result = await assembleTakes(takeInfos, freshVideo?.audioUrl ?? null, videoId);
+    // Script consolidado = junção dos scripts dos takes na ordem. É o que
+    // realmente deveria ter sido falado no vídeo final (já passou pela
+    // validação + consolidação no pipeline).
+    const expectedScript = freshTakes
+      .map((t) => t.script ?? "")
+      .filter((s) => s.trim().length > 0)
+      .join(" ")
+      .trim();
+    const result = await assembleTakes(takeInfos, freshVideo?.audioUrl ?? null, videoId, expectedScript || null);
+
+    // Self-eval pós-assembly: se cobertura de fala < 80%, loga warning pra UI.
+    // Não falha o vídeo — usuário decide se quer remake.
+    if (result.coverage) {
+      const pct = (result.coverage.coverage * 100).toFixed(1);
+      const status = result.coverage.coverage < 0.8 ? "failed" : "completed";
+      await log(videoId, "speech_coverage", status,
+        `${pct}% words matched (${result.coverage.foundWords}/${result.coverage.expectedWords})` +
+        (result.coverage.missingWords.length ? ` — missing: ${result.coverage.missingWords.slice(0, 10).join(", ")}` : ""),
+        result.coverage as unknown as object);
+    }
 
     await prisma.ugcGeneratedVideo.update({
       where: { id: videoId },
@@ -1665,7 +1684,7 @@ export async function pollAndAssembleTakes(videoId: string): Promise<{
         currentStep: null,
       },
     });
-    await log(videoId, "assemble", "completed", `Final video: ${result.finalVideoUrl}`);
+    await log(videoId, "assemble", "completed", `Final video: ${result.finalVideoUrl}${result.coverage ? ` | coverage: ${(result.coverage.coverage * 100).toFixed(0)}%` : ""}`);
     return { allDone: true, failedCount, status: "AWAITING_REVIEW" };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
