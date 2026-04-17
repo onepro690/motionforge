@@ -1277,19 +1277,16 @@ export async function pollAndAssembleTakes(videoId: string): Promise<{
         continue;
       }
 
-      // Trim trailing silence (corta pausa no final do take quando a fala termina antes dos 8s)
-      console.log(`[pollAndAssemble] Take ${take.takeIndex} raw buffer: ${videoBuffer.byteLength} bytes, trimming silence...`);
-      videoBuffer = await trimTrailingSilenceFromBuffer(videoBuffer);
-
-      // Upload trimmed video to blob
+      // Upload video to blob first (before any heavy processing to avoid OOM loops)
       const blob = await put(`ugc-take-${take.id}.mp4`, videoBuffer, { access: "public", contentType: "video/mp4", addRandomSuffix: false });
       videoUrl = blob.url;
 
       await prisma.generationJob.update({ where: { id: genJob.id }, data: { status: "COMPLETED", outputVideoUrl: videoUrl, completedAt: new Date() } });
       await prisma.ugcGeneratedTake.update({ where: { id: take.id }, data: { status: "COMPLETED", videoUrl } });
 
-      // Extrai último frame do vídeo TRIMADO (sem silêncio) para encadear o próximo take
-      console.log(`[pollAndAssemble] Take ${take.takeIndex} completed, extracting last frame from trimmed buffer (${videoBuffer.byteLength} bytes)...`);
+      // Extrai último frame para encadear o próximo take
+      // (o trim de silêncio acontece no assembler, não aqui — evita OOM no polling)
+      console.log(`[pollAndAssemble] Take ${take.takeIndex} completed, extracting last frame from buffer (${videoBuffer.byteLength} bytes)...`);
       const lastFrame = await extractLastFrameFromBuffer(videoBuffer).catch((e) => {
         console.error(`[pollAndAssemble] extractLastFrameFromBuffer failed for take ${take.takeIndex}:`, e);
         return null;
