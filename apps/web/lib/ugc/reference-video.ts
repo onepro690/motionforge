@@ -39,21 +39,25 @@ interface WhisperSegment {
 // Analisa os segmentos do Whisper pra detectar se o áudio é música (não fala).
 // Música tipicamente tem: segmentos longos ininterruptos, no_speech_prob alto,
 // e/ou avg_logprob muito baixo (Whisper tem baixa confiança na transcrição).
+// Thresholds agressivos pra evitar lip-sync de letra de música.
 function isMusicNotSpeech(segments: WhisperSegment[]): boolean {
   if (!segments || segments.length === 0) return false;
 
-  // Se a maioria dos segmentos tem no_speech_prob alto, é música/silêncio
-  const highNoSpeech = segments.filter((s) => (s.no_speech_prob ?? 0) > 0.5);
-  if (highNoSpeech.length > segments.length * 0.6) {
-    console.log(`[reference-video] music detected: ${highNoSpeech.length}/${segments.length} segments have no_speech_prob > 0.5`);
+  // Se uma fração razoável dos segmentos tem no_speech_prob alto, é música.
+  // Baixei de 0.5 → 0.4 pra pegar vídeos com letra cantada que o Whisper
+  // "transcreve" mas com sinal claro de não-fala.
+  const highNoSpeech = segments.filter((s) => (s.no_speech_prob ?? 0) > 0.4);
+  if (highNoSpeech.length >= segments.length * 0.5) {
+    console.log(`[reference-video] music detected: ${highNoSpeech.length}/${segments.length} segments have no_speech_prob > 0.4`);
     return true;
   }
 
-  // Se a maioria dos segmentos tem avg_logprob muito baixo, Whisper não
-  // tem confiança — típico de música onde ele "inventa" a transcrição
-  const lowConfidence = segments.filter((s) => (s.avg_logprob ?? 0) < -1.0);
-  if (lowConfidence.length > segments.length * 0.6) {
-    console.log(`[reference-video] music detected: ${lowConfidence.length}/${segments.length} segments have avg_logprob < -1.0`);
+  // Se a maioria dos segmentos tem avg_logprob baixo, Whisper está chutando.
+  // Baixei de -1.0 → -0.8 pra pegar letras cantadas (onde o modelo tem menos
+  // confiança que em fala direta mas ainda produz texto).
+  const lowConfidence = segments.filter((s) => (s.avg_logprob ?? 0) < -0.8);
+  if (lowConfidence.length >= segments.length * 0.5) {
+    console.log(`[reference-video] music detected: ${lowConfidence.length}/${segments.length} segments have avg_logprob < -0.8`);
     return true;
   }
 
@@ -67,6 +71,21 @@ function isMusicNotSpeech(segments: WhisperSegment[]): boolean {
         console.log(`[reference-video] music detected: only ${segments.length} segments, avg ${avgLen.toFixed(1)}s each (likely continuous music)`);
         return true;
       }
+    }
+  }
+
+  // Densidade de fala muito baixa — menos de 0.8 palavras por segundo em média.
+  // Fala natural fica em 2-4 palavras/s; música cantada com letra simples
+  // dá 0.3-0.8 palavras/s (letras repetitivas tipo "nananana").
+  const totalDuration = segments.reduce((sum, s) => sum + (s.end - s.start), 0);
+  if (totalDuration > 8) {
+    const totalWords = segments
+      .map((s) => s.text.trim().split(/\s+/).filter(Boolean).length)
+      .reduce((a, b) => a + b, 0);
+    const wordsPerSec = totalWords / totalDuration;
+    if (wordsPerSec < 0.8 && totalWords < totalDuration * 0.8) {
+      console.log(`[reference-video] music detected: low speech density ${wordsPerSec.toFixed(2)} words/sec (totalWords=${totalWords}, duration=${totalDuration.toFixed(1)}s)`);
+      return true;
     }
   }
 

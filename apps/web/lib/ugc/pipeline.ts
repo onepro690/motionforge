@@ -717,16 +717,21 @@ export async function runVideoPipeline(
             : null;
           await log(videoId, `nano_banana_frame${fi + 1}`, "started",
             `[${mode}] frame ${fi + 1}${prevRefUrl ? " + prev take result" : ""}${sceneGroupInfo ? ` (GROUP: ${sceneGroupInfo.peopleCount} people)` : ""}`);
-          // Tentativa 1 + 1 retry (Gemini imagens é estocástico — retry costuma funcionar)
-          const doSwap = () => phenotypeOnlyMode
-            ? swapAllPhenotypes(keyframes.frames[fi].url, prevRefUrl)
+          // 3 tentativas (Gemini imagens é estocástico — retry costuma funcionar).
+          // Após a 1ª falha, re-injeta take1ResultUrl se tivermos — amarra identidade.
+          const doSwap = (withPrev: string | null) => phenotypeOnlyMode
+            ? swapAllPhenotypes(keyframes.frames[fi].url, withPrev)
                 .catch((e) => { console.error(`[pipeline] phenotype swap frame${fi + 1} error:`, e); return null; })
-            : swapPersonWithAvatar(keyframes.frames[fi].url, characterImageUrl!, prevRefUrl, sceneGroupInfo)
+            : swapPersonWithAvatar(keyframes.frames[fi].url, characterImageUrl!, withPrev, sceneGroupInfo)
                 .catch((e) => { console.error(`[pipeline] nano_banana frame${fi + 1} error:`, e); return null; });
-          let edited: { url: string; mimeType: string } | null = await doSwap();
+          let edited: { url: string; mimeType: string } | null = await doSwap(prevRefUrl);
           if (!edited) {
-            await log(videoId, `nano_banana_frame${fi + 1}`, "started", `retry after first failure`);
-            edited = await doSwap();
+            await log(videoId, `nano_banana_frame${fi + 1}`, "started", `retry 2 after first failure`);
+            edited = await doSwap(prevRefUrl);
+          }
+          if (!edited) {
+            await log(videoId, `nano_banana_frame${fi + 1}`, "started", `retry 3 (final) after two failures`);
+            edited = await doSwap(prevRefUrl);
           }
           if (edited) {
             editedByFrame[fi] = await imageUrlToBase64(edited.url);
@@ -734,11 +739,26 @@ export async function runVideoPipeline(
             await log(videoId, `nano_banana_frame${fi + 1}`, "completed", edited.url);
             return edited.url;
           } else {
+            // Fallback: reusa take1ResultUrl (identidade garantida) em vez do
+            // frame cru do vídeo de referência, que traria a pessoa ORIGINAL
+            // (rosto diferente do avatar). Preferimos cena desalinhada mas
+            // identidade consistente.
+            if (prevRefUrl) {
+              const prevBase64 = await imageUrlToBase64(prevRefUrl);
+              if (prevBase64) {
+                editedByFrame[fi] = prevBase64;
+                editedUrlByFrame[fi] = prevRefUrl;
+                await log(videoId, `nano_banana_frame${fi + 1}`, "failed",
+                  `all 3 attempts failed — falling back to take1 result for identity consistency (${prevRefUrl})`);
+                return prevRefUrl;
+              }
+            }
+            // Último recurso: raw frame (pode ter pessoa diferente, mas melhor que nada)
             const rawFrame = await imageUrlToBase64(keyframes.frames[fi].url);
             editedByFrame[fi] = rawFrame;
             editedUrlByFrame[fi] = null;
             await log(videoId, `nano_banana_frame${fi + 1}`, "failed",
-              rawFrame ? `using raw frame: ${keyframes.frames[fi].url}` : "all image methods failed");
+              rawFrame ? `all attempts failed — using raw frame (identity may drift): ${keyframes.frames[fi].url}` : "all image methods failed");
             return null;
           }
         };
@@ -759,15 +779,27 @@ export async function runVideoPipeline(
           }
         }
 
-        // Mapeia cada take para o frame visual correto
+        // Mapeia cada take para o frame visual correto.
+        // Regra de ouro: NENHUM take fica sem imagem do avatar. Se o frame
+        // correspondente falhou no Nano Banana, cai pra frame 0 (take1) que
+        // sempre tem a identidade garantida. Melhor ter cenas parecidas do
+        // que cara/pessoa diferente em um take.
+        const take1Image = editedByFrame[0] || null;
+        const take1Url = editedUrlByFrame[0] || null;
         for (let i = 0; i < takeCount; i++) {
           const key = `take${i + 1}`;
           // Para vídeos de fala com 1 cena: todos os takes usam o frame 0
           // Para vídeos com N cenas: take i usa frame i (ou último disponível)
           const frameIdx = Math.min(i, distinctFrameCount - 1);
-          perTakeImages[key] = editedByFrame[frameIdx] || null;
-          perTakeEditedUrls[key] = editedUrlByFrame[frameIdx] || null;
+          const imgForTake = editedByFrame[frameIdx] || take1Image;
+          const urlForTake = editedUrlByFrame[frameIdx] || take1Url;
+          perTakeImages[key] = imgForTake;
+          perTakeEditedUrls[key] = urlForTake;
           referenceFrameUrls[key] = keyframes.frames[Math.min(i, keyframes.frames.length - 1)].url;
+          if (!editedByFrame[frameIdx] && take1Image) {
+            await log(videoId, `take_image_fallback`, "completed",
+              `${key} using take1's edited image (frame ${frameIdx} had no edit result — identity consistency preserved)`);
+          }
         }
       } else {
         await log(videoId, "extract_keyframes", "failed", `got ${keyframes?.frames.length ?? 0} frames`);
@@ -794,6 +826,35 @@ export async function runVideoPipeline(
 
     // ── Agora que o takeCount final está definido (Gemini + ffmpeg scene detection),
     // gera os takeScripts e veoPrompts com o número correto de takes ──────────
+
+    // ── Cross-check Gemini vs Whisper ──
+    // Se Gemini disse que tem narração mas a Whisper não retornou fala real
+    // (música/lyrics detectados, transcript vazio ou muito curto), NÃO confia
+    // no Gemini — muitos vídeos com letra cantada são misclassificados.
+    // Sinal forte: duração longa com pouquíssimo texto por segundo.
+    if (hasNarration && bestReference?.id) {
+      const transcriptText = referenceTranscript?.transcript?.trim() ?? "";
+      const transcriptWords = transcriptText.split(/\s+/).filter((w) => w.length > 0).length;
+      const whisperSaidNoSpeech = referenceTranscript?.hasSpeech === false;
+      const duration = refDuration_fromTikwm ?? 0;
+      // <0.6 palavras/segundo = muito provável música (fala natural = 2-4 w/s)
+      const lowDensity = duration > 8 && transcriptWords > 0 && transcriptWords / duration < 0.6;
+      // Transcript muito curto pra duração do vídeo (ex: 15s com < 5 palavras)
+      const tooShort = duration > 10 && transcriptWords < Math.ceil(duration / 3);
+
+      if (whisperSaidNoSpeech || lowDensity || tooShort || transcriptWords === 0) {
+        const reason = whisperSaidNoSpeech
+          ? "Whisper classified as music/non-speech"
+          : lowDensity
+            ? `low speech density (${(transcriptWords / duration).toFixed(2)} w/s)`
+            : tooShort
+              ? `transcript too short (${transcriptWords} words for ${duration}s)`
+              : "empty transcript";
+        await log(videoId, "narration_override", "completed",
+          `Gemini said hasNarration=true but overriding to SILENT — ${reason}`);
+        hasNarration = false;
+      }
+    }
 
     // Aplica a decisão de narração — gera takeScripts dinâmicos
     if (!hasNarration) {

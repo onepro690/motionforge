@@ -442,11 +442,16 @@ export async function generateVeoPrompts(
       }
     } else {
       // ── MODO SILENCIOSO / VOICEOVER: usa raw GPT-4o + clauses ──
+      // CRÍTICO: silentClause vem PRIMEIRO — Veo 3 prioriza o começo do prompt.
+      // Se jogar silentClause no fim, o Veo ignora e gera lip-sync inventado.
       const rawPrompt = raw[key] ?? raw[`take${i + 1}`];
       const defaultAction = i === 0 ? "intro shot" : i === takeCount - 1 ? `closing beat with ${productName} visible` : "demonstration";
-      const fallback = `${baseScene} Take ${i + 1} — ${referenceScene?.action ?? defaultAction}, person interacts with the product naturally.${silentClause}`;
-      prompt = (stripSpeech(rawPrompt ?? fallback) + silentClause).trim();
-      prompt += ` ${imageFidelity} ${identityLock} ${noTextShort} ${anatomyShort}`;
+      const fallback = `${baseScene} Take ${i + 1} — ${referenceScene?.action ?? defaultAction}, person interacts with the product naturally.`;
+      const body = stripSpeech(rawPrompt ?? fallback).trim();
+      const silentHeader = isSilent
+        ? `Vertical 9:16 UGC smartphone selfie video — ABSOLUTELY SILENT. The person's MOUTH MUST STAY CLOSED throughout the entire take — NO lip-sync, NO dialogue, NO speech, NO voiceover in any language, NO singing, NO whispering, NO mouthing of words. The person NEVER speaks. AUDIO TRACK: ambient room tone or soft background music only — ZERO voices.`
+        : `Vertical 9:16 UGC smartphone selfie video. No on-camera speech — narration will be added as voice-over in post.`;
+      prompt = `${silentHeader} ${body}${silentClause} ${imageFidelity} ${identityLock} ${noTextShort} ${anatomyShort}`;
 
       if (sceneForTake) {
         prompt += ` Scene action: ${sceneForTake.action}.`;
