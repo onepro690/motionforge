@@ -82,11 +82,11 @@ export async function POST(request: NextRequest) {
 
     const createdVideos: string[] = [];
 
+    // Se não especificou characterId, pega o primeiro personagem do usuário
+    const finalCharacterId = characterId ?? (await prisma.ugcCharacter.findFirst({ where: { userId } }))?.id ?? null;
+
     for (let i = 0; i < Math.min(toGenerate, approvedProducts.length); i++) {
       const product = approvedProducts[i % approvedProducts.length];
-
-      // Se não especificou characterId, pega o primeiro personagem do usuário
-      const finalCharacterId = characterId ?? (await prisma.ugcCharacter.findFirst({ where: { userId } }))?.id ?? null;
 
       const video = await prisma.ugcGeneratedVideo.create({
         data: {
@@ -99,24 +99,29 @@ export async function POST(request: NextRequest) {
         },
       });
 
-      const videoIdForBg = video.id;
-      after(async () => {
+      createdVideos.push(video.id);
+    }
+
+    // Roda todas as pipelines SEQUENCIALMENTE em um único after()
+    // Evita rate limit do Veo3 e conflitos de recursos
+    after(async () => {
+      for (const videoId of createdVideos) {
         try {
-          await runVideoPipeline(videoIdForBg);
+          console.log(`[ugc/generate] Starting pipeline for video ${videoId}...`);
+          await runVideoPipeline(videoId);
+          console.log(`[ugc/generate] Pipeline completed for video ${videoId}`);
         } catch (err) {
-          console.error(`[ugc/generate] Pipeline failed for video ${videoIdForBg}:`, err);
+          console.error(`[ugc/generate] Pipeline failed for video ${videoId}:`, err);
           await prisma.ugcGeneratedVideo.update({
-            where: { id: videoIdForBg },
+            where: { id: videoId },
             data: {
               status: "FAILED",
               errorMessage: err instanceof Error ? err.message : String(err),
             },
           }).catch(() => null);
         }
-      });
-
-      createdVideos.push(video.id);
-    }
+      }
+    });
 
     return NextResponse.json({
       success: true,
