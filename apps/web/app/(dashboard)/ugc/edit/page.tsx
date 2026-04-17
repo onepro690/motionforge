@@ -1,5 +1,5 @@
 "use client";
-import { useEffect, useState, useCallback, useRef } from "react";
+import { useEffect, useState, useCallback, useRef, Suspense } from "react";
 import { useSearchParams, useRouter } from "next/navigation";
 import {
   Scissors, Loader2, Play, Pause, SkipBack, SkipForward,
@@ -153,7 +153,7 @@ function TakeTimeline({
   );
 }
 
-export default function EditPage() {
+function EditPageContent() {
   const searchParams = useSearchParams();
   const router = useRouter();
   const videoId = searchParams.get("id");
@@ -401,5 +401,13 @@ export default function EditPage() {
         </div>
       </div>
     </div>
+  );
+}
+
+export default function EditPage() {
+  return (
+    <Suspense fallback={<div className="flex justify-center py-16"><Loader2 className="w-6 h-6 text-violet-400 animate-spin" /></div>}>
+      <EditPageContent />
+    </Suspense>
   );
 }
