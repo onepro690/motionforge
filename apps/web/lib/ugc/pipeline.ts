@@ -1432,13 +1432,18 @@ export async function pollAndAssembleTakes(videoId: string): Promise<{
           allCompleted = false;
           continue;
         } catch (retryErr) {
-          console.error(`[pollAndAssemble] Auto-retry failed for take ${take.takeIndex}:`, retryErr);
-          await log(videoId, `retry_take_${take.takeIndex}`, "failed", String(retryErr));
-          // Mantém como FAILED, será retentado no próximo ciclo se ainda tiver retries
-          if (take.retryCount + 1 >= MAX_RETRIES) {
-            permanentlyFailed++;
+          const errStr = String(retryErr);
+          const isQuota = /quota|rate.?limit|RESOURCE_EXHAUSTED|429|exceeded/i.test(errStr);
+          if (isQuota) {
+            console.warn(`[pollAndAssemble] Quota/rate-limit for take ${take.takeIndex}, will retry next cycle (retryCount unchanged)`);
+            await log(videoId, `retry_take_${take.takeIndex}`, "failed", `Quota/rate-limit, awaiting capacity: ${errStr.slice(0, 200)}`);
+            allCompleted = false;
+            continue;
           }
+          console.error(`[pollAndAssemble] Auto-retry failed for take ${take.takeIndex}:`, retryErr);
+          await log(videoId, `retry_take_${take.takeIndex}`, "failed", errStr);
           failedCount++;
+          allCompleted = false;
           continue;
         }
       }
