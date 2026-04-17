@@ -44,6 +44,76 @@ function getVideoDurationFfmpeg(videoPath: string): Promise<number> {
   });
 }
 
+// Trim trailing silence from a video buffer.
+// Returns trimmed buffer if silence was found, or original buffer if not.
+async function trimTrailingSilenceFromBuffer(videoBuffer: Buffer): Promise<Buffer> {
+  const id = randomBytes(6).toString("hex");
+  const tmpDir = join("/tmp", `trim-silence-${id}`);
+  await mkdir(tmpDir, { recursive: true });
+  const inputPath = join(tmpDir, "input.mp4");
+  const outputPath = join(tmpDir, "trimmed.mp4");
+
+  try {
+    await writeFile(inputPath, videoBuffer);
+
+    // Detect silence periods using ffmpeg silencedetect
+    const silenceInfo = await new Promise<string>((resolve) => {
+      let stderr = "";
+      ffmpeg(inputPath)
+        .audioFilters("silencedetect=noise=-30dB:d=0.5")
+        .format("null")
+        .output(process.platform === "win32" ? "NUL" : "/dev/null")
+        .on("stderr", (line: string) => { stderr += line + "\n"; })
+        .on("end", () => resolve(stderr))
+        .on("error", () => resolve(stderr))
+        .run();
+    });
+
+    // Parse silence_start timestamps — find the last one
+    const silenceStartMatches = [...silenceInfo.matchAll(/silence_start:\s*([\d.]+)/g)];
+    const duration = await getVideoDurationFfmpeg(inputPath);
+
+    if (silenceStartMatches.length === 0 || duration <= 0) {
+      console.log(`[trimSilence] No trailing silence detected (duration=${duration})`);
+      return videoBuffer;
+    }
+
+    const lastSilenceStart = parseFloat(silenceStartMatches[silenceStartMatches.length - 1][1]);
+    // Only trim if the silence is at the END of the video (last 30% of duration)
+    // and is significant (> 0.8s)
+    const trailingSilenceDuration = duration - lastSilenceStart;
+    if (trailingSilenceDuration < 0.8 || lastSilenceStart < duration * 0.5) {
+      console.log(`[trimSilence] Silence not significant enough to trim (starts at ${lastSilenceStart}s, duration=${duration}s, trailing=${trailingSilenceDuration}s)`);
+      return videoBuffer;
+    }
+
+    // Keep a small buffer (0.3s) after last speech
+    const trimPoint = Math.min(lastSilenceStart + 0.3, duration);
+    console.log(`[trimSilence] Trimming at ${trimPoint}s (was ${duration}s, cutting ${(duration - trimPoint).toFixed(1)}s of silence)`);
+
+    await new Promise<void>((resolve, reject) => {
+      ffmpeg(inputPath)
+        .setDuration(trimPoint)
+        .outputOptions(["-c:v", "libx264", "-c:a", "aac", "-movflags", "+faststart"])
+        .output(outputPath)
+        .on("end", () => resolve())
+        .on("error", (err: Error) => reject(err))
+        .run();
+    });
+
+    const trimmedBuffer = await readFile(outputPath);
+    console.log(`[trimSilence] Trimmed: ${videoBuffer.byteLength} → ${trimmedBuffer.byteLength} bytes`);
+    return trimmedBuffer;
+  } catch (err) {
+    console.error("[trimSilence] Error, returning original:", err);
+    return videoBuffer;
+  } finally {
+    await unlink(inputPath).catch(() => {});
+    await unlink(outputPath).catch(() => {});
+    await import("fs/promises").then(fs => fs.rmdir(tmpDir).catch(() => {}));
+  }
+}
+
 const PROJECT_ID = "gen-lang-client-0466084510";
 const LOCATION = "us-central1";
 const VERTEX_BASE = `https://${LOCATION}-aiplatform.googleapis.com/v1/projects/${PROJECT_ID}/locations/${LOCATION}/publishers/google/models`;
@@ -1189,8 +1259,6 @@ export async function pollAndAssembleTakes(videoId: string): Promise<{
       let videoBuffer: Buffer;
       if (rawBase64) {
         videoBuffer = Buffer.from(rawBase64, "base64");
-        const blob = await put(`ugc-take-${take.id}.mp4`, videoBuffer, { access: "public", contentType: "video/mp4", addRandomSuffix: false });
-        videoUrl = blob.url;
       } else if (rawUri) {
         // Download from GCS
         const withoutScheme = rawUri.startsWith("gs://") ? rawUri.slice(5) : rawUri;
@@ -1202,8 +1270,6 @@ export async function pollAndAssembleTakes(videoId: string): Promise<{
         });
         const buf = await gcsRes.arrayBuffer();
         videoBuffer = Buffer.from(buf);
-        const blob = await put(`ugc-take-${take.id}.mp4`, videoBuffer, { access: "public", contentType: "video/mp4", addRandomSuffix: false });
-        videoUrl = blob.url;
       } else {
         await prisma.ugcGeneratedTake.update({ where: { id: take.id }, data: { status: "FAILED", errorMessage: "Veo não retornou vídeo" } });
         failedCount++;
@@ -1211,11 +1277,19 @@ export async function pollAndAssembleTakes(videoId: string): Promise<{
         continue;
       }
 
+      // Trim trailing silence (corta pausa no final do take quando a fala termina antes dos 8s)
+      console.log(`[pollAndAssemble] Take ${take.takeIndex} raw buffer: ${videoBuffer.byteLength} bytes, trimming silence...`);
+      videoBuffer = await trimTrailingSilenceFromBuffer(videoBuffer);
+
+      // Upload trimmed video to blob
+      const blob = await put(`ugc-take-${take.id}.mp4`, videoBuffer, { access: "public", contentType: "video/mp4", addRandomSuffix: false });
+      videoUrl = blob.url;
+
       await prisma.generationJob.update({ where: { id: genJob.id }, data: { status: "COMPLETED", outputVideoUrl: videoUrl, completedAt: new Date() } });
       await prisma.ugcGeneratedTake.update({ where: { id: take.id }, data: { status: "COMPLETED", videoUrl } });
 
-      // Extrai último frame DIRETO DO BUFFER em memória (não re-baixa do blob — evita 403)
-      console.log(`[pollAndAssemble] Take ${take.takeIndex} completed, extracting last frame from buffer (${videoBuffer.byteLength} bytes)...`);
+      // Extrai último frame do vídeo TRIMADO (sem silêncio) para encadear o próximo take
+      console.log(`[pollAndAssemble] Take ${take.takeIndex} completed, extracting last frame from trimmed buffer (${videoBuffer.byteLength} bytes)...`);
       const lastFrame = await extractLastFrameFromBuffer(videoBuffer).catch((e) => {
         console.error(`[pollAndAssemble] extractLastFrameFromBuffer failed for take ${take.takeIndex}:`, e);
         return null;
