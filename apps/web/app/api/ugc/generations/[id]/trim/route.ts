@@ -5,7 +5,7 @@ import { prisma } from "@motion/database";
 import { put } from "@vercel/blob";
 import ffmpegInstaller from "@ffmpeg-installer/ffmpeg";
 import ffmpeg from "fluent-ffmpeg";
-import { writeFile, readFile, unlink, mkdir } from "fs/promises";
+import { writeFile, readFile, unlink, mkdir, rmdir } from "fs/promises";
 import { join } from "path";
 import { randomBytes } from "crypto";
 import { execFile } from "child_process";
@@ -15,12 +15,9 @@ ffmpeg.setFfmpegPath(ffmpegInstaller.path);
 export const maxDuration = 300;
 export const runtime = "nodejs";
 
-// Each cut: { takeIndex, startTime, endTime } — segment to KEEP
-// We trim each take to only the kept segments, then re-assemble
-interface TrimSegment {
-  takeIndex: number;
-  start: number; // seconds from take start
-  end: number;   // seconds from take start
+interface Cut {
+  start: number;
+  end: number;
 }
 
 async function downloadFile(url: string, destPath: string): Promise<void> {
@@ -50,6 +47,37 @@ async function getVideoDuration(videoPath: string): Promise<number> {
   });
 }
 
+// Merge overlapping/adjacent cuts, clamped to [0, total].
+function normalizeCuts(cuts: Cut[], total: number): Cut[] {
+  const clean = cuts
+    .map(c => ({ start: Math.max(0, Math.min(total, c.start)), end: Math.max(0, Math.min(total, c.end)) }))
+    .filter(c => c.end - c.start > 0.05)
+    .sort((a, b) => a.start - b.start);
+
+  const merged: Cut[] = [];
+  for (const c of clean) {
+    const last = merged[merged.length - 1];
+    if (last && c.start <= last.end + 0.05) {
+      last.end = Math.max(last.end, c.end);
+    } else {
+      merged.push({ ...c });
+    }
+  }
+  return merged;
+}
+
+// Invert cuts into keep-segments.
+function keepSegments(cuts: Cut[], total: number): Cut[] {
+  const keeps: Cut[] = [];
+  let cursor = 0;
+  for (const c of cuts) {
+    if (c.start > cursor + 0.05) keeps.push({ start: cursor, end: c.start });
+    cursor = Math.max(cursor, c.end);
+  }
+  if (cursor < total - 0.05) keeps.push({ start: cursor, end: total });
+  return keeps;
+}
+
 export async function POST(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
@@ -60,17 +88,19 @@ export async function POST(
 
   const video = await prisma.ugcGeneratedVideo.findUnique({
     where: { id },
-    include: { takes: { orderBy: { takeIndex: "asc" } } },
+    select: { id: true, userId: true, finalVideoUrl: true },
   });
   if (!video || video.userId !== session.user.id) {
     return NextResponse.json({ error: "Not found" }, { status: 404 });
   }
+  if (!video.finalVideoUrl) {
+    return NextResponse.json({ error: "Vídeo final não disponível" }, { status: 400 });
+  }
 
   const body = await request.json();
-  const segments: TrimSegment[] = body.segments;
-
-  if (!segments || !Array.isArray(segments) || segments.length === 0) {
-    return NextResponse.json({ error: "Nenhum segmento para manter" }, { status: 400 });
+  const rawCuts: Cut[] = Array.isArray(body?.cuts) ? body.cuts : [];
+  if (rawCuts.length === 0) {
+    return NextResponse.json({ error: "Nenhum corte informado" }, { status: 400 });
   }
 
   const tmpId = randomBytes(8).toString("hex");
@@ -79,93 +109,71 @@ export async function POST(
   const tempFiles: string[] = [];
 
   try {
-    // Group segments by takeIndex
-    const segmentsByTake = new Map<number, TrimSegment[]>();
-    for (const seg of segments) {
-      if (!segmentsByTake.has(seg.takeIndex)) segmentsByTake.set(seg.takeIndex, []);
-      segmentsByTake.get(seg.takeIndex)!.push(seg);
+    const sourcePath = join(tmpDir, "source.mp4");
+    await downloadFile(video.finalVideoUrl, sourcePath);
+    tempFiles.push(sourcePath);
+
+    const total = await getVideoDuration(sourcePath);
+    if (total <= 0) {
+      return NextResponse.json({ error: "Não foi possível ler a duração do vídeo" }, { status: 500 });
     }
 
-    // Process each take: download, extract kept segments
-    const outputParts: string[] = [];
-    let partIdx = 0;
+    const cuts = normalizeCuts(rawCuts, total);
+    const keeps = keepSegments(cuts, total);
 
-    for (const [takeIndex, takeSegments] of [...segmentsByTake.entries()].sort((a, b) => a[0] - b[0])) {
-      const take = video.takes.find(t => t.takeIndex === takeIndex);
-      if (!take?.videoUrl) continue;
-
-      const takePath = join(tmpDir, `take-${takeIndex}.mp4`);
-      await downloadFile(take.videoUrl, takePath);
-      tempFiles.push(takePath);
-
-      // Sort segments by start time
-      const sorted = takeSegments.sort((a, b) => a.start - b.start);
-
-      for (const seg of sorted) {
-        const partPath = join(tmpDir, `part-${partIdx}.mp4`);
-        const duration = seg.end - seg.start;
-        if (duration < 0.1) continue;
-
-        await new Promise<void>((resolve, reject) => {
-          ffmpeg(takePath)
-            .seekInput(seg.start)
-            .duration(duration)
-            .outputOptions(["-c:v", "libx264", "-c:a", "aac", "-movflags", "+faststart"])
-            .output(partPath)
-            .on("end", () => resolve())
-            .on("error", (err: Error) => reject(err))
-            .run();
-        });
-
-        outputParts.push(partPath);
-        tempFiles.push(partPath);
-        partIdx++;
-      }
+    if (keeps.length === 0) {
+      return NextResponse.json({ error: "Os cortes removem o vídeo inteiro" }, { status: 400 });
     }
 
-    if (outputParts.length === 0) {
-      return NextResponse.json({ error: "Nenhum segmento para manter" }, { status: 400 });
-    }
+    // Extract each keep segment.
+    const parts: string[] = [];
+    for (let i = 0; i < keeps.length; i++) {
+      const seg = keeps[i];
+      const duration = seg.end - seg.start;
+      if (duration < 0.1) continue;
 
-    // Concatenate all parts
-    const concatPath = join(tmpDir, "concat.mp4");
-    const listPath = join(tmpDir, "list.txt");
-    const listContent = outputParts.map(p => `file '${p}'`).join("\n");
-    await writeFile(listPath, listContent, "utf8");
-    tempFiles.push(concatPath, listPath);
-
-    await new Promise<void>((resolve, reject) => {
-      ffmpeg()
-        .input(listPath)
-        .inputOptions(["-f", "concat", "-safe", "0"])
-        .outputOptions(["-c:v", "libx264", "-c:a", "aac", "-movflags", "+faststart"])
-        .output(concatPath)
-        .on("end", () => resolve())
-        .on("error", (err: Error) => reject(err))
-        .run();
-    });
-
-    // Mix with audio if available
-    let finalPath = concatPath;
-    if (video.audioUrl) {
-      const audioPath = join(tmpDir, "audio.mp3");
-      await downloadFile(video.audioUrl, audioPath);
-      tempFiles.push(audioPath);
-
-      const mixedPath = join(tmpDir, "final.mp4");
-      tempFiles.push(mixedPath);
-
+      const partPath = join(tmpDir, `part-${i}.mp4`);
       await new Promise<void>((resolve, reject) => {
-        ffmpeg()
-          .input(concatPath)
-          .input(audioPath)
-          .outputOptions(["-map", "0:v", "-map", "1:a", "-c:v", "copy", "-c:a", "aac", "-movflags", "+faststart", "-shortest"])
-          .output(mixedPath)
+        ffmpeg(sourcePath)
+          .seekInput(seg.start)
+          .duration(duration)
+          .outputOptions(["-c:v", "libx264", "-c:a", "aac", "-movflags", "+faststart"])
+          .output(partPath)
           .on("end", () => resolve())
           .on("error", (err: Error) => reject(err))
           .run();
       });
-      finalPath = mixedPath;
+      parts.push(partPath);
+      tempFiles.push(partPath);
+    }
+
+    if (parts.length === 0) {
+      return NextResponse.json({ error: "Nenhum segmento válido após o corte" }, { status: 400 });
+    }
+
+    let finalPath: string;
+    if (parts.length === 1) {
+      finalPath = parts[0];
+    } else {
+      const listPath = join(tmpDir, "list.txt");
+      const listContent = parts.map(p => `file '${p}'`).join("\n");
+      await writeFile(listPath, listContent, "utf8");
+      tempFiles.push(listPath);
+
+      const concatPath = join(tmpDir, "concat.mp4");
+      tempFiles.push(concatPath);
+
+      await new Promise<void>((resolve, reject) => {
+        ffmpeg()
+          .input(listPath)
+          .inputOptions(["-f", "concat", "-safe", "0"])
+          .outputOptions(["-c:v", "libx264", "-c:a", "aac", "-movflags", "+faststart"])
+          .output(concatPath)
+          .on("end", () => resolve())
+          .on("error", (err: Error) => reject(err))
+          .run();
+      });
+      finalPath = concatPath;
     }
 
     const durationSeconds = await getVideoDuration(finalPath);
@@ -177,7 +185,6 @@ export async function POST(
       addRandomSuffix: true,
     });
 
-    // Update the video record
     await prisma.ugcGeneratedVideo.update({
       where: { id },
       data: {
@@ -197,6 +204,6 @@ export async function POST(
     return NextResponse.json({ error: `Erro ao cortar: ${msg}` }, { status: 500 });
   } finally {
     await Promise.all(tempFiles.map(p => unlink(p).catch(() => {})));
-    await import("fs/promises").then(fs => fs.rmdir(tmpDir).catch(() => {}));
+    await rmdir(tmpDir).catch(() => {});
   }
 }

@@ -2,8 +2,7 @@
 import { useEffect, useState, useCallback, useRef, Suspense, Component, type ReactNode } from "react";
 import { useSearchParams, useRouter } from "next/navigation";
 import {
-  Scissors, Loader2, Play, Pause, SkipBack, SkipForward,
-  Trash2, Save, ArrowLeft, Undo2
+  Scissors, Loader2, Play, Pause, Trash2, Save, ArrowLeft, Undo2, SkipBack, SkipForward
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
@@ -33,151 +32,26 @@ class EditErrorBoundary extends Component<{ children: ReactNode }, { err: Error 
   }
 }
 
-interface Take {
-  id: string;
-  takeIndex: number;
-  status: string;
-  videoUrl: string | null;
-  script: string | null;
-  durationSeconds: number | null;
-}
-
 interface VideoDetail {
   id: string;
   title: string | null;
   status: string;
   finalVideoUrl: string | null;
   durationSeconds: number | null;
-  audioUrl: string | null;
   product: { name: string };
-  takes: Take[];
 }
 
 interface CutRegion {
   id: string;
-  takeIndex: number;
   start: number;
   end: number;
 }
 
 function formatTime(seconds: number): string {
+  if (!isFinite(seconds) || seconds < 0) return "0:00.0";
   const m = Math.floor(seconds / 60);
-  const s = seconds % 60;
+  const s = seconds - m * 60;
   return `${m}:${s.toFixed(1).padStart(4, "0")}`;
-}
-
-function TakeTimeline({
-  take, duration, cuts, onAddCut, onRemoveCut, isActive, onSeek, currentTime,
-}: {
-  take: Take;
-  duration: number;
-  cuts: CutRegion[];
-  onAddCut: (takeIndex: number, start: number, end: number) => void;
-  onRemoveCut: (cutId: string) => void;
-  isActive: boolean;
-  onSeek: (takeIndex: number, time: number) => void;
-  currentTime: number;
-}) {
-  const timelineRef = useRef<HTMLDivElement>(null);
-  const [selectStart, setSelectStart] = useState<number | null>(null);
-  const [selectEnd, setSelectEnd] = useState<number | null>(null);
-
-  const getTimeFromX = (clientX: number): number => {
-    if (!timelineRef.current) return 0;
-    const rect = timelineRef.current.getBoundingClientRect();
-    return Math.max(0, Math.min(1, (clientX - rect.left) / rect.width)) * duration;
-  };
-
-  return (
-    <div className={`rounded-lg border p-3 space-y-2 ${isActive ? "border-violet-500/40 bg-violet-500/5" : "border-white/[0.06] bg-white/[0.02]"}`}>
-      <div className="flex items-center justify-between">
-        <div className="flex items-center gap-2">
-          <span className="text-xs font-medium text-white/60">Take {take.takeIndex + 1}</span>
-          <span className="text-xs text-white/30">{formatTime(duration)}</span>
-          {cuts.length > 0 && (
-            <span className="text-xs text-red-400/70">{cuts.length} corte{cuts.length > 1 ? "s" : ""}</span>
-          )}
-        </div>
-        {take.script && (
-          <p className="text-xs text-white/30 truncate max-w-[300px]" title={take.script}>{take.script}</p>
-        )}
-      </div>
-
-      <div
-        ref={timelineRef}
-        className="relative h-10 bg-white/5 rounded cursor-crosshair select-none"
-        onPointerDown={(e) => {
-          if (e.button !== 0) return;
-          e.preventDefault();
-          const startTime = getTimeFromX(e.clientX);
-          setSelectStart(startTime);
-          setSelectEnd(null);
-          const onMove = (ev: PointerEvent) => {
-            setSelectEnd(getTimeFromX(ev.clientX));
-          };
-          const onUp = (ev: PointerEvent) => {
-            window.removeEventListener("pointermove", onMove);
-            window.removeEventListener("pointerup", onUp);
-            const end = getTimeFromX(ev.clientX);
-            const s = Math.min(startTime, end);
-            const en = Math.max(startTime, end);
-            if (en - s > 0.2) {
-              onAddCut(take.takeIndex, s, en);
-            } else {
-              onSeek(take.takeIndex, s);
-            }
-            setSelectStart(null);
-            setSelectEnd(null);
-          };
-          window.addEventListener("pointermove", onMove);
-          window.addEventListener("pointerup", onUp);
-        }}
-      >
-        <div className="absolute inset-0 rounded overflow-hidden">
-          <div className="w-full h-full bg-emerald-500/10" />
-        </div>
-
-        {/* Cut regions */}
-        {cuts.map(cut => (
-          <div
-            key={cut.id}
-            className="absolute top-0 bottom-0 bg-red-500/30 border-x border-red-500/50 group"
-            style={{ left: `${(cut.start / duration) * 100}%`, width: `${((cut.end - cut.start) / duration) * 100}%` }}
-          >
-            <button
-              className="absolute top-0.5 left-1/2 -translate-x-1/2 opacity-0 group-hover:opacity-100 transition-opacity bg-red-600 rounded px-1 py-0.5"
-              onClick={(e) => { e.stopPropagation(); onRemoveCut(cut.id); }}
-            >
-              <Trash2 className="w-2.5 h-2.5 text-white" />
-            </button>
-            <span className="absolute bottom-0.5 left-1 text-[9px] text-red-300/80">{formatTime(cut.start)}</span>
-            <span className="absolute bottom-0.5 right-1 text-[9px] text-red-300/80">{formatTime(cut.end)}</span>
-          </div>
-        ))}
-
-        {/* Selection preview */}
-        {selectStart !== null && selectEnd !== null && Math.abs(selectEnd - selectStart) > 0.1 && (
-          <div
-            className="absolute top-0 bottom-0 bg-red-500/20 border-x border-red-500/40"
-            style={{
-              left: `${(Math.min(selectStart, selectEnd) / duration) * 100}%`,
-              width: `${(Math.abs(selectEnd - selectStart) / duration) * 100}%`,
-            }}
-          />
-        )}
-
-        {/* Playhead */}
-        {isActive && (
-          <div
-            className="absolute top-0 bottom-0 w-0.5 bg-white/80 z-10 pointer-events-none"
-            style={{ left: `${(currentTime / duration) * 100}%` }}
-          >
-            <div className="w-2 h-2 bg-white rounded-full -translate-x-[3px] -top-1 absolute" />
-          </div>
-        )}
-      </div>
-    </div>
-  );
 }
 
 function EditPageContent() {
@@ -189,11 +63,13 @@ function EditPageContent() {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [cuts, setCuts] = useState<CutRegion[]>([]);
-  const [takeDurations, setTakeDurations] = useState<Record<number, number>>({});
-  const [activeTakeIndex, setActiveTakeIndex] = useState(0);
-  const [playing, setPlaying] = useState(false);
+  const [duration, setDuration] = useState(0);
   const [currentTime, setCurrentTime] = useState(0);
-  const videoRefs = useRef<Record<number, HTMLVideoElement>>({});
+  const [playing, setPlaying] = useState(false);
+  const [selectStart, setSelectStart] = useState<number | null>(null);
+  const [selectEnd, setSelectEnd] = useState<number | null>(null);
+  const videoRef = useRef<HTMLVideoElement | null>(null);
+  const timelineRef = useRef<HTMLDivElement | null>(null);
 
   const load = useCallback(async () => {
     if (!videoId) return;
@@ -208,98 +84,91 @@ function EditPageContent() {
 
   useEffect(() => { load(); }, [load]);
 
-  const handleTakeLoaded = (takeIndex: number, el: HTMLVideoElement) => {
-    if (videoRefs.current[takeIndex] === el) return;
-    videoRefs.current[takeIndex] = el;
-    const apply = () => {
-      if (!el.duration || isNaN(el.duration)) return;
-      setTakeDurations(prev => {
-        if (prev[takeIndex] === el.duration) return prev;
-        return { ...prev, [takeIndex]: el.duration };
-      });
-    };
-    el.addEventListener("loadedmetadata", apply);
-    apply();
+  const getTimeFromX = useCallback((clientX: number) => {
+    const el = timelineRef.current;
+    if (!el || duration <= 0) return 0;
+    const rect = el.getBoundingClientRect();
+    const ratio = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
+    return ratio * duration;
+  }, [duration]);
+
+  const handleVideoLoaded = () => {
+    const el = videoRef.current;
+    if (!el || !el.duration || isNaN(el.duration)) return;
+    setDuration(prev => (prev === el.duration ? prev : el.duration));
   };
 
-  useEffect(() => {
-    const el = videoRefs.current[activeTakeIndex];
+  const togglePlay = () => {
+    const el = videoRef.current;
     if (!el) return;
-    const handler = () => setCurrentTime(el.currentTime);
-    el.addEventListener("timeupdate", handler);
-    return () => el.removeEventListener("timeupdate", handler);
-  }, [activeTakeIndex, takeDurations]);
+    if (el.paused) el.play(); else el.pause();
+  };
 
-  const addCut = (takeIndex: number, start: number, end: number) => {
+  const seekRelative = (delta: number) => {
+    const el = videoRef.current;
+    if (!el) return;
+    el.currentTime = Math.max(0, Math.min(duration, el.currentTime + delta));
+  };
+
+  const addCut = (start: number, end: number) => {
+    const s = Math.max(0, Math.min(start, duration));
+    const e = Math.max(0, Math.min(end, duration));
+    if (Math.abs(e - s) < 0.2) return;
     setCuts(prev => [...prev, {
       id: `cut-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-      takeIndex,
-      start: Math.max(0, start),
-      end: Math.min(end, takeDurations[takeIndex] ?? end),
+      start: Math.min(s, e),
+      end: Math.max(s, e),
     }]);
   };
 
+  const removeCut = (id: string) => setCuts(prev => prev.filter(c => c.id !== id));
+
   const handleSave = async () => {
-    if (!video) return;
-    const completedTakes = video.takes.filter(t => t.status === "COMPLETED" && t.videoUrl);
-    const keepSegments: { takeIndex: number; start: number; end: number }[] = [];
-
-    for (const take of completedTakes) {
-      const dur = takeDurations[take.takeIndex] ?? take.durationSeconds ?? 8;
-      const takeCuts = cuts.filter(c => c.takeIndex === take.takeIndex).sort((a, b) => a.start - b.start);
-      if (takeCuts.length === 0) {
-        keepSegments.push({ takeIndex: take.takeIndex, start: 0, end: dur });
-        continue;
-      }
-      let pos = 0;
-      for (const cut of takeCuts) {
-        if (cut.start > pos) keepSegments.push({ takeIndex: take.takeIndex, start: pos, end: cut.start });
-        pos = cut.end;
-      }
-      if (pos < dur) keepSegments.push({ takeIndex: take.takeIndex, start: pos, end: dur });
-    }
-
-    if (keepSegments.length === 0) { toast.error("Nenhum segmento para manter!"); return; }
-
+    if (!video || cuts.length === 0) return;
     setSaving(true);
     try {
       const res = await fetch(`/api/ugc/generations/${video.id}/trim`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ segments: keepSegments }),
+        body: JSON.stringify({
+          cuts: cuts.map(c => ({ start: c.start, end: c.end })),
+        }),
       });
-      const json = await res.json();
+      let json: { error?: string; finalVideoUrl?: string; durationSeconds?: number } = {};
+      try { json = await res.json(); } catch { /* non-json */ }
       if (res.ok) {
-        toast.success("Video cortado com sucesso!");
-        await load();
+        toast.success("Vídeo cortado com sucesso!");
         setCuts([]);
+        await load();
       } else {
-        toast.error(json.error ?? "Erro ao cortar");
+        toast.error(json.error ?? `Erro ao cortar (HTTP ${res.status})`);
       }
+    } catch (err) {
+      toast.error(`Falhou: ${err instanceof Error ? err.message : String(err)}`);
     } finally {
       setSaving(false);
     }
   };
 
-  if (!videoId) return <div className="flex items-center justify-center py-16"><p className="text-white/40 text-sm">Nenhum video selecionado</p></div>;
+  if (!videoId) return <div className="flex items-center justify-center py-16"><p className="text-white/40 text-sm">Nenhum vídeo selecionado</p></div>;
   if (loading) return <div className="flex justify-center py-16"><Loader2 className="w-6 h-6 text-violet-400 animate-spin" /></div>;
-  if (!video) return <div className="flex items-center justify-center py-16"><p className="text-white/40 text-sm">Video nao encontrado</p></div>;
-
-  const completedTakes = (video.takes ?? []).filter(t => t.status === "COMPLETED" && t.videoUrl);
-  if (completedTakes.length === 0) {
+  if (!video) return <div className="flex items-center justify-center py-16"><p className="text-white/40 text-sm">Vídeo não encontrado</p></div>;
+  if (!video.finalVideoUrl) {
     return (
       <div className="space-y-3 py-16 flex flex-col items-center justify-center">
-        <p className="text-white/40 text-sm">Nenhum take completo para editar ainda.</p>
+        <p className="text-white/40 text-sm">Este vídeo ainda não foi finalizado.</p>
         <Button size="sm" variant="outline" className="border-white/10 text-white/60 hover:text-white" onClick={() => router.push(`/ugc/review?id=${video.id}`)}>
           <ArrowLeft className="w-4 h-4 mr-1.5" /> Voltar
         </Button>
       </div>
     );
   }
+
   const totalCutDuration = cuts.reduce((acc, c) => acc + (c.end - c.start), 0);
+  const pct = (t: number) => duration > 0 ? (t / duration) * 100 : 0;
 
   return (
-    <div className="space-y-4">
+    <div className="space-y-4 max-w-5xl mx-auto">
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-3">
           <Button size="sm" variant="outline" className="border-white/10 text-white/60 hover:text-white" onClick={() => router.push(`/ugc/review?id=${video.id}`)}>
@@ -308,9 +177,9 @@ function EditPageContent() {
           <div>
             <h1 className="text-lg font-bold text-white flex items-center gap-2">
               <Scissors className="w-4 h-4 text-violet-400" />
-              Editar Video
+              Editar Vídeo
             </h1>
-            <p className="text-xs text-white/40">{video.product.name} - {video.title ?? video.id.slice(-8)}</p>
+            <p className="text-xs text-white/40">{video.product.name} — {video.title ?? video.id.slice(-8)}</p>
           </div>
         </div>
         <div className="flex items-center gap-2">
@@ -326,38 +195,124 @@ function EditPageContent() {
         </div>
       </div>
 
-      <div className="flex gap-4 text-xs text-white/40">
-        <span>{completedTakes.length} takes</span>
-        <span>{video.durationSeconds ? `${Math.round(video.durationSeconds)}s total` : ""}</span>
-        {cuts.length > 0 && (
-          <span className="text-red-400">{cuts.length} corte{cuts.length > 1 ? "s" : ""} (-{totalCutDuration.toFixed(1)}s)</span>
-        )}
-      </div>
+      <div className="grid grid-cols-1 lg:grid-cols-[360px_1fr] gap-4">
+        <Card className="bg-black border-white/[0.06] overflow-hidden">
+          <div className="aspect-[9/16] relative">
+            <video
+              ref={videoRef}
+              src={video.finalVideoUrl}
+              className="absolute inset-0 w-full h-full object-contain"
+              preload="metadata"
+              onLoadedMetadata={handleVideoLoaded}
+              onDurationChange={handleVideoLoaded}
+              onTimeUpdate={() => { const el = videoRef.current; if (el) setCurrentTime(el.currentTime); }}
+              onPlay={() => setPlaying(true)}
+              onPause={() => setPlaying(false)}
+              onEnded={() => setPlaying(false)}
+              playsInline
+              controls={false}
+            />
+          </div>
+          <div className="flex items-center justify-between px-3 py-2 bg-black/80">
+            <div className="flex items-center gap-1">
+              <button className="p-1 text-white/60 hover:text-white" onClick={() => seekRelative(-2)} aria-label="Voltar 2s">
+                <SkipBack className="w-3.5 h-3.5" />
+              </button>
+              <button className="p-1.5 text-white hover:text-violet-300" onClick={togglePlay} aria-label={playing ? "Pause" : "Play"}>
+                {playing ? <Pause className="w-4 h-4" /> : <Play className="w-4 h-4" />}
+              </button>
+              <button className="p-1 text-white/60 hover:text-white" onClick={() => seekRelative(2)} aria-label="Avançar 2s">
+                <SkipForward className="w-3.5 h-3.5" />
+              </button>
+            </div>
+            <span className="text-xs text-white/40 tabular-nums">{formatTime(currentTime)} / {formatTime(duration)}</span>
+          </div>
+        </Card>
 
-      <div className="grid grid-cols-1 lg:grid-cols-[1fr_280px] gap-4">
         <div className="space-y-3">
-          <Card className="bg-white/[0.02] border-white/[0.06] p-4">
-            <p className="text-xs text-white/30 mb-3">
-              Arraste na timeline para selecionar trechos para cortar (vermelho = removido).
-            </p>
-            <div className="space-y-2">
-              {completedTakes.map(take => (
-                <TakeTimeline
-                  key={take.id}
-                  take={take}
-                  duration={takeDurations[take.takeIndex] ?? take.durationSeconds ?? 8}
-                  cuts={cuts.filter(c => c.takeIndex === take.takeIndex)}
-                  onAddCut={addCut}
-                  onRemoveCut={(cutId) => setCuts(prev => prev.filter(c => c.id !== cutId))}
-                  isActive={activeTakeIndex === take.takeIndex}
-                  onSeek={(ti, time) => {
-                    setActiveTakeIndex(ti);
-                    const el = videoRefs.current[ti];
-                    if (el) { el.currentTime = time; setCurrentTime(time); }
-                  }}
-                  currentTime={activeTakeIndex === take.takeIndex ? currentTime : 0}
-                />
+          <Card className="bg-white/[0.02] border-white/[0.06] p-4 space-y-3">
+            <div className="flex items-center justify-between">
+              <p className="text-xs text-white/40">
+                Arraste na barra abaixo para marcar o trecho a <span className="text-red-400">cortar</span>. Clique para pular para um ponto.
+              </p>
+              <div className="flex gap-3 text-xs text-white/40 tabular-nums">
+                <span>{formatTime(duration)} total</span>
+                {cuts.length > 0 && <span className="text-red-400">−{totalCutDuration.toFixed(1)}s</span>}
+                <span className="text-emerald-400">= {formatTime(Math.max(0, duration - totalCutDuration))}</span>
+              </div>
+            </div>
+
+            <div
+              ref={timelineRef}
+              className="relative h-16 bg-white/5 rounded cursor-crosshair select-none touch-none"
+              onPointerDown={(e) => {
+                if (e.button !== 0 || duration <= 0) return;
+                e.preventDefault();
+                const startTime = getTimeFromX(e.clientX);
+                setSelectStart(startTime);
+                setSelectEnd(startTime);
+                const onMove = (ev: PointerEvent) => {
+                  const t = getTimeFromX(ev.clientX);
+                  setSelectEnd(t);
+                  const el = videoRef.current;
+                  if (el) el.currentTime = t;
+                };
+                const onUp = (ev: PointerEvent) => {
+                  window.removeEventListener("pointermove", onMove);
+                  window.removeEventListener("pointerup", onUp);
+                  const end = getTimeFromX(ev.clientX);
+                  const s = Math.min(startTime, end);
+                  const en = Math.max(startTime, end);
+                  if (en - s > 0.2) {
+                    addCut(s, en);
+                  } else {
+                    const el = videoRef.current;
+                    if (el) el.currentTime = s;
+                  }
+                  setSelectStart(null);
+                  setSelectEnd(null);
+                };
+                window.addEventListener("pointermove", onMove);
+                window.addEventListener("pointerup", onUp);
+              }}
+            >
+              <div className="absolute inset-0 rounded bg-emerald-500/10" />
+
+              {cuts.map(cut => (
+                <div
+                  key={cut.id}
+                  className="absolute top-0 bottom-0 bg-red-500/30 border-x border-red-500/60 group"
+                  style={{ left: `${pct(cut.start)}%`, width: `${pct(cut.end - cut.start)}%` }}
+                >
+                  <button
+                    className="absolute top-1 left-1/2 -translate-x-1/2 opacity-0 group-hover:opacity-100 transition-opacity bg-red-600 hover:bg-red-500 rounded px-1.5 py-0.5"
+                    onClick={(e) => { e.stopPropagation(); removeCut(cut.id); }}
+                    onPointerDown={(e) => e.stopPropagation()}
+                    aria-label="Remover corte"
+                  >
+                    <Trash2 className="w-3 h-3 text-white" />
+                  </button>
+                  <span className="absolute bottom-0.5 left-1 text-[10px] text-red-200 tabular-nums">{formatTime(cut.start)}</span>
+                  <span className="absolute bottom-0.5 right-1 text-[10px] text-red-200 tabular-nums">{formatTime(cut.end)}</span>
+                </div>
               ))}
+
+              {selectStart !== null && selectEnd !== null && Math.abs(selectEnd - selectStart) > 0.05 && (
+                <div
+                  className="absolute top-0 bottom-0 bg-red-500/20 border-x border-red-500/40 pointer-events-none"
+                  style={{
+                    left: `${pct(Math.min(selectStart, selectEnd))}%`,
+                    width: `${pct(Math.abs(selectEnd - selectStart))}%`,
+                  }}
+                />
+              )}
+
+              <div
+                className="absolute top-0 bottom-0 w-0.5 bg-white/90 pointer-events-none z-10"
+                style={{ left: `${pct(currentTime)}%` }}
+              >
+                <div className="w-2.5 h-2.5 bg-white rounded-full -translate-x-[4px] -top-1 absolute" />
+              </div>
             </div>
           </Card>
 
@@ -365,14 +320,13 @@ function EditPageContent() {
             <Card className="bg-white/[0.02] border-white/[0.06] p-4">
               <p className="text-xs text-white/30 uppercase tracking-wide mb-2">Cortes</p>
               <div className="space-y-1">
-                {cuts.map(cut => (
+                {cuts.sort((a, b) => a.start - b.start).map(cut => (
                   <div key={cut.id} className="flex items-center justify-between text-xs py-1.5 px-2 rounded bg-red-500/5 border border-red-500/10">
-                    <div className="flex items-center gap-2">
-                      <span className="text-white/50">Take {cut.takeIndex + 1}</span>
-                      <span className="text-red-400">{formatTime(cut.start)} - {formatTime(cut.end)}</span>
+                    <div className="flex items-center gap-2 tabular-nums">
+                      <span className="text-red-400">{formatTime(cut.start)} → {formatTime(cut.end)}</span>
                       <span className="text-white/30">({(cut.end - cut.start).toFixed(1)}s)</span>
                     </div>
-                    <button onClick={() => setCuts(prev => prev.filter(c => c.id !== cut.id))} className="text-red-400/60 hover:text-red-400">
+                    <button onClick={() => removeCut(cut.id)} className="text-red-400/60 hover:text-red-400" aria-label="Remover corte">
                       <Trash2 className="w-3 h-3" />
                     </button>
                   </div>
@@ -380,65 +334,6 @@ function EditPageContent() {
               </div>
             </Card>
           )}
-        </div>
-
-        <div className="space-y-3">
-          <Card className="bg-black border-white/[0.06] overflow-hidden">
-            <div className="aspect-[9/16] relative">
-              {completedTakes.map(take => (
-                <video
-                  key={take.id}
-                  src={take.videoUrl!}
-                  preload="metadata"
-                  className={`absolute inset-0 w-full h-full object-cover ${activeTakeIndex === take.takeIndex ? "block" : "hidden"}`}
-                  ref={(el) => { if (el) handleTakeLoaded(take.takeIndex, el); }}
-                  onPlay={() => setPlaying(true)}
-                  onPause={() => setPlaying(false)}
-                  onEnded={() => setPlaying(false)}
-                  playsInline
-                />
-              ))}
-            </div>
-            <div className="flex items-center justify-between px-3 py-2 bg-black/80">
-              <div className="flex items-center gap-1">
-                <button className="p-1 text-white/60 hover:text-white" onClick={() => { const el = videoRefs.current[activeTakeIndex]; if (el) el.currentTime = Math.max(0, el.currentTime - 2); }}>
-                  <SkipBack className="w-3.5 h-3.5" />
-                </button>
-                <button className="p-1.5 text-white hover:text-violet-300" onClick={() => {
-                  const el = videoRefs.current[activeTakeIndex];
-                  if (!el) return;
-                  if (playing) el.pause(); else el.play();
-                  setPlaying(!playing);
-                }}>
-                  {playing ? <Pause className="w-4 h-4" /> : <Play className="w-4 h-4" />}
-                </button>
-                <button className="p-1 text-white/60 hover:text-white" onClick={() => { const el = videoRefs.current[activeTakeIndex]; if (el) el.currentTime = Math.min(el.duration, el.currentTime + 2); }}>
-                  <SkipForward className="w-3.5 h-3.5" />
-                </button>
-              </div>
-              <span className="text-xs text-white/40">Take {activeTakeIndex + 1} - {formatTime(currentTime)}</span>
-            </div>
-          </Card>
-
-          <div className="flex gap-1 flex-wrap">
-            {completedTakes.map(take => (
-              <button
-                key={take.id}
-                onClick={() => {
-                  setActiveTakeIndex(take.takeIndex);
-                  setPlaying(false);
-                  Object.values(videoRefs.current).forEach(v => v.pause());
-                }}
-                className={`px-2 py-1 rounded text-xs transition-colors ${
-                  activeTakeIndex === take.takeIndex
-                    ? "bg-violet-500/20 text-violet-300 border border-violet-500/30"
-                    : "text-white/40 hover:text-white bg-white/[0.03] border border-transparent"
-                }`}
-              >
-                Take {take.takeIndex + 1}
-              </button>
-            ))}
-          </div>
         </div>
       </div>
     </div>
