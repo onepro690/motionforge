@@ -281,6 +281,8 @@ export interface SceneBreakdownInput {
   peopleCount?: number;
 }
 
+import type { TakeSpec } from "./fidelity";
+
 export async function generateVeoPrompts(
   productName: string,
   brief: CreativeBrief,
@@ -290,172 +292,146 @@ export async function generateVeoPrompts(
   referenceScene: ReferenceScene | null,
   takeCount: number = 3,
   voiceStyle: VoiceStyleInput | null = null,
-  scenes: SceneBreakdownInput[] | null = null
+  scenes: SceneBreakdownInput[] | null = null,
+  takeSpecs: TakeSpec[] | null = null
 ): Promise<VeoPrompts> {
-  const openai = getOpenAI();
-
-  const personaDesc = `the person shown in the input image (character: ${characterName})`;
   const narrationMode = (brief as unknown as { narrationMode?: string }).narrationMode ?? "creator_speaking";
   const isSilent = narrationMode !== "creator_speaking" && !Object.values(copyByTake).some((s) => s && s.trim().length > 0);
 
-  const sceneBlock = referenceScene
-    ? JSON.stringify(referenceScene, null, 2)
-    : "(sem análise visual — use o visualStyle do brief como fallback)";
-
-  // Gera lista detalhada de "o que acontece em cada take no vídeo de referência".
-  // Crítico quando os takes são visualmente DIFERENTES (ex: take 1 = multidão
-  // gritando, take 2 = uma pessoa falando). Sem isso o GPT-4o gera prompts
-  // genéricos que ignoram as diferenças entre cenas.
-  const perTakeSceneBlock = scenes && scenes.length > 0
-    ? scenes
-        .slice(0, takeCount)
-        .map((s, idx) => `Take ${idx + 1} (${s.timeRange}): ${s.action}. Visuals: ${s.visuals}`)
-        .join("\n")
-    : "(usando a mesma cena para todos os takes)";
-
-  // Descobre se algum take vai precisar do "raw" do GPT-4o como fallback.
-  // Em modo fala com script em TODOS os takes, o raw é descartado — então
-  // evitamos a chamada desperdiçada ao GPT-4o (economia de custo e latência).
-  let needsRaw = isSilent || narrationMode !== "creator_speaking";
-  if (!needsRaw) {
-    for (let i = 0; i < takeCount; i++) {
-      const s = copyByTake[`take${i + 1}`]?.trim();
-      if (!s) { needsRaw = true; break; }
-    }
-  }
-
-  let raw: Record<string, string> = {};
-  if (needsRaw) {
-    const prompt = buildPrompt(templateContent, {
-      product_name: productName,
-      brief_data: JSON.stringify(brief, null, 2),
-      copy_by_take: JSON.stringify(copyByTake, null, 2),
-      visual_style: brief.visualStyle,
-      persona_description: personaDesc,
-      narration_mode: narrationMode,
-      reference_scene: sceneBlock,
-      per_take_scenes: perTakeSceneBlock,
-    });
-
-    try {
-      const { text } = await generateText({
-        model: openai("gpt-4o"),
-        prompt,
-        temperature: 0.7,
-      });
-      raw = parseJson<Record<string, string>>(text, {});
-    } catch (err) {
-      console.error("[llm.generateVeoPrompts] GPT-4o falhou, usando fallback:", err);
-      raw = {};
-    }
-  }
-
-  const silentClause = isSilent
-    ? " ABSOLUTELY SILENT — NO dialogue, NO speech, NO lip-sync, NO voiceover, NO narration, NO singing, NO whispering, NO mouthing words. The person's mouth MUST stay CLOSED at all times. Ambient sound or music only. This is a SILENT video — the person NEVER speaks."
-    : narrationMode !== "creator_speaking"
-      ? " No lip-sync on camera; ambient sound only — narration will be added in post as voice-over. Person does not speak directly to camera."
-      : "";
-
-  const sceneDesc = referenceScene
-    ? `Setting: ${referenceScene.setting}. Outfit: ${referenceScene.outfit}. Objects visible: ${referenceScene.objects.join(", ")}. Lighting: ${referenceScene.lighting}. Framing: ${referenceScene.framing}. Camera angle: ${referenceScene.cameraAngle}. Mood: ${referenceScene.mood}. Color palette: ${referenceScene.colorPalette}.`
-    : `Setting: ${brief.visualStyle}`;
+  // ──────────────────────────────────────────────────────────────────────
+  // Em STRICT_REFERENCE_FIDELITY a chamada GPT-4o para "raw prompt" foi
+  // removida. Os prompts agora são montados 100% a partir das TAKE_SPECs
+  // + das cenas Gemini + do script Whisper literal. Qualquer texto gerado
+  // pelo GPT-4o introduziria linguagem criativa/generativa — exatamente o
+  // que queremos bloquear neste modo.
+  // ──────────────────────────────────────────────────────────────────────
+  // Evita warnings de unused. `templateContent` fica no signature por
+  // compatibilidade e uso futuro.
+  void templateContent; void referenceScene;
 
   // ──────────────────────────────────────────────────────────────────────
-  // Prompts ultra-compactos pro Veo 3. Quando o prompt é longo demais, o
-  // Veo ignora a instrução de fala e gera vídeo genérico com música/inglês.
-  // Estratégia: SPEECH FIRST (pt-BR + script literal), depois restrições
-  // curtas. O raw output do GPT-4o só é usado como fallback quando NÃO tem
-  // script (silent mode).
+  // STRICT REFERENCE FIDELITY — prompts de REENCENAÇÃO, não de criação.
+  // O vídeo de referência é a fonte da verdade. A única variável liberada
+  // é a identidade da pessoa (trocada pelo avatar via input image).
+  // Clauses abaixo são imperativas e proibitivas — Veo 3 precisa ouvir
+  // "não invente" mais alto do que "faça isso".
   // ──────────────────────────────────────────────────────────────────────
 
-  const baseScene = `Vertical 9:16 smartphone UGC video, handheld selfie feel. The person is: ${personaDesc}. Scene: ${sceneDesc}`;
+  // Abertura universal: reenactment mode. Aparece PRIMEIRO em todo prompt.
+  const reenactmentHeader = `REENACTMENT MODE — reproduce the reference shot with maximum fidelity. The input image is a single frame of the exact scene you must recreate. Do NOT reinterpret, do NOT invent new framing, do NOT invent new backgrounds, do NOT invent new motion, do NOT invent new actions, do NOT add or remove people. The ONLY variable you are allowed to change is the human identity — use the face, body, skin tone, and hair from the input image. EVERYTHING else (scene, camera, framing, lighting, pose timing, motion, wardrobe, props) must match the input image and the reference description below.`;
 
-  const stripSpeech = (s: string): string => {
-    if (!isSilent) return s;
-    return s
-      .replace(/\b(says?|speaks?|narrat\w*|talk\w*|whisper\w*|mouth\w*|voice\w*|dialogue|lip.?sync|singing|say\w*)\b[^.!]*/gi, "")
-      .replace(/[""][^""]*[""](?:\s*(?:she|he|they)\s+(?:says?|speaks?|narrat\w*))?/gi, "")
-      .replace(/\s{2,}/g, " ")
-      .trim();
+  // Scene lock: fundo/câmera/enquadramento/composição bloqueados.
+  const sceneLock = `SCENE LOCK: background, environment, camera angle, camera distance, lens feel, lighting direction and intensity, shadows, color grading, composition, and depth of field are FIXED by the input image. Do NOT change any of these. No new rooms, no new walls, no new furniture, no new props. If the input image shows a plain backdrop, keep it plain. If it shows a specific location, stay in that location.`;
+
+  // Identity lock (já existia, reforçado).
+  const identityLock = `IDENTITY LOCK: the person's face and body must match the input image PIXEL-IDENTICAL — same face shape, same facial features, same skin tone, same hair color/style/length, same eye color, same ethnicity, same body proportions, same age. Do NOT morph, do NOT drift, do NOT reinterpret. The identity is fixed by the input image and must stay 100% identical from the first frame to the last frame of this take and across every other take.`;
+
+  // Anti-freedom clause: lista explícita do que é PROIBIDO.
+  const forbidList = `FORBIDDEN: inventing a new scene, adding extra people not in the input image, removing people who are in the input image, changing the camera angle, zooming in or out beyond the input image's framing, adding text/captions/subtitles/watermarks/logos, changing the outfit mid-take, changing the background mid-take, morphing the face, drifting body proportions, adding tattoos or piercings or scars not visible in the input image.`;
+
+  const anatomyShort = `Anatomy correct: no cut-off limbs, no clipping through furniture, no fused hands or extra fingers. Keep the full head and upper body inside the frame throughout the take — no zoom-in crops, no head chopping, no body parts disappearing off-screen, stable framing as shown in the input image.`;
+
+  // Constrói um bloco de instruções de reprodução a partir da TAKE_SPEC ou das cenas.
+  const buildReferenceBlock = (i: number): string => {
+    const spec = takeSpecs?.[i];
+    const sceneForTake = scenes?.[i];
+    const parts: string[] = [];
+
+    if (spec) {
+      parts.push(`REFERENCE SEGMENT: this take reproduces seconds ${spec.startTime.toFixed(1)}s–${spec.endTime.toFixed(1)}s of the original video (duration ${spec.duration.toFixed(1)}s).`);
+      if (spec.exactAction) parts.push(`Reproduce this EXACT action: "${spec.exactAction}".`);
+      if (spec.exactVisuals) parts.push(`Match these EXACT visuals: "${spec.exactVisuals}".`);
+      if (spec.exactFraming) parts.push(`Keep the framing as "${spec.exactFraming}".`);
+      if (spec.exactBackground) parts.push(`Background: "${spec.exactBackground}".`);
+      if (spec.exactWardrobe) parts.push(`Wardrobe for this take: "${spec.exactWardrobe}".`);
+      if (spec.peopleCount > 1) {
+        parts.push(`People count: EXACTLY ${spec.peopleCount} people visible — do NOT merge them, do NOT remove any, do NOT add more.`);
+      }
+    } else if (sceneForTake) {
+      parts.push(`REFERENCE SEGMENT (${sceneForTake.timeRange ?? `take ${i + 1}`}): reproduce this EXACT action: "${sceneForTake.action}". Match these visuals: "${sceneForTake.visuals}".`);
+      if (sceneForTake.peopleCount && sceneForTake.peopleCount > 1) {
+        parts.push(`People count: EXACTLY ${sceneForTake.peopleCount} people visible — preserve all of them.`);
+      }
+    }
+
+    return parts.join(" ");
   };
-
-  // Clauses CURTAS e focadas. Veo 3 precisa de densidade, não volume.
-  const imageFidelity = `IMAGE FIDELITY: the input image is the ground truth. Keep the background, outfit, framing, lighting, and exact number of people identical. Do NOT add crowds, extra people, new environments, or props that aren't in the image.`;
-  // IDENTITY LOCK reforçado: amarra a face AO INPUT IMAGE (não só "entre
-  // primeiro e último frame"). Em modo silencioso com troca de roupa, os
-  // takes rodam em paralelo — se o Veo inventa uma face diferente da imagem
-  // em cada take, o avatar "troca" visivelmente. Esta frase obriga o Veo a
-  // respeitar a identidade da IMAGE de input, que já foi padronizada pelo
-  // Nano Banana usando take1 como referência.
-  const identityLock = `IDENTITY LOCK: the person's face must match the input image EXACTLY — same face shape, same facial features, same skin tone, same hair color/style/length, same eye color, same ethnicity. Do NOT invent a new face, do NOT morph features, do NOT reinterpret the face. The identity is fixed by the input image and must stay 100% identical from first to last frame.`;
-  const noTextShort = `No captions, subtitles, watermarks, or on-screen text.`;
-  const anatomyShort = `Anatomy correct: no cut-off limbs, no clipping through furniture, no fused hands or extra fingers. Keep the full head and upper body inside the frame throughout the take — no zoom-in crops, no head chopping, no body parts disappearing off-screen, stable framing.`;
 
   const result: VeoPrompts = {};
   for (let i = 0; i < takeCount; i++) {
     const key = `take${i + 1}`;
     const takeScript = copyByTake[key]?.trim();
     const sceneForTake = scenes?.[i];
+    const spec = takeSpecs?.[i];
+    const referenceBlock = buildReferenceBlock(i);
 
     let prompt: string;
 
     if (narrationMode === "creator_speaking" && takeScript) {
-      // ── MODO FALA: speech-first prompt, curto e denso ──
-      const speakerMode = sceneForTake?.speakerMode ?? "solo";
-      const visualsText = (sceneForTake?.visuals ?? "").toLowerCase() + " " + (sceneForTake?.action ?? "").toLowerCase();
+      // ── SPEECH_EXACT_REENACTMENT_MODE ─────────────────────────────────
+      // Fala literal do vídeo original + reprodução rígida do visual.
+      const speakerMode = spec?.exactSpeaker ?? sceneForTake?.speakerMode ?? "solo";
+      const visualsText = (sceneForTake?.visuals ?? spec?.exactVisuals ?? "").toLowerCase() + " " + (sceneForTake?.action ?? spec?.exactAction ?? "").toLowerCase();
       const looksLikeGroup = /\b(grupo|várias pessoas|varias pessoas|muita gente|multidão|multidao|coro|crowd|group|together|juntas|juntos|todos|todas|em uníssono|em unissono)\b/.test(visualsText);
-      const effectiveMode = speakerMode !== "solo" ? speakerMode : (looksLikeGroup ? "group_unison" : "solo");
+      const effectiveMode = speakerMode !== "solo" && speakerMode !== "none" ? speakerMode : (looksLikeGroup ? "group_unison" : "solo");
       const wordCount = takeScript.split(/\s+/).filter(Boolean).length;
+      const peopleCount = spec?.peopleCount ?? sceneForTake?.peopleCount ?? 1;
 
-      // Speech block FIRST — Veo 3 prioriza o começo do prompt.
+      // Speech block FIRST — Veo 3 prioriza o começo. Linguagem EXATA, sem parafraseio.
       let speechBlock: string;
       if (effectiveMode === "group_unison") {
-        const pc = sceneForTake?.peopleCount && sceneForTake.peopleCount > 1 ? sceneForTake.peopleCount : 0;
-        speechBlock = `Vertical 9:16 UGC smartphone selfie video. ${pc > 0 ? `${pc} people` : "Multiple people"} visible in the input image speak IN UNISON (all together, synchronized) directly to camera with natural lip-sync in BRAZILIAN PORTUGUESE (pt-BR). They say EXACTLY these ${wordCount} words — every single word, nothing added, nothing removed, no English, no mumbling: "${takeScript}". After the last word they close their mouths and stop. AUDIO TRACK: ONLY the group's voices speaking in Portuguese — ZERO background music, ZERO sound effects, ZERO other languages, ZERO singing.`;
+        const pc = peopleCount > 1 ? peopleCount : 0;
+        speechBlock = `${reenactmentHeader} Vertical 9:16 UGC video. ${pc > 0 ? `EXACTLY ${pc} people` : "Multiple people"} visible in the input image speak IN UNISON (all together, synchronized) directly to camera with natural lip-sync in BRAZILIAN PORTUGUESE (pt-BR). They say LITERALLY these ${wordCount} words, word-for-word, no paraphrasing, no additions, no removals, no translations, no substitutions, no English, no mumbling: "${takeScript}". Pronounce every word exactly as written. After the last word they close their mouths and stop — do NOT add any extra speech. AUDIO TRACK: ONLY the group's voices speaking this exact Portuguese text — ZERO background music, ZERO sound effects, ZERO other languages, ZERO singing.`;
       } else if (effectiveMode === "multiple_alternating") {
-        speechBlock = `Vertical 9:16 UGC smartphone selfie video. Multiple people visible in the input image take turns speaking directly to camera with natural lip-sync in BRAZILIAN PORTUGUESE (pt-BR). Together across all speakers they say EXACTLY these ${wordCount} words — every single word, nothing added, nothing removed, no English, no mumbling: "${takeScript}". After the last word they close their mouths and stop. AUDIO TRACK: ONLY the speakers' voices in Portuguese — ZERO background music, ZERO sound effects, ZERO other languages.`;
+        speechBlock = `${reenactmentHeader} Vertical 9:16 UGC video. Multiple people visible in the input image take turns speaking directly to camera with natural lip-sync in BRAZILIAN PORTUGUESE (pt-BR), preserving the reference video's alternation and timing. Across all speakers they say LITERALLY these ${wordCount} words, word-for-word, no paraphrasing, no additions, no removals, no translations: "${takeScript}". Pronounce every word exactly as written. After the last word they close their mouths and stop. AUDIO TRACK: ONLY the speakers' voices speaking this exact Portuguese text — ZERO music, ZERO sound effects, ZERO other languages.`;
       } else {
-        speechBlock = `Vertical 9:16 UGC smartphone selfie video. The person in the input image speaks DIRECTLY TO CAMERA with natural lip-sync in BRAZILIAN PORTUGUESE (pt-BR). They say EXACTLY these ${wordCount} words — every single word, nothing added, nothing removed, no English, no mumbling: "${takeScript}". Start speaking within the first 0.3 seconds. Finish the last word before the take ends. After the last word close the mouth and stop. AUDIO TRACK: ONLY the person's voice in Portuguese — ZERO background music, ZERO sound effects, ZERO other voices, ZERO other languages, ZERO singing.`;
+        speechBlock = `${reenactmentHeader} Vertical 9:16 UGC video. The person in the input image speaks DIRECTLY TO CAMERA with natural lip-sync in BRAZILIAN PORTUGUESE (pt-BR). They say LITERALLY these ${wordCount} words, word-for-word, no paraphrasing, no additions, no removals, no translations, no English, no mumbling: "${takeScript}". Pronounce every word exactly as written. Start speaking within the first 0.3 seconds. Finish the last word before the take ends. After the last word close the mouth and stop — do NOT add any extra speech. AUDIO TRACK: ONLY the person's voice speaking this exact Portuguese text — ZERO background music, ZERO sound effects, ZERO other voices, ZERO other languages, ZERO singing.`;
       }
 
-      prompt = `${speechBlock} ${imageFidelity} ${identityLock} ${noTextShort} ${anatomyShort}`;
+      prompt = `${speechBlock} ${referenceBlock} ${sceneLock} ${identityLock} ${forbidList} ${anatomyShort}`;
 
-      // Pronunciation (opcional, curto)
+      // Pronunciation (opcional)
       if (/\bcarrinho\b/i.test(takeScript)) {
         prompt += ` Pronounce "carrinho" with strong aspirated RR (kah-HEE-nyoo), NOT soft R (kah-REE-nyoo = different word).`;
       }
 
-      // Voice style (curto)
+      // Voice style: espelha EXATAMENTE a voz do original (não adapte, não generalize).
       if (voiceStyle) {
-        prompt += ` Voice: ${voiceStyle.gender}, ${voiceStyle.ageRange}, ${voiceStyle.pitch} pitch, ${voiceStyle.pace} pace, ${voiceStyle.energy} energy, ${voiceStyle.emotion} emotion, ${voiceStyle.accentRegion} accent. Keep the SAME voice in every take.`;
+        prompt += ` Voice must match the reference voice EXACTLY: ${voiceStyle.gender}, ${voiceStyle.ageRange}, ${voiceStyle.pitch} pitch, ${voiceStyle.pace} pace, ${voiceStyle.energy} energy, ${voiceStyle.emotion} emotion, ${voiceStyle.accentRegion} accent. Preserve the same intonation, rhythm, pauses, and emphasis heard in the reference video. Do NOT add new vocal patterns. Keep the SAME voice in every take.`;
       }
 
-      // Continuity (curto)
-      if (takeCount > 1) {
-        if (i === 0) {
-          prompt += ` End still mid-conversation — don't pause or conclude.`;
+      // Emoção da TAKE_SPEC (se derivada do Gemini voiceStyle)
+      if (spec?.exactEmotion) {
+        prompt += ` Emotional intent for this take: ${spec.exactEmotion}. Preserve it exactly — do not escalate or soften.`;
+      }
+
+      // Continuidade: respeita transição real do vídeo original.
+      if (takeCount > 1 && spec) {
+        if (spec.transitionIn === "continuous") {
+          prompt += ` Start in the same pose/position as the previous take's last frame — continuous flow from the prior take.`;
+        } else if (spec.transitionIn === "hard_cut" && i > 0) {
+          prompt += ` This take follows a HARD CUT from the previous take — begin in the pose/framing of this take's input image, NOT from the previous take's end frame.`;
+        }
+        if (spec.transitionOut === "continuous" && i < takeCount - 1) {
+          prompt += ` End still mid-conversation — do not pause or conclude; the next take continues the flow.`;
         } else if (i === takeCount - 1) {
-          prompt += ` Start in the same pose as the previous take's last frame. This is the final take.`;
-        } else {
-          prompt += ` Start in the same pose as the previous take's last frame, end still mid-conversation.`;
+          prompt += ` This is the final take — end cleanly.`;
         }
       }
     } else {
-      // ── MODO SILENCIOSO / VOICEOVER: usa raw GPT-4o + clauses ──
-      // CRÍTICO: silentClause vem PRIMEIRO — Veo 3 prioriza o começo do prompt.
-      // Se jogar silentClause no fim, o Veo ignora e gera lip-sync inventado.
-      const rawPrompt = raw[key] ?? raw[`take${i + 1}`];
-      const defaultAction = i === 0 ? "intro shot" : i === takeCount - 1 ? `closing beat with ${productName} visible` : "demonstration";
-      const fallback = `${baseScene} Take ${i + 1} — ${referenceScene?.action ?? defaultAction}, person interacts with the product naturally.`;
-      const body = stripSpeech(rawPrompt ?? fallback).trim();
+      // ── FASHION_SILENT_EXACT_MATCH_MODE / VOICEOVER ────────────────────
+      // Vídeo silencioso: boca fechada, cenário fixo, só a pessoa é trocada.
+      // Aqui a fidelidade ao original é a coisa mais importante — não há
+      // fala pra distrair o Veo, então ele tende a "inventar" cenário
+      // quando deixado sem instrução rígida. Header silent PRIMEIRO.
       const silentHeader = isSilent
-        ? `Vertical 9:16 UGC smartphone selfie video — ABSOLUTELY SILENT. The person's MOUTH MUST STAY CLOSED throughout the entire take — NO lip-sync, NO dialogue, NO speech, NO voiceover in any language, NO singing, NO whispering, NO mouthing of words. The person NEVER speaks. AUDIO TRACK: ambient room tone or soft background music only — ZERO voices.`
-        : `Vertical 9:16 UGC smartphone selfie video. No on-camera speech — narration will be added as voice-over in post.`;
-      prompt = `${silentHeader} ${body}${silentClause} ${imageFidelity} ${identityLock} ${noTextShort} ${anatomyShort}`;
+        ? `${reenactmentHeader} Vertical 9:16 UGC video — ABSOLUTELY SILENT reenactment. The person's MOUTH MUST STAY CLOSED throughout the entire take — NO lip-sync, NO dialogue, NO speech, NO voiceover in any language, NO singing, NO whispering, NO mouthing of words. The person NEVER speaks and NEVER moves their lips in a way that implies speech. AUDIO TRACK: only the ambient/music feel of the reference — ZERO voices.`
+        : `${reenactmentHeader} Vertical 9:16 UGC video. No on-camera speech in this take — the narration will be added as voice-over in post. Keep the mouth relaxed and closed unless the reference specifically shows it moving.`;
 
-      if (sceneForTake) {
-        prompt += ` Scene action: ${sceneForTake.action}.`;
-      }
+      prompt = `${silentHeader} ${referenceBlock} ${sceneLock} ${identityLock} ${forbidList} ${anatomyShort}`;
+
+      // Para takes silent, o raw do GPT-4o é descartado — só rebaixa a
+      // densidade do prompt e pode introduzir linguagem generativa.
     }
 
     result[key] = prompt;

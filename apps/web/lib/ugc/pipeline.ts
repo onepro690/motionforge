@@ -12,6 +12,7 @@ import { getAntiRepeatContext, recordUsedElements, getNegativePatterns } from ".
 import { DEFAULT_PROMPT_TEMPLATES } from "./defaults";
 import { ensureReferenceTranscript, fetchTikwmDetail, extractKeyFrames, analyzeReferenceVideoWithGemini, TranscriptSegment, VoiceStyle, SceneBreakdown } from "./reference-video";
 import { swapPersonWithAvatar, swapAllPhenotypes, imageUrlToBase64 } from "./nano-banana";
+import { buildTakeSpecs, isFashionSilentMode, validateTakeFidelity, FIDELITY_THRESHOLDS, type TakeSpec } from "./fidelity";
 
 import ffmpegInstaller from "@ffmpeg-installer/ffmpeg";
 import ffmpeg from "fluent-ffmpeg";
@@ -559,6 +560,7 @@ export async function runVideoPipeline(
     let geminiSceneCount = 3; // fallback se Gemini não funcionar
     let referenceVoiceStyle: VoiceStyle | null = null;
     let referenceScenes: SceneBreakdown[] = [];
+    let referenceHasMultipleVariants = false;
     if (refPlayUrl_narration) {
       await log(videoId, "narration_detection", "started", "Gemini analyzing video for speech vs music + scene count");
 
@@ -586,6 +588,7 @@ export async function runVideoPipeline(
         if (geminiAnalysis.scenes && geminiAnalysis.scenes.length > 0) {
           referenceScenes = geminiAnalysis.scenes;
         }
+        referenceHasMultipleVariants = geminiAnalysis.hasMultipleVariants === true;
         await log(videoId, "narration_detection", "completed",
           `Gemini says: narrationStyle=${geminiAnalysis.narrationStyle}, sceneCount=${geminiAnalysis.sceneCount}, hasNarration=${geminiAnalysis.hasNarration} → speech: ${hasNarration ? "SPEAKING" : "SILENT"}, takes: ${geminiSceneCount}${referenceVoiceStyle ? `, voice: ${referenceVoiceStyle.description.slice(0, 80)}` : ""}`, {
           narrationStyle: geminiAnalysis.narrationStyle,
@@ -1060,6 +1063,40 @@ export async function runVideoPipeline(
 
     const veoTemplate = await getTemplate(userId, "veo_prompt");
     const characterName = video.character?.name ?? "the person";
+
+    // ── STRICT_REFERENCE_FIDELITY ─────────────────────────────────────────
+    // Detecta fashion/outfit-change silent mode e força hard_cuts. Nesse modo
+    // cada take é uma fatia literal de uma cena do original; continuous flow
+    // não faz sentido porque não há fala pra emendar.
+    const fashionSilentMode = isFashionSilentMode({
+      hasNarration,
+      scenes: referenceScenes.length > 0 ? referenceScenes : null,
+      hasMultipleVariants: referenceHasMultipleVariants,
+    });
+    const effectiveTransitionMode: "continuous" | "hard_cuts" = fashionSilentMode
+      ? "hard_cuts"
+      : (transitionMode === "hard_cuts" ? "hard_cuts" : "continuous");
+    if (fashionSilentMode) {
+      await log(videoId, "fashion_silent_mode", "completed",
+        `Fashion/outfit silent mode detected — forcing hard_cuts, ${takeCount} takes, each tied to a reference scene.`);
+    }
+
+    // Constrói as TAKE_SPECs (partitura rígida por take: tempo, ação, visual,
+    // fala literal, falante). Fonte: Gemini scenes + Whisper script + duração real.
+    const takeSpecs: TakeSpec[] = buildTakeSpecs({
+      takeCount,
+      scenes: referenceScenes.length > 0 ? referenceScenes : null,
+      transcriptSegments: referenceTranscript?.segments ?? null,
+      takeScripts: script.takeScripts,
+      referenceDuration: refDuration_fromTikwm,
+      voiceStyle: referenceVoiceStyle,
+      hasNarration,
+      transitionMode: effectiveTransitionMode,
+    });
+    await log(videoId, "take_specs", "completed",
+      `Built ${takeSpecs.length} TAKE_SPECs (strict reference fidelity). Ranges: ${takeSpecs.map((s) => `${s.takeKey}=${s.startTime.toFixed(1)}-${s.endTime.toFixed(1)}s`).join(", ")}`,
+      takeSpecs);
+
     const veoPrompts = await generateVeoPrompts(
       product.name,
       brief,
@@ -1069,13 +1106,26 @@ export async function runVideoPipeline(
       referenceScene,
       takeCount,
       referenceVoiceStyle,
-      referenceScenes.length > 0 ? referenceScenes : null
+      referenceScenes.length > 0 ? referenceScenes : null,
+      takeSpecs
     );
     await log(videoId, "generate_veo_prompts", "completed", undefined, veoPrompts, Date.now() - t5);
 
+    // Stash TAKE_SPECs + reference play URL no veoPrompts JSON sob chave __meta
+    // para o polling loop poder validar fidelidade depois do Veo gerar cada take.
+    const veoPromptsWithMeta: Record<string, unknown> = {
+      ...veoPrompts,
+      __meta: {
+        takeSpecs,
+        referencePlayUrl: refPlayUrl_narration ?? null,
+        fashionSilentMode,
+        effectiveTransitionMode,
+      },
+    };
+
     await prisma.ugcGeneratedVideo.update({
       where: { id: videoId },
-      data: { veoPrompts: veoPrompts as object },
+      data: { veoPrompts: veoPromptsWithMeta as object },
     });
 
     // ── Step 6: Generate audio narration ──────────────────────────────────
@@ -1112,25 +1162,34 @@ export async function runVideoPipeline(
     const productImageUrl = product.thumbnailUrl ?? product.detectedVideos[0]?.thumbnailUrl ?? "";
 
     await log(videoId, "submit_takes", "started",
-      `Mode: transitionMode=${transitionMode}, hasNarration=${hasNarration}, will ${hasNarration && transitionMode === "continuous" ? "CHAIN sequentially" : "submit in PARALLEL (hard cuts)"}`);
+      `Mode: transitionMode=${effectiveTransitionMode}${fashionSilentMode ? " (fashion_silent forced)" : ""}, hasNarration=${hasNarration}, will ${hasNarration && effectiveTransitionMode === "continuous" ? "CHAIN sequentially" : "submit in PARALLEL (hard cuts)"}`);
 
     const accessToken = await getAccessToken();
 
     // Per-take duration: Veo image-to-video only supports [4, 6, 8] seconds.
-    // Quando tem fala, SEMPRE usa 8s — encurtar corta palavras do script.
-    // Quando é silencioso, pega o mais próximo de (refDuration / takeCount)
-    // pra imitar o pacing dos cortes do vídeo de referência.
+    // Quando tem fala, SEMPRE usa 8s (default) — encurtar corta palavras.
+    // Em FASHION_SILENT_EXACT mode, cada take herda a duração da cena
+    // correspondente no original (via TAKE_SPEC) — snap pro valor Veo mais
+    // próximo. Silent não-fashion também usa per-take quando possível.
     const validDurations = [4, 6, 8] as const;
-    let takeDuration: number;
-    if (hasNarration) {
-      takeDuration = 8;
-    } else {
-      const idealDuration = refDuration && refDuration > 0 && takeCount > 0
-        ? refDuration / takeCount
-        : 8;
-      takeDuration = validDurations.reduce((best, d) =>
-        Math.abs(d - idealDuration) < Math.abs(best - idealDuration) ? d : best
+    const snapToVeoDuration = (ideal: number): number =>
+      validDurations.reduce((best, d) =>
+        Math.abs(d - ideal) < Math.abs(best - ideal) ? d : best
       , 8 as number);
+    const takeDurations: number[] = [];
+    for (let i = 0; i < takeCount; i++) {
+      if (hasNarration) {
+        takeDurations.push(8);
+        continue;
+      }
+      const spec = takeSpecs[i];
+      if (spec && spec.duration > 0) {
+        takeDurations.push(snapToVeoDuration(spec.duration));
+      } else if (refDuration && refDuration > 0 && takeCount > 0) {
+        takeDurations.push(snapToVeoDuration(refDuration / takeCount));
+      } else {
+        takeDurations.push(8);
+      }
     }
 
     const takePromptList: string[] = [];
@@ -1179,7 +1238,8 @@ export async function runVideoPipeline(
       //   anterior completar (usando o último frame como input image).
       // HARD_CUTS ou SILENT: todos os takes submetidos em paralelo, cada um
       //   com seu próprio frame de referência (imita cortes secos).
-      const useContinuousChain = hasNarration && transitionMode === "continuous";
+      const useContinuousChain = hasNarration && effectiveTransitionMode === "continuous";
+      const takeDuration = takeDurations[i] ?? 8;
 
       if (useContinuousChain && i > 0) {
         // Take de fala 2+: fica esperando — será submetido pelo polling
@@ -1510,6 +1570,51 @@ export async function pollAndAssembleTakes(videoId: string): Promise<{
 
       await prisma.generationJob.update({ where: { id: genJob.id }, data: { status: "COMPLETED", outputVideoUrl: videoUrl, completedAt: new Date() } });
       await prisma.ugcGeneratedTake.update({ where: { id: take.id }, data: { status: "COMPLETED", videoUrl } });
+
+      // ── STRICT_REFERENCE_FIDELITY validation ────────────────────────────
+      // Valida o take gerado contra sua TAKE_SPEC. Se scores críticos caírem
+      // abaixo do threshold (avatarConsistency, backgroundMatch, speechExact,
+      // overall), marca o take como FAILED — o auto-retry do próximo ciclo
+      // vai regenerar com mesmo prompt/seed diferente. Cap: MAX_RETRIES.
+      try {
+        const veoPromptsJson = video.veoPrompts as Record<string, unknown> | null;
+        const meta = veoPromptsJson?.__meta as {
+          takeSpecs?: TakeSpec[];
+          referencePlayUrl?: string | null;
+        } | undefined;
+        const spec = meta?.takeSpecs?.[take.takeIndex];
+        const referencePlayUrl = meta?.referencePlayUrl ?? null;
+
+        if (spec && referencePlayUrl && take.retryCount < MAX_RETRIES) {
+          const scores = await validateTakeFidelity({
+            generatedVideoUrl: videoUrl,
+            referencePlayUrl,
+            takeSpec: spec,
+          }).catch((e) => {
+            console.error(`[pollAndAssemble] fidelity validation threw for take ${take.takeIndex}:`, e);
+            return null;
+          });
+
+          if (scores) {
+            await log(videoId, `fidelity_take_${take.takeIndex + 1}`, scores.verdict === "approved" ? "completed" : "failed",
+              `verdict=${scores.verdict} avatar=${scores.avatarConsistency.toFixed(2)} bg=${scores.backgroundMatch.toFixed(2)} cam=${scores.cameraMatch.toFixed(2)} action=${scores.actionMatch.toFixed(2)} wardrobe=${scores.wardrobeTimingMatch.toFixed(2)} speech=${scores.speechExactness.toFixed(2)} speaker=${scores.speakerStructureMatch.toFixed(2)} overall=${scores.overallFidelity.toFixed(2)}${scores.issues.length ? ` | issues: ${scores.issues.slice(0, 3).join("; ")}` : ""}`,
+              scores as unknown as object);
+
+            if (scores.verdict === "rejected") {
+              const reason = `fidelity rejected (overall=${scores.overallFidelity.toFixed(2)}, min=${FIDELITY_THRESHOLDS.overallFidelity}): ${scores.issues.slice(0, 3).join("; ") || "below threshold"}`;
+              await prisma.ugcGeneratedTake.update({
+                where: { id: take.id },
+                data: { status: "FAILED", errorMessage: reason },
+              });
+              failedCount++;
+              allCompleted = false;
+              continue;
+            }
+          }
+        }
+      } catch (e) {
+        console.error(`[pollAndAssemble] fidelity check failed for take ${take.takeIndex}:`, e);
+      }
 
       // Extrai último frame para encadear o próximo take
       // (o trim de silêncio acontece no assembler, não aqui — evita OOM no polling)
