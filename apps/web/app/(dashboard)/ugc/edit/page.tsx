@@ -1,5 +1,5 @@
 "use client";
-import { useEffect, useState, useCallback, useRef, Suspense } from "react";
+import { useEffect, useState, useCallback, useRef, Suspense, Component, type ReactNode } from "react";
 import { useSearchParams, useRouter } from "next/navigation";
 import {
   Scissors, Loader2, Play, Pause, SkipBack, SkipForward,
@@ -8,6 +8,30 @@ import {
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { toast } from "sonner";
+
+class EditErrorBoundary extends Component<{ children: ReactNode }, { err: Error | null }> {
+  state = { err: null as Error | null };
+  static getDerivedStateFromError(err: Error) { return { err }; }
+  componentDidCatch(err: Error, info: { componentStack?: string | null }) {
+    console.error("[ugc/edit] render error:", err, info);
+  }
+  render() {
+    if (this.state.err) {
+      return (
+        <div className="p-6 max-w-2xl mx-auto space-y-3">
+          <h2 className="text-lg font-bold text-red-400">Erro no editor</h2>
+          <pre className="text-xs text-white/70 bg-black/40 p-3 rounded border border-red-500/20 whitespace-pre-wrap overflow-auto max-h-[60vh]">
+            {this.state.err.message}
+            {"\n\n"}
+            {this.state.err.stack}
+          </pre>
+          <button className="text-xs text-violet-400 underline" onClick={() => this.setState({ err: null })}>Tentar novamente</button>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
 
 interface Take {
   id: string;
@@ -420,8 +444,10 @@ function EditPageContent() {
 
 export default function EditPage() {
   return (
-    <Suspense fallback={<div className="flex justify-center py-16"><Loader2 className="w-6 h-6 text-violet-400 animate-spin" /></div>}>
-      <EditPageContent />
-    </Suspense>
+    <EditErrorBoundary>
+      <Suspense fallback={<div className="flex justify-center py-16"><Loader2 className="w-6 h-6 text-violet-400 animate-spin" /></div>}>
+        <EditPageContent />
+      </Suspense>
+    </EditErrorBoundary>
   );
 }
