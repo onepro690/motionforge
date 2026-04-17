@@ -56,11 +56,11 @@ async function trimTrailingSilenceFromBuffer(videoBuffer: Buffer): Promise<Buffe
   try {
     await writeFile(inputPath, videoBuffer);
 
-    // Detect silence periods using ffmpeg silencedetect
+    // Detect silence periods using ffmpeg silencedetect — mais sensível (-35dB, 0.3s)
     const silenceInfo = await new Promise<string>((resolve) => {
       let stderr = "";
       ffmpeg(inputPath)
-        .audioFilters("silencedetect=noise=-30dB:d=0.5")
+        .audioFilters("silencedetect=noise=-35dB:d=0.3")
         .format("null")
         .output(process.platform === "win32" ? "NUL" : "/dev/null")
         .on("stderr", (line: string) => { stderr += line + "\n"; })
@@ -80,15 +80,15 @@ async function trimTrailingSilenceFromBuffer(videoBuffer: Buffer): Promise<Buffe
 
     const lastSilenceStart = parseFloat(silenceStartMatches[silenceStartMatches.length - 1][1]);
     // Only trim if the silence is at the END of the video (last 30% of duration)
-    // and is significant (> 0.8s)
+    // and is significant (> 0.4s)
     const trailingSilenceDuration = duration - lastSilenceStart;
-    if (trailingSilenceDuration < 0.8 || lastSilenceStart < duration * 0.5) {
+    if (trailingSilenceDuration < 0.4 || lastSilenceStart < duration * 0.5) {
       console.log(`[trimSilence] Silence not significant enough to trim (starts at ${lastSilenceStart}s, duration=${duration}s, trailing=${trailingSilenceDuration}s)`);
       return videoBuffer;
     }
 
-    // Keep a small buffer (0.3s) after last speech
-    const trimPoint = Math.min(lastSilenceStart + 0.3, duration);
+    // Keep a small buffer (0.15s) after last speech
+    const trimPoint = Math.min(lastSilenceStart + 0.15, duration);
     console.log(`[trimSilence] Trimming at ${trimPoint}s (was ${duration}s, cutting ${(duration - trimPoint).toFixed(1)}s of silence)`);
 
     await new Promise<void>((resolve, reject) => {
@@ -717,11 +717,17 @@ export async function runVideoPipeline(
             : null;
           await log(videoId, `nano_banana_frame${fi + 1}`, "started",
             `[${mode}] frame ${fi + 1}${prevRefUrl ? " + prev take result" : ""}${sceneGroupInfo ? ` (GROUP: ${sceneGroupInfo.peopleCount} people)` : ""}`);
-          const edited: { url: string; mimeType: string } | null = phenotypeOnlyMode
-            ? await swapAllPhenotypes(keyframes.frames[fi].url, prevRefUrl)
+          // Tentativa 1 + 1 retry (Gemini imagens é estocástico — retry costuma funcionar)
+          const doSwap = () => phenotypeOnlyMode
+            ? swapAllPhenotypes(keyframes.frames[fi].url, prevRefUrl)
                 .catch((e) => { console.error(`[pipeline] phenotype swap frame${fi + 1} error:`, e); return null; })
-            : await swapPersonWithAvatar(keyframes.frames[fi].url, characterImageUrl!, prevRefUrl, sceneGroupInfo)
+            : swapPersonWithAvatar(keyframes.frames[fi].url, characterImageUrl!, prevRefUrl, sceneGroupInfo)
                 .catch((e) => { console.error(`[pipeline] nano_banana frame${fi + 1} error:`, e); return null; });
+          let edited: { url: string; mimeType: string } | null = await doSwap();
+          if (!edited) {
+            await log(videoId, `nano_banana_frame${fi + 1}`, "started", `retry after first failure`);
+            edited = await doSwap();
+          }
           if (edited) {
             editedByFrame[fi] = await imageUrlToBase64(edited.url);
             editedUrlByFrame[fi] = edited.url;
@@ -812,11 +818,42 @@ export async function runVideoPipeline(
         // ── MODO SEGMENTOS: usa timestamps reais do Whisper ──
         // Agrupa segmentos consecutivos em takes de até 8s.
         // Cada take contém orações completas — nunca corta no meio.
+        // Se um segmento único passar de 8s, divide por palavras (tempo:texto
+        // proporcional) pra garantir que TODAS as palavras passam pro Veo sem
+        // serem truncadas no hard cap de 8s.
+        const splitLongSegment = (seg: TranscriptSegment, maxDur: number): TranscriptSegment[] => {
+          const segDur = seg.end - seg.start;
+          if (segDur <= maxDur) return [seg];
+          const words = seg.text.split(/\s+/).filter(Boolean);
+          if (words.length === 0) return [seg];
+          const parts = Math.ceil(segDur / maxDur);
+          const wordsPerPart = Math.ceil(words.length / parts);
+          const out: TranscriptSegment[] = [];
+          for (let p = 0; p < parts; p++) {
+            const wordStart = p * wordsPerPart;
+            const wordEnd = Math.min((p + 1) * wordsPerPart, words.length);
+            if (wordStart >= wordEnd) break;
+            const tStart = seg.start + (wordStart / words.length) * segDur;
+            const tEnd = seg.start + (wordEnd / words.length) * segDur;
+            out.push({
+              start: tStart,
+              end: tEnd,
+              text: words.slice(wordStart, wordEnd).join(" "),
+            });
+          }
+          return out;
+        };
+
+        const expandedSegments: TranscriptSegment[] = [];
+        for (const s of segments) {
+          expandedSegments.push(...splitLongSegment(s, MAX_TAKE_DURATION));
+        }
+
         const takeSegmentGroups: TranscriptSegment[][] = [];
         let currentGroup: TranscriptSegment[] = [];
-        let groupStartTime = segments[0].start;
+        let groupStartTime = expandedSegments[0].start;
 
-        for (const seg of segments) {
+        for (const seg of expandedSegments) {
           const groupDuration = seg.end - groupStartTime;
           // Se adicionar este segmento excede 8s E já temos algo → novo take
           if (groupDuration > MAX_TAKE_DURATION && currentGroup.length > 0) {
@@ -919,13 +956,28 @@ export async function runVideoPipeline(
         }
       }
 
-      // Remove takes vazios do final
-      const nonEmptyKeys = Object.keys(takeScripts).filter(k => takeScripts[k].length > 0);
-      if (nonEmptyKeys.length < takeCount) {
-        takeCount = nonEmptyKeys.length;
+      // Consolida: renumera take1..takeN para que TODOS sejam não-vazios e
+      // fiquem contíguos. Antes a gente só shrinkava takeCount mas mantinha as
+      // chaves originais — se take2 era vazio, o mapeamento ficava bugado e
+      // "sumia" o texto de take3. Agora reordena e reatribui as chaves.
+      const consolidated: Record<string, string> = {};
+      let newIdx = 1;
+      for (const key of Object.keys(takeScripts).sort((a, b) => {
+        const na = parseInt(a.replace("take", ""), 10);
+        const nb = parseInt(b.replace("take", ""), 10);
+        return na - nb;
+      })) {
+        if (takeScripts[key] && takeScripts[key].length > 0) {
+          consolidated[`take${newIdx}`] = takeScripts[key];
+          newIdx++;
+        }
+      }
+      const nonEmptyCount = newIdx - 1;
+      if (nonEmptyCount < takeCount) {
+        takeCount = nonEmptyCount;
       }
 
-      script.takeScripts = takeScripts;
+      script.takeScripts = consolidated;
       brief.narrationMode = "creator_speaking";
     } else {
       script.fullScript = "";
@@ -1004,14 +1056,21 @@ export async function runVideoPipeline(
     const accessToken = await getAccessToken();
 
     // Per-take duration: Veo image-to-video only supports [4, 6, 8] seconds.
-    // Pick the closest valid duration to (refDuration / takeCount).
+    // Quando tem fala, SEMPRE usa 8s — encurtar corta palavras do script.
+    // Quando é silencioso, pega o mais próximo de (refDuration / takeCount)
+    // pra imitar o pacing dos cortes do vídeo de referência.
     const validDurations = [4, 6, 8] as const;
-    const idealDuration = refDuration && refDuration > 0 && takeCount > 0
-      ? refDuration / takeCount
-      : 8;
-    const takeDuration = validDurations.reduce((best, d) =>
-      Math.abs(d - idealDuration) < Math.abs(best - idealDuration) ? d : best
-    , 8 as number);
+    let takeDuration: number;
+    if (hasNarration) {
+      takeDuration = 8;
+    } else {
+      const idealDuration = refDuration && refDuration > 0 && takeCount > 0
+        ? refDuration / takeCount
+        : 8;
+      takeDuration = validDurations.reduce((best, d) =>
+        Math.abs(d - idealDuration) < Math.abs(best - idealDuration) ? d : best
+      , 8 as number);
+    }
 
     const takePromptList: string[] = [];
     for (let i = 0; i < takeCount; i++) {
@@ -1046,7 +1105,7 @@ export async function runVideoPipeline(
           takeIndex: i,
           veoJobId: genJob.id,
           veoPrompt: prompt,
-          script: Object.values(script.takeScripts)[i] ?? "",
+          script: script.takeScripts[takeKey] ?? "",
           referenceFrameUrl: referenceFrameUrls[takeKey] ?? null,
           editedImageUrl: perTakeEditedUrls[takeKey] || editedImageUrl || null,
           status: "QUEUED",
@@ -1079,15 +1138,15 @@ export async function runVideoPipeline(
       }
 
       if (!takeImage) {
-        await log(videoId, `submit_take_${takeKey}`, "failed",
-          `No reference image available.`);
-        await prisma.generationJob.update({ where: { id: genJob.id }, data: { status: "FAILED", errorMessage: "No reference image" } });
-        await prisma.ugcGeneratedTake.update({ where: { id: take.id }, data: { status: "FAILED", errorMessage: "No reference image available" } });
-        continue;
+        // Sem imagem — cai pro modo text-to-video do Veo em vez de falhar o take.
+        // O Veo gera uma pessoa nova baseada só no prompt. Identidade NÃO fica
+        // consistente entre takes, mas é melhor que take vazio.
+        await log(videoId, `submit_take_${takeKey}`, "started",
+          `No reference image — falling back to text-to-video`);
+      } else {
+        await log(videoId, `submit_take_${takeKey}`, "started",
+          `image-to-video mode (hasNarration=${hasNarration}, imageSize=${takeImage.data.length} bytes)`);
       }
-
-      await log(videoId, `submit_take_${takeKey}`, "started",
-        `image-to-video mode (hasNarration=${hasNarration}, imageSize=${takeImage.data.length} bytes)`);
 
       // Submit to Vertex AI
       try {
@@ -1591,7 +1650,7 @@ export async function pollAndAssembleTakes(videoId: string): Promise<{
   try {
     const takeInfos = freshTakes
       .filter((t) => t.videoUrl)
-      .map((t) => ({ url: t.videoUrl! }));
+      .map((t) => ({ url: t.videoUrl!, intendedScript: t.script ?? null }));
 
     const freshVideo = await prisma.ugcGeneratedVideo.findUnique({ where: { id: videoId } });
     const result = await assembleTakes(takeInfos, freshVideo?.audioUrl ?? null, videoId);

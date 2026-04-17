@@ -376,11 +376,15 @@ export async function extractKeyFrames(
     //    → intervalos iguais
     let timestamps: number[];
     if (sceneChanges.length > 0 && detectedSceneCount >= actualCount) {
-      // Pontos de corte reais → frame no meio de cada segmento
+      // Pontos de corte reais → frame a 40% do segmento (evita motion blur
+      // dos dois lados — imediatamente após corte e antes do próximo corte
+      // costumam ter zoom/motion que cortam a pessoa no frame).
       const boundaries = [0, ...sceneChanges, duration];
       timestamps = [];
       for (let i = 0; i < boundaries.length - 1; i++) {
-        timestamps.push((boundaries[i] + boundaries[i + 1]) / 2);
+        const start = boundaries[i];
+        const end = boundaries[i + 1];
+        timestamps.push(start + (end - start) * 0.4);
       }
     } else if (sceneChanges.length > 0 && actualCount > detectedSceneCount) {
       // Mais takes necessários que cenas detectadas (ex: speech video).

@@ -37,6 +37,7 @@ function getVideoDurationFfmpeg(videoPath: string): Promise<number> {
 interface TakeInfo {
   url: string;
   durationSeconds?: number;
+  intendedScript?: string | null;
 }
 
 export interface AssemblyResult {
@@ -106,16 +107,17 @@ async function getVideoDuration(videoPath: string): Promise<number> {
 
 // Trim trailing silence from a video.
 // Uses ffmpeg silencedetect to find where speech ends, then trims.
-// Keeps a small buffer (0.3s) after last speech for natural ending.
+// Keeps a small buffer (0.15s) after last speech for natural ending.
 async function trimTrailingSilence(inputPath: string, outputPath: string): Promise<boolean> {
   try {
-    // Detect silence periods using ffmpeg
+    // Detect silence periods using ffmpeg — mais sensível (-35dB, 0.3s) pra
+    // pegar pausas mais curtas no final do take
     const silenceInfo = await new Promise<string>((resolve) => {
       let stderr = "";
       ffmpeg(inputPath)
-        .audioFilters("silencedetect=noise=-30dB:d=0.5")
+        .audioFilters("silencedetect=noise=-35dB:d=0.3")
         .format("null")
-        .output("/dev/null")
+        .output(process.platform === "win32" ? "NUL" : "/dev/null")
         .on("stderr", (line: string) => { stderr += line + "\n"; })
         .on("end", () => resolve(stderr))
         .on("error", () => resolve(stderr))
@@ -132,10 +134,10 @@ async function trimTrailingSilence(inputPath: string, outputPath: string): Promi
     }
 
     const lastSpeechEnd = parseFloat(silenceEndMatches[silenceEndMatches.length - 1][1]);
-    const trimPoint = Math.min(lastSpeechEnd + 0.3, duration); // 0.3s buffer
+    const trimPoint = Math.min(lastSpeechEnd + 0.15, duration); // 0.15s buffer (antes 0.3s)
 
-    // Only trim if there's significant trailing silence (>0.8s)
-    if (duration - trimPoint < 0.8) return false;
+    // Only trim if there's significant trailing silence (>0.4s) — antes 0.8s
+    if (duration - trimPoint < 0.4) return false;
 
     await new Promise<void>((resolve, reject) => {
       ffmpeg(inputPath)
@@ -149,6 +151,155 @@ async function trimTrailingSilence(inputPath: string, outputPath: string): Promi
     return true;
   } catch (err) {
     console.error("[assembler] trimTrailingSilence error:", err);
+    return false;
+  }
+}
+
+// ── Whisper-based extra-speech trimmer ─────────────────────────────────────
+// Veo 3 às vezes alucina palavras extras no final do take (ex: script termina
+// em "na bio" mas o Veo continua falando "...e é incrível"). Transcrevemos
+// o take com timestamps por palavra, comparamos com o script esperado, e
+// cortamos o vídeo quando o avatar passa a falar palavras que NÃO estavam
+// no script.
+
+function normalizeWord(w: string): string {
+  return w
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "") // strip accents
+    .replace(/[^\p{L}\p{N}]/gu, ""); // strip punctuation
+}
+
+interface WhisperWord { word: string; start: number; end: number }
+
+async function transcribeWordsWithWhisper(videoPath: string): Promise<WhisperWord[] | null> {
+  const apiKey = process.env.OPENAI_API_KEY;
+  if (!apiKey) return null;
+  try {
+    const bytes = await readFile(videoPath);
+    if (bytes.byteLength > 24 * 1024 * 1024) return null;
+
+    const form = new FormData();
+    form.append("file", new Blob([new Uint8Array(bytes)], { type: "video/mp4" }), "take.mp4");
+    form.append("model", "whisper-1");
+    form.append("response_format", "verbose_json");
+    form.append("timestamp_granularities[]", "word");
+
+    const res = await fetch("https://api.openai.com/v1/audio/transcriptions", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${apiKey}` },
+      body: form,
+      signal: AbortSignal.timeout(60000),
+    });
+    if (!res.ok) {
+      const err = await res.text().catch(() => "");
+      console.error("[assembler] whisper error:", res.status, err.slice(0, 200));
+      return null;
+    }
+    const data = (await res.json()) as { words?: Array<{ word: string; start: number; end: number }> };
+    return data.words?.map((w) => ({ word: w.word, start: w.start, end: w.end })) ?? null;
+  } catch (err) {
+    console.error("[assembler] transcribeWordsWithWhisper error:", err);
+    return null;
+  }
+}
+
+// Acha o índice da última palavra do script dentro da transcrição.
+// Usa janela deslizante (últimas 2-4 palavras do script) pra ser robusto a
+// palavras extras antes ou depois. Retorna o índice na transcrição onde o
+// script termina, ou -1 se não conseguir localizar.
+function findScriptEndInTranscript(scriptWords: string[], transcribedWords: string[]): number {
+  if (scriptWords.length === 0 || transcribedWords.length === 0) return -1;
+
+  const normScript = scriptWords.map(normalizeWord).filter((w) => w.length > 0);
+  const normTrans = transcribedWords.map(normalizeWord);
+  if (normScript.length === 0) return -1;
+
+  const lastWord = normScript[normScript.length - 1];
+
+  // Estratégia 1: match janela das últimas 3 palavras
+  const tail = normScript.slice(-3);
+  for (let i = normTrans.length - tail.length; i >= 0; i--) {
+    let allMatch = true;
+    for (let j = 0; j < tail.length; j++) {
+      if (normTrans[i + j] !== tail[j]) { allMatch = false; break; }
+    }
+    if (allMatch) return i + tail.length - 1;
+  }
+
+  // Estratégia 2: match só da última palavra (do final pro começo)
+  for (let i = normTrans.length - 1; i >= 0; i--) {
+    if (normTrans[i] === lastWord) return i;
+  }
+
+  return -1;
+}
+
+// Transcreve o take, compara com o script esperado, corta vídeo se houver
+// palavras extras depois do último word do script. Também corta se o take
+// começa com silêncio antes da fala (head trim). Retorna true se cortou.
+async function trimToScript(inputPath: string, outputPath: string, intendedScript: string): Promise<boolean> {
+  try {
+    const trimmed = intendedScript.trim();
+    if (trimmed.length === 0) return false;
+
+    const words = await transcribeWordsWithWhisper(inputPath);
+    if (!words || words.length === 0) {
+      console.log("[assembler.trimToScript] no whisper words, skipping");
+      return false;
+    }
+
+    const scriptWords = trimmed.split(/\s+/).filter(Boolean);
+    const transcribedTokens = words.map((w) => w.word);
+    const endIdx = findScriptEndInTranscript(scriptWords, transcribedTokens);
+
+    if (endIdx < 0) {
+      console.log(`[assembler.trimToScript] could not locate script end in transcript. Script last words: "${scriptWords.slice(-3).join(" ")}", transcribed: "${transcribedTokens.slice(-5).join(" ")}"`);
+      return false;
+    }
+
+    const duration = await getVideoDurationFfmpeg(inputPath);
+    if (duration <= 0) return false;
+
+    const endWord = words[endIdx];
+    const cutAt = Math.min(endWord.end + 0.2, duration); // 0.2s de buffer
+    const extraWordsAfter = transcribedTokens.length - 1 - endIdx;
+    const trailingCut = duration - cutAt;
+
+    // Só corta se há palavras extras OU sobra mais de 0.4s de vídeo
+    if (extraWordsAfter <= 0 && trailingCut < 0.4) {
+      console.log(`[assembler.trimToScript] no extras (${extraWordsAfter}) and little trailing (${trailingCut.toFixed(2)}s), skipping`);
+      return false;
+    }
+
+    // SAFETY: nunca corta mais que 50% do vídeo. Se cutAt < 50% da duração,
+    // o match provavelmente é falso positivo (Whisper transcreveu errado ou
+    // achou a última palavra do script cedo demais no transcript).
+    if (cutAt < duration * 0.5) {
+      console.log(`[assembler.trimToScript] SAFETY: cutAt ${cutAt.toFixed(2)}s is <50% of ${duration.toFixed(2)}s — likely false positive, skipping`);
+      return false;
+    }
+
+    // SAFETY: se o cut removeria menos de 0.1s mas há extras detectadas,
+    // ainda vale — mas se não tem extras e trailingCut é minúsculo, evita I/O.
+    if (extraWordsAfter === 0 && trailingCut < 0.2) {
+      return false;
+    }
+
+    console.log(`[assembler.trimToScript] Cutting at ${cutAt.toFixed(2)}s (was ${duration.toFixed(2)}s, removing ${trailingCut.toFixed(2)}s + ${extraWordsAfter} extra word(s))`);
+
+    await new Promise<void>((resolve, reject) => {
+      ffmpeg(inputPath)
+        .setDuration(cutAt)
+        .outputOptions(["-c:v", "libx264", "-c:a", "aac", "-movflags", "+faststart"])
+        .output(outputPath)
+        .on("end", () => resolve())
+        .on("error", (err: Error) => reject(err))
+        .run();
+    });
+    return true;
+  } catch (err) {
+    console.error("[assembler] trimToScript error:", err);
     return false;
   }
 }
@@ -174,14 +325,27 @@ export async function assembleTakes(
       const takePath = join(tmpDir, `take-${i}.mp4`);
       await downloadFile(takes[i].url, takePath);
 
-      // Trim trailing silence from each take to avoid dead air between takes
+      // Passo 1: se temos o script pretendido, corta palavras extras alucinadas
+      // pelo Veo depois do último word do script (via Whisper word timestamps)
+      let currentPath = takePath;
+      const intended = takes[i].intendedScript?.trim();
+      if (intended && intended.length > 0) {
+        const scriptCutPath = join(tmpDir, `take-${i}-scriptcut.mp4`);
+        const wasScriptCut = await trimToScript(currentPath, scriptCutPath, intended);
+        if (wasScriptCut) {
+          await unlink(currentPath).catch(() => {});
+          currentPath = scriptCutPath;
+        }
+      }
+
+      // Passo 2: trim trailing silence — remove qualquer silêncio residual
       const trimmedPath = join(tmpDir, `take-${i}-trimmed.mp4`);
-      const wasTrimmed = await trimTrailingSilence(takePath, trimmedPath);
+      const wasTrimmed = await trimTrailingSilence(currentPath, trimmedPath);
       if (wasTrimmed) {
-        await unlink(takePath).catch(() => {});
+        await unlink(currentPath).catch(() => {});
         takePaths.push(trimmedPath);
       } else {
-        takePaths.push(takePath);
+        takePaths.push(currentPath);
       }
     }
 
