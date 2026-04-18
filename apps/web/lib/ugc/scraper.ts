@@ -3,6 +3,7 @@
 
 import { generateText } from "ai";
 import { createOpenAI } from "@ai-sdk/openai";
+import { put } from "@vercel/blob";
 
 export interface ScrapedProduct {
   name: string;
@@ -115,6 +116,37 @@ function extractProductMentions(description: string): string[] {
   const shopMatches = description.match(shopPattern) ?? [];
   mentions.push(...shopMatches.map((m) => m.replace("#", "")));
   return [...new Set(mentions)];
+}
+
+// ── Thumbnail persistence ───────────────────────────────────────────────────
+// URLs de cover TikTok têm assinatura com x-expires — depois de ~24h o CDN
+// retorna 403. Baixamos no scrape e salvamos no Vercel Blob pra ter thumb
+// permanente que não expira.
+async function persistThumbnail(videoId: string, tiktokUrl: string): Promise<string | null> {
+  if (!process.env.BLOB_READ_WRITE_TOKEN) return tiktokUrl;
+  try {
+    const res = await fetch(tiktokUrl, {
+      headers: {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/122.0.0.0 Safari/537.36",
+        "Referer": "https://www.tiktok.com/",
+      },
+      signal: AbortSignal.timeout(10000),
+    });
+    if (!res.ok) return tiktokUrl;
+    const contentType = res.headers.get("content-type") ?? "image/jpeg";
+    const buffer = Buffer.from(await res.arrayBuffer());
+    const ext = contentType.includes("webp") ? "webp" : contentType.includes("png") ? "png" : "jpg";
+    const blob = await put(`ugc-thumb-${videoId}.${ext}`, buffer, {
+      access: "public",
+      contentType,
+      allowOverwrite: true,
+      token: process.env.BLOB_READ_WRITE_TOKEN,
+    });
+    return blob.url;
+  } catch (err) {
+    console.warn(`[scraper] thumb persist failed for ${videoId}:`, err);
+    return tiktokUrl;
+  }
 }
 
 // ── Group videos into products ──────────────────────────────────────────────
@@ -235,7 +267,19 @@ async function groupVideosByProduct(videos: ScrapedVideo[]): Promise<ScrapedProd
     p.videos.sort((a, b) => b.views - a.views);
   }
 
-  return Array.from(productMap.values()).filter((p) => p.videos.length >= 1);
+  const products = Array.from(productMap.values()).filter((p) => p.videos.length >= 1);
+
+  // Persiste a thumbnail do top video de cada produto no Blob (TikTok CDN expira).
+  await Promise.all(
+    products.map(async (p) => {
+      const top = p.videos[0];
+      if (!top?.thumbnailUrl) return;
+      const persisted = await persistThumbnail(top.videoId, top.thumbnailUrl);
+      if (persisted) p.thumbnailUrl = persisted;
+    })
+  );
+
+  return products;
 }
 
 // Fallback usado só quando OPENAI_API_KEY não está configurada.

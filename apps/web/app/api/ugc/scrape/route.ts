@@ -6,7 +6,7 @@ import { scrapeTrendingProducts } from "@/lib/ugc/scraper";
 import { scoreProduct } from "@/lib/ugc/scorer";
 import { DEFAULT_SCORING_WEIGHTS, TIKTOK_SEARCH_KEYWORDS } from "@/lib/ugc/defaults";
 
-export const maxDuration = 60;
+export const maxDuration = 120;
 
 export async function POST() {
   const session = await auth.api.getSession({ headers: await headers() });

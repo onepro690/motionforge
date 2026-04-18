@@ -24,19 +24,11 @@ export function proxyImage(url: string | null | undefined): string {
   }
 }
 
-// onError handler: tenta URL direta (sem proxy) se o proxy falhar; se essa
-// também falhar, esconde o <img> pra não ficar ícone quebrado aparecendo.
+// onError: se o proxy falhar (CDN expirou), tenta a URL direta como último recurso.
 export function handleImageError(originalUrl: string | null | undefined) {
   return (e: { currentTarget: HTMLImageElement }) => {
     const img = e.currentTarget;
-    if (!originalUrl) {
-      img.style.display = "none";
-      return;
-    }
-    if (img.src === originalUrl) {
-      img.style.display = "none";
-      return;
-    }
+    if (!originalUrl || img.src === originalUrl) return;
     img.src = originalUrl;
   };
 }
