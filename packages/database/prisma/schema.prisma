@@ -387,6 +387,8 @@ model UgcGeneratedTake {
   referenceFrameUrl String?
   editedImageUrl    String?
   lastFrameUrl      String?
+  excluded          Boolean   @default(false)
+  regenerationFeedback String?
   createdAt         DateTime  @default(now())
   updatedAt         DateTime  @updatedAt
 

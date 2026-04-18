@@ -3,7 +3,8 @@ import { useEffect, useState, useCallback } from "react";
 import { useSearchParams, useRouter } from "next/navigation";
 import {
   CheckCircle, XCircle, RotateCcw, Loader2, Video, Play, Pause,
-  ChevronDown, ChevronUp, Download, FileText, Code, Activity, Scissors
+  ChevronDown, ChevronUp, Download, FileText, Code, Activity, Scissors,
+  Trash2, RefreshCw, Undo2
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
@@ -17,6 +18,8 @@ interface Take {
   videoUrl: string | null;
   script: string | null;
   veoPrompt: string | null;
+  excluded?: boolean;
+  regenerationFeedback?: string | null;
 }
 
 interface Review {
@@ -175,6 +178,8 @@ export default function ReviewPage() {
   const [loading, setLoading] = useState(false);
   const [actionLoading, setActionLoading] = useState(false);
   const [showRemake, setShowRemake] = useState(false);
+  const [regenTakeId, setRegenTakeId] = useState<string | null>(null);
+  const [regenFeedback, setRegenFeedback] = useState("");
 
   const loadQueue = useCallback(async () => {
     const res = await fetch("/api/ugc/generations?status=AWAITING_REVIEW&limit=20");
@@ -198,6 +203,21 @@ export default function ReviewPage() {
   useEffect(() => { loadQueue(); }, [loadQueue]);
   useEffect(() => { if (selectedId) loadVideo(selectedId); }, [selectedId, loadVideo]);
 
+  // Polling automático: enquanto o vídeo estiver regerando takes ou em
+  // reassembly, dá poke a cada 6s pra atualizar status e remontar quando
+  // todos os takes não-excluídos terminarem.
+  useEffect(() => {
+    if (!video || !selectedId) return;
+    const isActive =
+      video.status === "GENERATING_TAKES" ||
+      video.status === "ASSEMBLING" ||
+      video.status === "SUBMITTING_TAKES" ||
+      video.takes.some((t) => !t.excluded && (t.status === "QUEUED" || t.status === "PROCESSING"));
+    if (!isActive) return;
+    const id = setInterval(() => { loadVideo(selectedId); }, 6000);
+    return () => clearInterval(id);
+  }, [video, selectedId, loadVideo]);
+
   const handleReview = async (decision: "APPROVED" | "REJECTED", notes?: string) => {
     if (!selectedId) return;
     setActionLoading(true);
@@ -214,6 +234,31 @@ export default function ReviewPage() {
         setVideo(null);
       } else {
         toast.error("Erro ao processar review");
+      }
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
+  const handleTakeAction = async (takeId: string, action: "remove" | "restore" | "regenerate", feedback?: string) => {
+    if (!selectedId) return;
+    setActionLoading(true);
+    try {
+      const res = await fetch(`/api/ugc/generations/${selectedId}/takes/${takeId}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action, feedback }),
+      });
+      if (res.ok) {
+        toast.success(
+          action === "remove" ? "Take removido — vídeo será remontado" :
+          action === "restore" ? "Take restaurado" :
+          "Regenerando take — aguarde"
+        );
+        await loadVideo(selectedId);
+      } else {
+        const json = await res.json().catch(() => ({}));
+        toast.error(json.error ?? "Erro ao processar take");
       }
     } finally {
       setActionLoading(false);
@@ -445,22 +490,90 @@ export default function ReviewPage() {
                   )}
 
                   {tab === "takes" && (
-                    <div className="grid grid-cols-3 gap-3">
-                      {video.takes.map((take) => (
-                        <div key={take.id} className="space-y-2">
-                          <div className="aspect-[9/16] bg-white/5 rounded-lg overflow-hidden relative">
-                            {take.videoUrl ? (
-                              <video src={take.videoUrl} className="w-full h-full object-cover" muted loop playsInline onClick={(e) => { const v = e.currentTarget; v.paused ? v.play() : v.pause(); }} />
-                            ) : (
-                              <div className="absolute inset-0 flex items-center justify-center">
-                                <Loader2 className="w-4 h-4 text-violet-400 animate-spin" />
+                    <div className="space-y-3">
+                      <p className="text-xs text-white/40">
+                        Remova takes que não ficaram bons, ou regenere com feedback. Depois que todos estiverem prontos, o vídeo é remontado automaticamente.
+                      </p>
+                      <div className="grid grid-cols-3 gap-3">
+                        {video.takes.map((take) => {
+                          const isPending = take.status === "QUEUED" || take.status === "PROCESSING";
+                          const isFailed = take.status === "FAILED";
+                          return (
+                            <div key={take.id} className={`space-y-2 ${take.excluded ? "opacity-40" : ""}`}>
+                              <div className="aspect-[9/16] bg-white/5 rounded-lg overflow-hidden relative">
+                                {take.videoUrl && !take.excluded ? (
+                                  <video src={take.videoUrl} className="w-full h-full object-cover" muted loop playsInline onClick={(e) => { const v = e.currentTarget; v.paused ? v.play() : v.pause(); }} />
+                                ) : take.excluded ? (
+                                  <div className="absolute inset-0 flex items-center justify-center">
+                                    <div className="text-center">
+                                      <Trash2 className="w-5 h-5 text-white/30 mx-auto mb-1" />
+                                      <p className="text-[10px] text-white/40">Removido</p>
+                                    </div>
+                                  </div>
+                                ) : isFailed ? (
+                                  <div className="absolute inset-0 flex items-center justify-center">
+                                    <div className="text-center px-2">
+                                      <XCircle className="w-5 h-5 text-red-400 mx-auto mb-1" />
+                                      <p className="text-[10px] text-red-300">Falhou</p>
+                                    </div>
+                                  </div>
+                                ) : (
+                                  <div className="absolute inset-0 flex items-center justify-center">
+                                    <Loader2 className="w-4 h-4 text-violet-400 animate-spin" />
+                                  </div>
+                                )}
                               </div>
-                            )}
-                          </div>
-                          <p className="text-xs text-white/40 text-center">Take {take.takeIndex + 1}</p>
-                          <p className="text-xs text-white/30 line-clamp-2">{take.script}</p>
-                        </div>
-                      ))}
+                              <p className="text-xs text-white/40 text-center">
+                                Take {take.takeIndex + 1}
+                                {isPending && !take.excluded && <span className="ml-1 text-violet-400">· {take.status.toLowerCase()}</span>}
+                              </p>
+                              {take.script && <p className="text-[11px] text-white/30 line-clamp-2">{take.script}</p>}
+                              {take.regenerationFeedback && (
+                                <p className="text-[10px] text-violet-300 line-clamp-2 italic">↺ {take.regenerationFeedback}</p>
+                              )}
+                              <div className="flex gap-1">
+                                {take.excluded ? (
+                                  <Button
+                                    size="sm"
+                                    variant="outline"
+                                    className="flex-1 h-7 text-[11px] border-white/10 text-white/60 hover:text-white"
+                                    disabled={actionLoading}
+                                    onClick={() => handleTakeAction(take.id, "restore")}
+                                  >
+                                    <Undo2 className="w-3 h-3 mr-1" />
+                                    Restaurar
+                                  </Button>
+                                ) : (
+                                  <>
+                                    <Button
+                                      size="sm"
+                                      variant="outline"
+                                      className="flex-1 h-7 text-[11px] border-white/10 text-white/60 hover:text-white"
+                                      disabled={actionLoading || isPending}
+                                      onClick={() => {
+                                        setRegenTakeId(take.id);
+                                        setRegenFeedback("");
+                                      }}
+                                    >
+                                      <RefreshCw className="w-3 h-3 mr-1" />
+                                      Regerar
+                                    </Button>
+                                    <Button
+                                      size="sm"
+                                      variant="outline"
+                                      className="h-7 px-2 border-red-500/20 text-red-400 hover:bg-red-500/10"
+                                      disabled={actionLoading}
+                                      onClick={() => handleTakeAction(take.id, "remove")}
+                                    >
+                                      <Trash2 className="w-3 h-3" />
+                                    </Button>
+                                  </>
+                                )}
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
                     </div>
                   )}
 
@@ -526,6 +639,45 @@ export default function ReviewPage() {
           onSubmit={handleRemake}
           onClose={() => setShowRemake(false)}
         />
+      )}
+
+      {regenTakeId && (
+        <div className="fixed inset-0 bg-black/80 flex items-center justify-center z-50 p-4">
+          <div className="bg-[#0f1117] border border-white/10 rounded-xl p-6 w-full max-w-lg">
+            <h3 className="text-lg font-bold text-white mb-2">Regerar Take</h3>
+            <p className="text-sm text-white/40 mb-4">
+              Diga o que quer mudar neste take (ou deixe em branco pra tentar de novo do zero). Depois que todos os takes terminarem, o vídeo é remontado automaticamente.
+            </p>
+            <textarea
+              value={regenFeedback}
+              onChange={(e) => setRegenFeedback(e.target.value)}
+              className="w-full bg-white/5 border border-white/10 rounded-lg p-3 text-sm text-white placeholder-white/30 resize-none focus:outline-none focus:border-violet-500/50"
+              rows={3}
+              placeholder="Ex: mostra o produto em close-up; deixa a fala mais animada; outro ângulo..."
+              autoFocus
+            />
+            <div className="flex gap-2 mt-4">
+              <Button
+                variant="outline"
+                className="flex-1 border-white/10 text-white/60 hover:text-white"
+                onClick={() => { setRegenTakeId(null); setRegenFeedback(""); }}
+              >
+                Cancelar
+              </Button>
+              <Button
+                className="flex-1 bg-violet-600 hover:bg-violet-700 text-white"
+                onClick={() => {
+                  handleTakeAction(regenTakeId, "regenerate", regenFeedback.trim() || undefined);
+                  setRegenTakeId(null);
+                  setRegenFeedback("");
+                }}
+              >
+                <RefreshCw className="w-4 h-4 mr-2" />
+                Regerar
+              </Button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );

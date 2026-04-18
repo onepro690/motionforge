@@ -1389,6 +1389,7 @@ export async function pollAndAssembleTakes(videoId: string): Promise<{
   let permanentlyFailed = 0; // takes que excederam max retries
 
   for (const take of video.takes) {
+    if (take.excluded) continue;
     if (take.status === "COMPLETED") continue;
     if (take.status === "FAILED") {
       // ── Auto-retry: se o take falhou mas ainda tem retries disponíveis, resubmete ──
@@ -1708,16 +1709,42 @@ export async function pollAndAssembleTakes(videoId: string): Promise<{
   const freshTakesForChain = await prisma.ugcGeneratedTake.findMany({ where: { videoId }, orderBy: { takeIndex: "asc" } });
   const sortedTakes = freshTakesForChain;
   for (const take of sortedTakes) {
+    if (take.excluded) continue;
     if (take.status !== "QUEUED") continue;
 
-    const genJob = await prisma.generationJob.findUnique({ where: { id: take.veoJobId! } });
+    if (!take.veoJobId) { allCompleted = false; continue; }
+    const genJob = await prisma.generationJob.findUnique({ where: { id: take.veoJobId } });
     if (!genJob || genJob.externalTaskId) continue; // Já foi submetido
 
-    // Acha o take anterior
-    const prevTake = sortedTakes.find(t => t.takeIndex === take.takeIndex - 1);
+    // Acha o take anterior NÃO-EXCLUÍDO mais próximo
+    const prevTake = [...sortedTakes]
+      .filter((t) => !t.excluded && t.takeIndex < take.takeIndex)
+      .sort((a, b) => b.takeIndex - a.takeIndex)[0];
+
+    // Caso especial: take 0 ou primeiro não-excluído sendo (re)submetido —
+    // usa editedImageUrl (Nano Banana original) como imagem inicial.
     if (!prevTake) {
+      const firstImage = take.editedImageUrl
+        ? await imageUrlToBase64(take.editedImageUrl).catch(() => null)
+        : take.referenceFrameUrl
+          ? await imageUrlToBase64(take.referenceFrameUrl).catch(() => null)
+          : null;
+
+      const firstPrompt = take.veoPrompt ?? `Vertical 9:16 smartphone UGC video. Take ${take.takeIndex + 1}.`;
+      try {
+        const opName = await submitVeoTake(firstPrompt, "veo3-fast", accessToken!, firstImage);
+        await prisma.generationJob.update({ where: { id: genJob.id }, data: { externalTaskId: opName, status: "PROCESSING" } });
+        await prisma.ugcGeneratedTake.update({ where: { id: take.id }, data: { status: "PROCESSING" } });
+        await log(videoId, `submit_take_${take.takeIndex}`, "completed",
+          `Re-submitted first take with ${firstImage ? "edited image" : "text-only"}`);
+      } catch (err) {
+        console.error(`[pollAndAssemble] Failed to submit first take ${take.takeIndex}:`, err);
+        await prisma.generationJob.update({ where: { id: genJob.id }, data: { status: "FAILED", errorMessage: String(err) } });
+        await prisma.ugcGeneratedTake.update({ where: { id: take.id }, data: { status: "FAILED", errorMessage: String(err) } });
+        failedCount++;
+      }
       allCompleted = false;
-      continue;
+      break;
     }
 
     // Se o take anterior falhou, espera o auto-retry resolver (não pula — todas as partes são obrigatórias)
@@ -1834,11 +1861,12 @@ export async function pollAndAssembleTakes(videoId: string): Promise<{
   }
 
   // All done — verify ALL takes are COMPLETED before assembling (não pode faltar nenhuma parte)
+  // Takes excluídos pelo usuário são ignorados: não precisam estar COMPLETED.
   const freshTakes = await prisma.ugcGeneratedTake.findMany({
     where: { videoId },
     orderBy: { takeIndex: "asc" },
   });
-  const allTakesCompleted = freshTakes.every(t => t.status === "COMPLETED");
+  const allTakesCompleted = freshTakes.every(t => t.excluded || t.status === "COMPLETED");
   if (!allTakesCompleted) {
     // Algum take ainda não completou — não deve ter chegado aqui, mas safety check
     const missing = freshTakes.filter(t => t.status !== "COMPLETED");
@@ -1861,8 +1889,17 @@ export async function pollAndAssembleTakes(videoId: string): Promise<{
 
   try {
     const takeInfos = freshTakes
-      .filter((t) => t.videoUrl)
+      .filter((t) => t.videoUrl && !t.excluded)
       .map((t) => ({ url: t.videoUrl!, intendedScript: t.script ?? null }));
+
+    if (takeInfos.length === 0) {
+      await log(videoId, "assemble", "failed", "No takes left after excluding user-removed takes");
+      await prisma.ugcGeneratedVideo.update({
+        where: { id: videoId },
+        data: { status: "FAILED", errorMessage: "Todos os takes foram removidos pelo usuário" },
+      });
+      return { allDone: true, failedCount, status: "FAILED" };
+    }
 
     const freshVideo = await prisma.ugcGeneratedVideo.findUnique({ where: { id: videoId } });
     // Script consolidado = junção dos scripts dos takes na ordem. É o que
@@ -1904,4 +1941,60 @@ export async function pollAndAssembleTakes(videoId: string): Promise<{
     await prisma.ugcGeneratedVideo.update({ where: { id: videoId }, data: { status: "FAILED", errorMessage: msg } });
     throw err;
   }
+}
+
+// ── Regenerate a single take ───────────────────────────────────────────────
+// Marca o take como QUEUED com novo GenerationJob (sem externalTaskId).
+// O pollAndAssembleTakes vai submeter ao Veo no próximo ciclo, usando o last
+// frame do take anterior se for take > 0 (chain normal). Se feedback foi
+// informado, anexa ao prompt Veo existente.
+export async function regenerateSingleTake(
+  videoId: string,
+  takeId: string,
+  feedback: string | null
+): Promise<void> {
+  const take = await prisma.ugcGeneratedTake.findUnique({ where: { id: takeId } });
+  if (!take || take.videoId !== videoId) throw new Error("Take not found");
+
+  // Ajusta prompt com feedback do usuário, se houver
+  let newPrompt = take.veoPrompt ?? `Vertical 9:16 smartphone UGC video. Take ${take.takeIndex + 1}.`;
+  if (feedback && feedback.trim()) {
+    newPrompt += `\n\nUSER FEEDBACK FOR THIS TAKE (apply strictly): ${feedback.trim()}`;
+  }
+
+  // Cria novo GenerationJob "vazio" — o polling detecta (externalTaskId=null)
+  // e submete ao Veo usando o chainImage do take anterior.
+  const video = await prisma.ugcGeneratedVideo.findUnique({ where: { id: videoId } });
+  if (!video) throw new Error("Video not found");
+
+  const newJob = await prisma.generationJob.create({
+    data: {
+      userId: video.userId,
+      status: "QUEUED",
+      provider: "veo3-fast",
+      inputImageUrl: take.referenceFrameUrl ?? "",
+      promptText: newPrompt,
+      generatedPrompt: newPrompt,
+      aspectRatio: "RATIO_9_16",
+      maxDuration: 8,
+    },
+  });
+
+  await prisma.ugcGeneratedTake.update({
+    where: { id: takeId },
+    data: {
+      status: "QUEUED",
+      veoJobId: newJob.id,
+      veoPrompt: newPrompt,
+      videoUrl: null,
+      lastFrameUrl: null,
+      errorMessage: null,
+      retryCount: 0,
+      excluded: false,
+      regenerationFeedback: feedback?.trim() || null,
+    },
+  });
+
+  await log(videoId, `regenerate_take_${take.takeIndex}`, "completed",
+    feedback ? `Re-queued with feedback: "${feedback.slice(0, 120)}"` : "Re-queued with same prompt");
 }
