@@ -771,17 +771,41 @@ export async function runVideoPipeline(
 
         if (distinctFrameCount > 0) {
           take1ResultUrl = await editFrame(0, null);
-          if (distinctFrameCount > 1) {
+
+          // Classifica cada frame subsequente: continuação do anterior ou novo.
+          // Cenas marcadas continuesPreviousScene=true reutilizam a imagem do
+          // frame anterior — mesmo avatar/fenótipo + mesmo cenário garantidos.
+          // Os demais vão pro Nano Banana em paralelo.
+          const parallelIndices: number[] = [];
+          const continuationIndices: number[] = [];
+          for (let fi = 1; fi < distinctFrameCount; fi++) {
+            if (referenceScenes[fi]?.continuesPreviousScene === true) {
+              continuationIndices.push(fi);
+            } else {
+              parallelIndices.push(fi);
+            }
+          }
+
+          if (parallelIndices.length > 0) {
             const parallelStart = Date.now();
             await log(videoId, `nano_banana_parallel`, "started",
-              `editing ${distinctFrameCount - 1} remaining frames in parallel`);
+              `editing ${parallelIndices.length} fresh frames in parallel (${continuationIndices.length} continuations will reuse prior)`);
             await Promise.all(
-              Array.from({ length: distinctFrameCount - 1 }, (_, idx) =>
-                editFrame(idx + 1, take1ResultUrl)
-              )
+              parallelIndices.map((fi) => editFrame(fi, take1ResultUrl))
             );
             await log(videoId, `nano_banana_parallel`, "completed",
-              `${distinctFrameCount - 1} frames done in ${Date.now() - parallelStart}ms`);
+              `${parallelIndices.length} fresh frames done in ${Date.now() - parallelStart}ms`);
+          }
+
+          // Propaga continuações: cada frame marcado herda do frame anterior
+          // (que pode ele próprio ser uma continuação já preenchida).
+          for (const fi of continuationIndices.sort((a, b) => a - b)) {
+            const sourceImg = editedByFrame[fi - 1] ?? editedByFrame[0] ?? null;
+            const sourceUrl = editedUrlByFrame[fi - 1] ?? editedUrlByFrame[0] ?? null;
+            editedByFrame[fi] = sourceImg;
+            editedUrlByFrame[fi] = sourceUrl;
+            await log(videoId, `nano_banana_frame${fi + 1}`, "completed",
+              `reused frame ${fi} result (continuesPreviousScene=true — same person, same scenario)`);
           }
         }
 
@@ -1076,12 +1100,23 @@ export async function runVideoPipeline(
       scenes: referenceScenes.length > 0 ? referenceScenes : null,
       hasMultipleVariants: referenceHasMultipleVariants,
     });
-    const effectiveTransitionMode: "continuous" | "hard_cuts" = fashionSilentMode
-      ? "hard_cuts"
-      : (transitionMode === "hard_cuts" ? "hard_cuts" : "continuous");
-    if (fashionSilentMode) {
+    // Se alguma cena é continuação direta da anterior, precisamos de chaining
+    // contínuo (last-frame → next take) pra manter a pessoa/cenário idênticos
+    // no Veo, mesmo que o modo padrão seria hard_cuts.
+    const hasSceneContinuations = referenceScenes.some((s) => s?.continuesPreviousScene === true);
+    const effectiveTransitionMode: "continuous" | "hard_cuts" = hasSceneContinuations
+      ? "continuous"
+      : fashionSilentMode
+        ? "hard_cuts"
+        : (transitionMode === "hard_cuts" ? "hard_cuts" : "continuous");
+    if (fashionSilentMode && !hasSceneContinuations) {
       await log(videoId, "fashion_silent_mode", "completed",
         `Fashion/outfit silent mode detected — forcing hard_cuts, ${takeCount} takes, each tied to a reference scene.`);
+    }
+    if (hasSceneContinuations) {
+      const continuationCount = referenceScenes.filter((s) => s?.continuesPreviousScene === true).length;
+      await log(videoId, "scene_continuations", "completed",
+        `${continuationCount} scene(s) marked as continuation — forcing continuous chain so Veo gets prior take's last frame.`);
     }
 
     // Constrói as TAKE_SPECs (partitura rígida por take: tempo, ação, visual,

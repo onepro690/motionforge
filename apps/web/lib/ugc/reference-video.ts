@@ -481,6 +481,11 @@ export interface SceneBreakdown {
   speakerMode?: "none" | "solo" | "group_unison" | "multiple_alternating";
   // Número aproximado de pessoas visíveis na cena (1, 2, 3+, crowd)
   peopleCount?: number;
+  // true quando esta cena é continuação direta da cena anterior: MESMA(S)
+  // pessoa(s), MESMO cenário/roupa — só corte editorial (outro ângulo,
+  // outro momento da mesma fala). Pipeline reutiliza a imagem editada do
+  // take anterior pra garantir identidade e cenário idênticos.
+  continuesPreviousScene?: boolean;
 }
 
 export interface VoiceStyle {
@@ -552,8 +557,8 @@ Retorne APENAS um JSON com esta estrutura:
   },
   "sceneCount": N,
   "scenes": [
-    { "timeRange": "0-Xs", "action": "ação EXATA (ex: segura o vestido rosa na frente do corpo)", "visuals": "visual DETALHADO: cor EXATA da roupa/produto, posição da pessoa, objetos, fundo (ex: 'mulher segura vestido ROSA em cabide, fundo branco, espelho à esquerda')", "peopleCount": N, "speakerMode": "none" | "solo" | "group_unison" | "multiple_alternating" },
-    { "timeRange": "Xs-Ys", "action": "ação EXATA da segunda cena", "visuals": "visual DETALHADO com cor/variante EXATA (ex: 'mulher veste vestido AZUL, gira mostrando o caimento')", "peopleCount": N, "speakerMode": "..." }
+    { "timeRange": "0-Xs", "action": "ação EXATA (ex: segura o vestido rosa na frente do corpo)", "visuals": "visual DETALHADO: cor EXATA da roupa/produto, posição da pessoa, objetos, fundo (ex: 'mulher segura vestido ROSA em cabide, fundo branco, espelho à esquerda')", "peopleCount": N, "speakerMode": "none" | "solo" | "group_unison" | "multiple_alternating", "continuesPreviousScene": false },
+    { "timeRange": "Xs-Ys", "action": "ação EXATA da segunda cena", "visuals": "visual DETALHADO com cor/variante EXATA (ex: 'mulher veste vestido AZUL, gira mostrando o caimento')", "peopleCount": N, "speakerMode": "...", "continuesPreviousScene": true|false }
   ],
   "keyVisualSequence": "descrição compacta da progressão visual do vídeo inteiro, citando CADA cor/variante na ordem exata",
   "productShownAs": "como o produto é mostrado (segurando, vestindo, demonstrando, etc)",
@@ -577,6 +582,13 @@ REGRAS CRÍTICAS:
    * "group_unison"        = DUAS OU MAIS pessoas falam/gritam JUNTAS a mesma coisa ao mesmo tempo (coro, gritaria sincronizada)
    * "multiple_alternating" = VÁRIAS pessoas se alternam falando (cada uma fala sua parte)
   → Se a cena mostra 5 pessoas todas gritando "MOMOMOMO" juntas, isso é "group_unison", NÃO "solo".
+- "continuesPreviousScene" (CRÍTICO — observe com atenção):
+   * true  = esta cena é continuação DIRETA da cena anterior — MESMA(S) pessoa(s), MESMO cenário/fundo, MESMA roupa, só um corte editorial (câmera mudou de ângulo, pulou alguns segundos, mas é a mesma tomada da mesma pessoa continuando a mesma fala/ação).
+   * false = esta cena introduz pessoa(s) nova(s), cenário novo, ou troca de roupa/look — é uma cena visualmente distinta da anterior.
+   → Ex: se cena 2 mostra uma mulher solo falando na cozinha e cena 3 mostra a MESMA mulher falando na MESMA cozinha (só outro ângulo ou continuação da mesma fala), cena 3 tem continuesPreviousScene=true.
+   → Ex: se cena 2 é um grupo gritando e cena 3 é UMA pessoa solo em outro cenário, cena 3 tem continuesPreviousScene=false.
+   → A primeira cena SEMPRE tem continuesPreviousScene=false.
+   → Seja PRECISO: só marque true quando for literalmente a mesma pessoa no mesmo cenário/roupa. Na dúvida, marque false.
 - Se o vídeo mostra o produto em várias cores/variantes, SEMPRE marque hasMultipleVariants=true.
 - Retorne APENAS o JSON, sem markdown, sem explicação.`;
 
