@@ -334,6 +334,19 @@ export async function generateVeoPrompts(
   // Anti-freedom clause: lista explícita do que é PROIBIDO.
   const forbidList = `FORBIDDEN: inventing a new scene, adding extra people not in the input image, removing people who are in the input image, changing the camera angle, zooming in or out beyond the input image's framing, adding text/captions/subtitles/watermarks/logos, changing the outfit mid-take, changing the background mid-take, morphing the face, drifting body proportions, adding tattoos or piercings or scars not visible in the input image.`;
 
+  // Texto queimado na tela é o erro #1 recorrente do Veo 3: ele lê o script
+  // falado e reenderiza as palavras como legenda/caption estilo TikTok. Essa
+  // cláusula é dedicada e vai repetida NO COMEÇO e no final do prompt pra
+  // afogar essa tendência. Testes mostraram que só "no text" no forbidList
+  // é fraco — precisa ser explícito e redundante.
+  const noTextLock = `ZERO ON-SCREEN TEXT: do NOT burn any text, captions, subtitles, closed captions, auto-subtitles, speech-to-text overlays, TikTok/Instagram-style animated captions, title cards, lower thirds, watermarks, usernames, hashtags, emojis, price tags, product labels rendered as graphics, typography, letters, numbers, or any written characters onto the video frame. The dialogue is SPOKEN audio only — it must NEVER appear as visible writing. The output video must be 100% free of any graphical text overlay. If the reference video had captions, do NOT reproduce them. Product labels that are physically printed on real objects in-scene are fine; anything rendered as a video overlay or caption is FORBIDDEN.`;
+
+  // Aspect ratio lock: força 9:16 nativo. Veo 3 às vezes recebe um frame de
+  // input landscape (mesmo depois do crop no ffmpeg) e "preserva" a framing
+  // do input, resultando em letterbox (barras pretas em cima e embaixo).
+  // Essa cláusula instrui a preencher os 9:16 inteiros, sem padding.
+  const aspectLock = `ASPECT RATIO LOCK: the output video MUST fill the entire 9:16 vertical frame edge-to-edge. NO black bars on top or bottom. NO letterboxing. NO pillarboxing. NO side bars. The scene must extend to fill every pixel of the 9:16 canvas. If the input image is landscape, reframe it as a tight vertical capture of the same person/scene — do NOT shrink it with black padding. Native vertical smartphone capture feel.`;
+
   const anatomyShort = `Anatomy correct: no cut-off limbs, no clipping through furniture, no fused hands or extra fingers. Keep the full head and upper body inside the frame throughout the take — no zoom-in crops, no head chopping, no body parts disappearing off-screen, stable framing as shown in the input image.`;
 
   // Constrói um bloco de instruções de reprodução a partir da TAKE_SPEC ou das cenas.
@@ -393,7 +406,7 @@ export async function generateVeoPrompts(
         speechBlock = `${reenactmentHeader} Vertical 9:16 UGC video. The person in the input image speaks DIRECTLY TO CAMERA with natural lip-sync in BRAZILIAN PORTUGUESE (pt-BR). They say LITERALLY these ${wordCount} words, word-for-word, no paraphrasing, no additions, no removals, no translations, no English, no mumbling: "${takeScript}". Pronounce every word exactly as written. Start speaking within the first 0.3 seconds. Finish the last word before the take ends. After the last word close the mouth and stop — do NOT add any extra speech. AUDIO TRACK: ONLY the person's voice speaking this exact Portuguese text — ZERO background music, ZERO sound effects, ZERO other voices, ZERO other languages, ZERO singing.`;
       }
 
-      prompt = `${speechBlock} ${referenceBlock} ${sceneLock} ${colorLock} ${identityLock} ${forbidList} ${anatomyShort}`;
+      prompt = `${noTextLock} ${aspectLock} ${speechBlock} ${referenceBlock} ${sceneLock} ${colorLock} ${identityLock} ${forbidList} ${anatomyShort} ${noTextLock}`;
 
       // Pronunciation (opcional)
       if (/\bcarrinho\b/i.test(takeScript)) {
@@ -433,7 +446,7 @@ export async function generateVeoPrompts(
         ? `${reenactmentHeader} Vertical 9:16 UGC video — ABSOLUTELY SILENT reenactment. The person's MOUTH MUST STAY CLOSED throughout the entire take — NO lip-sync, NO dialogue, NO speech, NO voiceover in any language, NO singing, NO whispering, NO mouthing of words. The person NEVER speaks and NEVER moves their lips in a way that implies speech. AUDIO TRACK: only the ambient/music feel of the reference — ZERO voices.`
         : `${reenactmentHeader} Vertical 9:16 UGC video. No on-camera speech in this take — the narration will be added as voice-over in post. Keep the mouth relaxed and closed unless the reference specifically shows it moving.`;
 
-      prompt = `${silentHeader} ${referenceBlock} ${sceneLock} ${colorLock} ${identityLock} ${forbidList} ${anatomyShort}`;
+      prompt = `${noTextLock} ${aspectLock} ${silentHeader} ${referenceBlock} ${sceneLock} ${colorLock} ${identityLock} ${forbidList} ${anatomyShort} ${noTextLock}`;
 
       // Para takes silent, o raw do GPT-4o é descartado — só rebaixa a
       // densidade do prompt e pode introduzir linguagem generativa.

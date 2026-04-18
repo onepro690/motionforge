@@ -433,6 +433,14 @@ export async function extractKeyFrames(
         ffmpeg(videoPath)
           .seekInput(ts)
           .frames(1)
+          // Center-crop para 9:16 vertical (UGC/TikTok/Reels) ANTES de sair do ffmpeg.
+          // Reference videos costumam ser 16:9 → se não cortarmos, o Nano Banana
+          // recebe uma imagem landscape e o Veo acaba empurrando ela pra 9:16
+          // com letterbox (borda preta em cima e embaixo). Crop aqui garante que
+          // toda a cadeia (Nano Banana → Veo → assembly) trabalha em 9:16 nativo.
+          .videoFilters([
+            "crop='min(iw\\,ih*9/16)':'min(ih\\,iw*16/9)'",
+          ])
           .outputOptions(["-q:v", "2"])
           .output(framePath)
           .on("end", () => resolve())

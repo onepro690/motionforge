@@ -710,6 +710,27 @@ export async function runVideoPipeline(
         const editedByFrame: Record<number, { data: string; mimeType: string } | null> = {};
         const editedUrlByFrame: Record<number, string | null> = {};
 
+        // Pool de outfits UGC pra variar a roupa entre takes — usuário pediu
+        // "nunca repetir a mesma roupa". Cada frame distinto (não continuação)
+        // recebe um outfit único, preservando identidade e cenário.
+        // Frames marcados continuesPreviousScene=true herdam a imagem anterior
+        // (incluindo a roupa), então a continuidade narrativa é mantida.
+        const outfitPool = [
+          "casual oversized beige cropped t-shirt with light-wash straight jeans, minimal gold necklace",
+          "soft pastel pink knit cardigan over a white ribbed tank top, high-waist denim shorts",
+          "structured black blazer over a white fitted tee, slim dark jeans, small hoop earrings",
+          "loose sage-green linen button-up shirt with wide-leg cream trousers",
+          "vintage navy-blue cropped sweater with high-waist mom jeans and a thin leather belt",
+          "bright terracotta oversized hoodie with matching biker shorts, athleisure vibe",
+          "white long-sleeve fitted bodysuit with caramel-colored pleated midi skirt",
+          "black athletic crop top with grey joggers, sporty minimalist look",
+          "soft lavender off-shoulder sweater with light grey wide-leg sweatpants",
+          "classic denim jacket over a plain white tee with black leggings and dainty jewelry",
+        ];
+        // Permuta baseada no videoId pra cada vídeo ter outfits diferentes.
+        const outfitSeed = videoId.split("").reduce((a, c) => a + c.charCodeAt(0), 0);
+        const pickOutfit = (idx: number) => outfitPool[(outfitSeed + idx) % outfitPool.length];
+
         // Edita os frames visuais distintos.
         // Frame 0 roda SEQUENCIAL (estabelece a referência de consistência).
         // Frames 1..N-1 rodam em PARALELO (todos usam take1ResultUrl, não dependem entre si).
@@ -722,14 +743,18 @@ export async function runVideoPipeline(
           const sceneGroupInfo = sceneForFrame && sceneForFrame.peopleCount && sceneForFrame.peopleCount > 1
             ? { peopleCount: sceneForFrame.peopleCount, description: sceneForFrame.visuals }
             : null;
+          // Só aplica outfit override quando NÃO é grupo (grupo precisa manter
+          // as roupas originais de todos pra preservar a cena). Single person
+          // em cada frame distinto ganha outfit único.
+          const outfitForFrame = !sceneGroupInfo ? pickOutfit(fi) : null;
           await log(videoId, `nano_banana_frame${fi + 1}`, "started",
-            `[${mode}] frame ${fi + 1}${prevRefUrl ? " + prev take result" : ""}${sceneGroupInfo ? ` (GROUP: ${sceneGroupInfo.peopleCount} people)` : ""}`);
+            `[${mode}] frame ${fi + 1}${prevRefUrl ? " + prev take result" : ""}${sceneGroupInfo ? ` (GROUP: ${sceneGroupInfo.peopleCount} people)` : ""}${outfitForFrame ? ` (outfit: ${outfitForFrame.slice(0, 40)}...)` : ""}`);
           // 3 tentativas (Gemini imagens é estocástico — retry costuma funcionar).
           // Após a 1ª falha, re-injeta take1ResultUrl se tivermos — amarra identidade.
           const doSwap = (withPrev: string | null) => phenotypeOnlyMode
             ? swapAllPhenotypes(keyframes.frames[fi].url, withPrev)
                 .catch((e) => { console.error(`[pipeline] phenotype swap frame${fi + 1} error:`, e); return null; })
-            : swapPersonWithAvatar(keyframes.frames[fi].url, characterImageUrl!, withPrev, sceneGroupInfo)
+            : swapPersonWithAvatar(keyframes.frames[fi].url, characterImageUrl!, withPrev, sceneGroupInfo, outfitForFrame)
                 .catch((e) => { console.error(`[pipeline] nano_banana frame${fi + 1} error:`, e); return null; });
           let edited: { url: string; mimeType: string } | null = await doSwap(prevRefUrl);
           if (!edited) {

@@ -51,7 +51,8 @@ export async function swapPersonWithAvatar(
   referenceFrameUrl: string,
   avatarImageUrl: string,
   previousTakeResultUrl?: string | null,
-  groupScene?: { peopleCount?: number; description?: string } | null
+  groupScene?: { peopleCount?: number; description?: string } | null,
+  outfitOverride?: string | null
 ): Promise<{ url: string; mimeType: string } | null> {
   const apiKey = process.env.GOOGLE_AI_API_KEY?.trim();
   if (!apiKey) {
@@ -92,42 +93,58 @@ export async function swapPersonWithAvatar(
     ? `\n\nIMPORTANT — THIS IS A GROUP SCENE: The reference frame (IMAGE 1) shows ${groupScene!.peopleCount} people visible. You MUST keep ALL ${groupScene!.peopleCount} people in the result — do NOT remove anyone, do NOT merge people, do NOT leave only one person. Reproduce the EXACT same number of people in their EXACT same positions. Only ONE of them (the most prominent/central person) should have the face and phenotype swapped to match IMAGE 2. The other people keep their original faces and appearances from IMAGE 1 — DO NOT alter them. Every person from the original scene must be present in the result, same layout, same poses.`
     : "";
 
+  // Outfit override: quando o pipeline pede "roupa diferente" por take.
+  // Se definido, sobrescreve a instrução "match wardrobe from IMAGE 1" —
+  // mantendo identidade, cenário, pose e enquadramento, mas TROCANDO a roupa.
+  const hasOutfitOverride = !!(outfitOverride && outfitOverride.trim());
+  const outfitClause = hasOutfitOverride
+    ? `\n\nWARDROBE OVERRIDE — CHANGE THE CLOTHES: The reference frame (IMAGE 1) shows the ORIGINAL outfit, but you MUST replace the person's outfit with this new one: "${outfitOverride!.trim()}". This is the ONLY deviation allowed from IMAGE 1 — outfit changes, but EVERYTHING else stays pixel-identical (pose, camera, background, lighting, objects, composition, and the identity from IMAGE 2). The new outfit must fit the body naturally, respecting the same pose and framing as IMAGE 1. Do NOT keep any element of the original outfit.`
+    : "";
+
+  // Aspect ratio lock reforçado: garante saída 9:16 edge-to-edge (sem letterbox).
+  const aspectClause = `\n\nASPECT RATIO: Output MUST be 9:16 vertical — the scene fills the entire portrait canvas edge-to-edge. If the input frame is landscape, REFRAME as a native vertical smartphone capture of the same person/scene. Do NOT pad with black bars, do NOT shrink the scene inside a vertical canvas.`;
+
   let instruction: string;
   let parts: Array<{ inlineData?: { mimeType: string; data: string }; text?: string }>;
 
   if (prevResult) {
     // MODO 3 IMAGENS: take 2+ — tem o resultado do take anterior como referência
     // STRICT REFERENCE FIDELITY: reproduza IMAGE 1 pixel-a-pixel, troque SÓ a identidade.
+    // IMAGE 2 (avatar original) é o GROUND TRUTH de identidade — IMAGE 3 só
+    // reforça. Se IMAGE 3 drifted, o avatar da IMAGE 2 ainda manda.
+    const wardrobeRule = hasOutfitOverride
+      ? `- REPLACE the outfit from IMAGE 1 with the override specified below (this is the ONLY deviation allowed from IMAGE 1).\n`
+      : `- Do NOT change the outfit, clothing, accessories, or wardrobe — match IMAGE 1 exactly.\n`;
     instruction =
       `STRICT REENACTMENT TASK — pixel-fidelity scene copy with identity swap only.\n` +
       `\nYou have THREE images:\n` +
-      `IMAGE 1 = REFERENCE FRAME from a real video. This is the EXACT scene you must reproduce: background, wardrobe, pose, camera, framing, lighting, objects, composition.\n` +
-      `IMAGE 2 = original photo of the avatar (reference only for how the person looked when first shot).\n` +
-      `IMAGE 3 = previous successful result where the avatar was already placed in another scene. Use this as the IDENTITY LOCK.\n` +
-      `\nYOUR TASK: produce an image that looks like IMAGE 1 pixel-for-pixel, with ONE and ONLY ONE change — the visible person becomes the person from IMAGE 3.\n` +
+      `IMAGE 1 = REFERENCE FRAME from a real video. This is the EXACT scene you must reproduce: background, pose, camera, framing, lighting, objects, composition${hasOutfitOverride ? "" : ", wardrobe"}.\n` +
+      `IMAGE 2 = OFFICIAL AVATAR PHOTO of the person who MUST appear. This is the GROUND TRUTH of identity — the face/hair/skin in the output MUST MATCH IMAGE 2. Never generate a different person.\n` +
+      `IMAGE 3 = previous successful result where the avatar was already placed in another scene. Use as SECONDARY identity reference; if IMAGE 3 conflicts with IMAGE 2, trust IMAGE 2.\n` +
+      `\nYOUR TASK: produce an image that looks like IMAGE 1 pixel-for-pixel, with ONE and ONLY ONE change — the visible person becomes the person from IMAGE 2${hasOutfitOverride ? " wearing the override outfit described below" : ""}.\n` +
       `\n═══ FORBIDDEN (do not do ANY of these) ═══\n` +
       `- Do NOT reinterpret the scene. Do NOT generate a new scene "inspired" by IMAGE 1 — REPRODUCE IMAGE 1 exactly.\n` +
       `- Do NOT change the background, room, walls, furniture, floor, ceiling, or any scene element.\n` +
       `- Do NOT change the camera angle, zoom, framing, distance, or lens feel — match IMAGE 1 exactly.\n` +
-      `- Do NOT change the outfit, clothing, accessories, or wardrobe — match IMAGE 1 exactly.\n` +
+      wardrobeRule +
       `- Do NOT change the body pose, hand position, head tilt, or gaze direction — match IMAGE 1 exactly.\n` +
       `- Do NOT change the lighting, shadows, color grading, or exposure — match IMAGE 1 exactly.\n` +
       `- Do NOT change the product being held or the objects visible — match IMAGE 1 exactly.\n` +
       `- Do NOT add or remove any people from the scene — keep the EXACT number of people in IMAGE 1.\n` +
-      `- Do NOT change the face by reinterpreting it — clone it pixel-level from IMAGE 3.\n` +
-      `\n═══ IDENTITY LOCK (copy EXACTLY from IMAGE 3) ═══\n` +
-      `The face, hair, skin tone, and body features of the main person must be PIXEL-LEVEL IDENTICAL to IMAGE 3. If placed side-by-side with IMAGE 3, the face must look like the same photograph of the same human.\n` +
-      `- EXACT same face shape, jawline, cheekbones, nose, lips, chin\n` +
-      `- EXACT same skin tone (sample the pixels — do NOT darken or lighten)\n` +
-      `- EXACT same hair color, style, length, texture, hairline\n` +
-      `- EXACT same eye color, shape, eyebrow shape\n` +
-      `- EXACT same ethnicity, apparent age, and distinctive marks (moles, freckles) visible in IMAGE 3\n` +
-      `- Do NOT add tattoos, piercings, scars, or marks not present in IMAGE 3 / IMAGE 2\n` +
-      `\n═══ SCENE LOCK (copy EXACTLY from IMAGE 1) ═══\n` +
-      `Background, environment, room, every object, wardrobe and its exact color/pattern, body pose and limb position, camera angle and distance, framing, lighting direction, shadow shape, color palette, composition — ALL pixel-identical to IMAGE 1.\n` +
-      `\nThe face in IMAGE 1 is a DIFFERENT person — replace it with the face from IMAGE 3. Every other pixel of IMAGE 1 is preserved.\n` +
+      `- Do NOT generate a new random person. The ONLY acceptable face is the one from IMAGE 2.\n` +
+      `\n═══ IDENTITY LOCK (copy EXACTLY from IMAGE 2 — this is the user's chosen avatar) ═══\n` +
+      `The face, hair, skin tone, and body features of the main person must be PIXEL-LEVEL IDENTICAL to IMAGE 2. If placed side-by-side with IMAGE 2, the face must look like the same photograph of the same human. IMAGE 3 is only a hint about how the avatar looks in a scene — if IMAGE 3 drifted, fall back to IMAGE 2.\n` +
+      `- EXACT same face shape, jawline, cheekbones, nose, lips, chin as IMAGE 2\n` +
+      `- EXACT same skin tone as IMAGE 2 (sample the pixels — do NOT darken or lighten)\n` +
+      `- EXACT same hair color, style, length, texture, hairline as IMAGE 2\n` +
+      `- EXACT same eye color, shape, eyebrow shape as IMAGE 2\n` +
+      `- EXACT same ethnicity, apparent age, and distinctive marks (moles, freckles) visible in IMAGE 2\n` +
+      `- Do NOT add tattoos, piercings, scars, or marks not present in IMAGE 2\n` +
+      `\n═══ SCENE LOCK (copy EXACTLY from IMAGE 1${hasOutfitOverride ? " — except wardrobe, see override" : ""}) ═══\n` +
+      `Background, environment, room, every object, ${hasOutfitOverride ? "" : "wardrobe and its exact color/pattern, "}body pose and limb position, camera angle and distance, framing, lighting direction, shadow shape, color palette, composition — ALL pixel-identical to IMAGE 1.\n` +
+      `\nThe face in IMAGE 1 is a DIFFERENT person — replace it with the face from IMAGE 2. Every other pixel of IMAGE 1 is preserved${hasOutfitOverride ? " except the outfit (see override below)" : ""}.\n` +
       `\nREMOVE any on-screen text, captions, subtitles, watermarks, logos, emojis, or graphic overlays that appear in IMAGE 1. Keep only the clean photographic scene.\n` +
-      `\nOutput format: photorealistic UGC smartphone capture, 9:16 vertical aspect ratio.` + groupClause;
+      `\nOutput format: photorealistic UGC smartphone capture, 9:16 vertical aspect ratio.` + outfitClause + aspectClause + groupClause;
 
     parts = [
       { text: "IMAGE 1 (scene/outfit/pose — from this take's reference frame):" },
@@ -141,22 +158,25 @@ export async function swapPersonWithAvatar(
   } else {
     // MODO 2 IMAGENS: take 1 — primeira edição
     // STRICT REFERENCE FIDELITY: reproduza IMAGE 1 pixel-a-pixel, troque SÓ a identidade.
+    const wardrobeRule = hasOutfitOverride
+      ? `- REPLACE the outfit from IMAGE 1 with the override specified below (this is the ONLY deviation allowed from IMAGE 1).\n`
+      : `- Do NOT change the outfit, clothing, accessories, or wardrobe — match IMAGE 1 exactly.\n`;
     instruction =
       `STRICT REENACTMENT TASK — pixel-fidelity scene copy with identity swap only.\n` +
       `\nYou have TWO images:\n` +
-      `IMAGE 1 = REFERENCE FRAME from a real video. This is the EXACT scene you must reproduce: background, wardrobe, pose, camera, framing, lighting, objects, composition.\n` +
-      `IMAGE 2 = photo of the avatar (the person who MUST appear in the result).\n` +
-      `\nYOUR TASK: produce an image that looks like IMAGE 1 pixel-for-pixel, with ONE and ONLY ONE change — the visible person becomes the person from IMAGE 2.\n` +
+      `IMAGE 1 = REFERENCE FRAME from a real video. This is the EXACT scene you must reproduce: background, pose, camera, framing, lighting, objects, composition${hasOutfitOverride ? "" : ", wardrobe"}.\n` +
+      `IMAGE 2 = OFFICIAL AVATAR PHOTO — the person who MUST appear in the result. This is the GROUND TRUTH of identity.\n` +
+      `\nYOUR TASK: produce an image that looks like IMAGE 1 pixel-for-pixel, with ONE and ONLY ONE change — the visible person becomes the person from IMAGE 2${hasOutfitOverride ? " wearing the override outfit described below" : ""}.\n` +
       `\n═══ FORBIDDEN (do not do ANY of these) ═══\n` +
       `- Do NOT reinterpret the scene. Do NOT generate a new scene "inspired" by IMAGE 1 — REPRODUCE IMAGE 1 exactly.\n` +
       `- Do NOT change the background, room, walls, furniture, floor, ceiling, or any scene element.\n` +
       `- Do NOT change the camera angle, zoom, framing, distance, or lens feel — match IMAGE 1 exactly.\n` +
-      `- Do NOT change the outfit, clothing, accessories, or wardrobe — match IMAGE 1 exactly.\n` +
+      wardrobeRule +
       `- Do NOT change the body pose, hand position, head tilt, or gaze direction — match IMAGE 1 exactly.\n` +
       `- Do NOT change the lighting, shadows, color grading, or exposure — match IMAGE 1 exactly.\n` +
       `- Do NOT change the product being held or the objects visible — match IMAGE 1 exactly.\n` +
       `- Do NOT add or remove any people from the scene — keep the EXACT number of people in IMAGE 1.\n` +
-      `- Do NOT change the face by reinterpreting it — clone it pixel-level from IMAGE 2.\n` +
+      `- Do NOT generate a new random person. The ONLY acceptable face is the one from IMAGE 2.\n` +
       `\n═══ IDENTITY LOCK (copy EXACTLY from IMAGE 2) ═══\n` +
       `The face, hair, skin tone, and body features of the main person must be PIXEL-LEVEL IDENTICAL to IMAGE 2. If placed side-by-side with IMAGE 2, the face must look like the same photograph of the same human.\n` +
       `- EXACT same face shape, jawline, cheekbones, nose, lips, chin\n` +
@@ -165,11 +185,11 @@ export async function swapPersonWithAvatar(
       `- EXACT same eye color, shape, eyebrow shape\n` +
       `- EXACT same ethnicity, apparent age, and distinctive marks (moles, freckles) visible in IMAGE 2\n` +
       `- Do NOT add tattoos, piercings, scars, or marks not present in IMAGE 2\n` +
-      `\n═══ SCENE LOCK (copy EXACTLY from IMAGE 1) ═══\n` +
-      `Background, environment, room, every object, wardrobe and its exact color/pattern, body pose and limb position, camera angle and distance, framing, lighting direction, shadow shape, color palette, composition — ALL pixel-identical to IMAGE 1.\n` +
-      `\nThe face in IMAGE 1 is a DIFFERENT person — replace it with the face from IMAGE 2. Every other pixel of IMAGE 1 is preserved.\n` +
+      `\n═══ SCENE LOCK (copy EXACTLY from IMAGE 1${hasOutfitOverride ? " — except wardrobe, see override" : ""}) ═══\n` +
+      `Background, environment, room, every object, ${hasOutfitOverride ? "" : "wardrobe and its exact color/pattern, "}body pose and limb position, camera angle and distance, framing, lighting direction, shadow shape, color palette, composition — ALL pixel-identical to IMAGE 1.\n` +
+      `\nThe face in IMAGE 1 is a DIFFERENT person — replace it with the face from IMAGE 2. Every other pixel of IMAGE 1 is preserved${hasOutfitOverride ? " except the outfit (see override below)" : ""}.\n` +
       `\nREMOVE any on-screen text, captions, subtitles, watermarks, logos, emojis, or graphic overlays that appear in IMAGE 1. Keep only the clean photographic scene.\n` +
-      `\nOutput format: photorealistic UGC smartphone capture, 9:16 vertical aspect ratio.` + groupClause;
+      `\nOutput format: photorealistic UGC smartphone capture, 9:16 vertical aspect ratio.` + outfitClause + aspectClause + groupClause;
 
     parts = [
       { text: "IMAGE 1 (scene/outfit/pose — reproduce pixel-for-pixel):" },
