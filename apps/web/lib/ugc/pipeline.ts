@@ -1402,6 +1402,13 @@ export async function runVideoPipeline(
         takeLastImage = perTakeLastImages[takeKey] ?? null;
       }
 
+      // IMPORTANT: lastFrame força Veo Quality a interpolar até uma pose fixa.
+      // Em takes com FALA isso quebra lip-sync e idioma — Veo prioriza chegar
+      // na pose final e ignora o script. Só usamos lastFrame em takes SILENT.
+      if (hasNarration) {
+        takeLastImage = null;
+      }
+
       if (!takeImage) {
         // Sem imagem — cai pro modo text-to-video do Veo em vez de falhar o take.
         // O Veo gera uma pessoa nova baseada só no prompt. Identidade NÃO fica
