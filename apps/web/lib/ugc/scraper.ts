@@ -1,6 +1,9 @@
 // TikTok Shop trend scraper — video-based, groups by product
 // Real TikTok URLs constructed from video_id + author.unique_id
 
+import { generateText } from "ai";
+import { createOpenAI } from "@ai-sdk/openai";
+
 export interface ScrapedProduct {
   name: string;
   productId?: string;
@@ -116,19 +119,106 @@ function extractProductMentions(description: string): string[] {
 
 // ── Group videos into products ──────────────────────────────────────────────
 
-function groupVideosByProduct(videos: ScrapedVideo[]): ScrapedProduct[] {
+// LLM-based product identification — replaces the regex/hashtag-join approach
+// that returned garbage like "luansantana viralizarnotiktok" (singer name + generic tag).
+// GPT-4o-mini reads descriptions semantically and returns a clean product name
+// per video, grouping synonyms together (e.g. "massageador facial" + "massageador
+// pra rosto" → same product).
+async function identifyProductsLLM(
+  videos: ScrapedVideo[]
+): Promise<Map<string, { name: string; category: string | null } | null>> {
+  const result = new Map<string, { name: string; category: string | null } | null>();
+  if (!process.env.OPENAI_API_KEY) return result;
+
+  const openai = createOpenAI({ apiKey: process.env.OPENAI_API_KEY });
+  const BATCH = 40;
+
+  for (let i = 0; i < videos.length; i += BATCH) {
+    const batch = videos.slice(i, i + BATCH);
+    const items = batch.map((v, idx) => ({
+      idx,
+      description: v.description.replace(/\s+/g, " ").trim().slice(0, 400),
+    }));
+
+    const prompt = `Você é especialista em TikTok Shop Brasil. Para cada vídeo, extraia o NOME REAL DO PRODUTO sendo vendido baseado na descrição.
+
+REGRAS:
+- Nome do produto deve ser curto (2-5 palavras), em português do Brasil.
+- SEM hashtags, SEM emojis, SEM nomes de creators/cantores/celebridades, SEM nomes de marcas de rede social.
+- AGRUPE sinônimos: "massageador facial", "massageador pra rosto", "aparelho massagem rosto" → todos devem virar "Massageador Facial".
+- Nomes genéricos devem ficar no singular e capitalizados: "Batom Líquido Matte", "Organizador Geladeira", "Luminária Lua LED".
+- Se a descrição é só trend/meme/dancinha sem produto identificável, retorne productName=null.
+- category é uma de: "Beleza", "Casa", "Moda", "Tecnologia", "Fitness", "Pet", "Cozinha", "Decoração", "Infantil", "Outros".
+
+VÍDEOS (JSON):
+${JSON.stringify(items, null, 2)}
+
+Responda APENAS JSON válido no formato:
+{"products": [{"idx": 0, "productName": "Nome do Produto", "category": "Beleza"}, {"idx": 1, "productName": null, "category": null}, ...]}`;
+
+    try {
+      const { text } = await generateText({
+        model: openai("gpt-4o-mini"),
+        prompt,
+        temperature: 0.2,
+      });
+      const match = text.match(/\{[\s\S]*\}/);
+      if (!match) continue;
+      const parsed = JSON.parse(match[0]) as {
+        products?: Array<{ idx: number; productName: string | null; category: string | null }>;
+      };
+      for (const p of parsed.products ?? []) {
+        const video = batch[p.idx];
+        if (!video) continue;
+        if (!p.productName || p.productName.trim().length < 3) {
+          result.set(video.videoId, null);
+        } else {
+          result.set(video.videoId, {
+            name: p.productName.trim().slice(0, 60),
+            category: p.category ?? null,
+          });
+        }
+      }
+    } catch (err) {
+      console.error("[scraper] LLM product ID error:", err);
+    }
+  }
+
+  return result;
+}
+
+// Normaliza o nome para agrupar variações superficiais de capitalização/espaço.
+function normalizeProductKey(name: string): string {
+  return name
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-z0-9\s]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+async function groupVideosByProduct(videos: ScrapedVideo[]): Promise<ScrapedProduct[]> {
+  const llmMap = await identifyProductsLLM(videos);
   const productMap = new Map<string, ScrapedProduct>();
 
   for (const video of videos) {
-    const key = identifyProduct(video);
+    const llmResult = llmMap.get(video.videoId);
+    // LLM explicitamente disse "sem produto" → descarta o vídeo.
+    if (llmMap.has(video.videoId) && llmResult === null) continue;
+
+    const identified = llmResult ?? identifyProductFallback(video);
+    if (!identified) continue;
+
+    const key = normalizeProductKey(identified.name);
+    if (!key) continue;
 
     if (!productMap.has(key)) {
       productMap.set(key, {
-        name: key,
-        // Use the thumbnail of the highest-view video as product photo
+        name: identified.name,
+        category: identified.category ?? undefined,
         thumbnailUrl: video.thumbnailUrl,
-        // TikTok search URL for the product name
-        productUrl: `https://www.tiktok.com/search?q=${encodeURIComponent(key)}`,
+        productUrl: `https://www.tiktok.com/search?q=${encodeURIComponent(identified.name)}`,
         videos: [],
       });
     }
@@ -136,12 +226,11 @@ function groupVideosByProduct(videos: ScrapedVideo[]): ScrapedProduct[] {
     const product = productMap.get(key)!;
     product.videos.push(video);
 
-    // Keep the thumbnail from the video with most views
+    // Keep thumbnail from video with most views
     const bestVideo = product.videos.reduce((best, v) => v.views > best.views ? v : best, product.videos[0]);
     product.thumbnailUrl = bestVideo.thumbnailUrl;
   }
 
-  // Sort videos within each product by views (highest first)
   for (const p of productMap.values()) {
     p.videos.sort((a, b) => b.views - a.views);
   }
@@ -149,8 +238,11 @@ function groupVideosByProduct(videos: ScrapedVideo[]): ScrapedProduct[] {
   return Array.from(productMap.values()).filter((p) => p.videos.length >= 1);
 }
 
-function identifyProduct(video: ScrapedVideo): string {
-  const desc = video.description.toLowerCase();
+// Fallback usado só quando OPENAI_API_KEY não está configurada.
+// Tenta os patterns de descrição; se falhar tudo, descarta o vídeo
+// (melhor nenhum produto do que "hashtag1 hashtag2" virando nome).
+function identifyProductFallback(video: ScrapedVideo): { name: string; category: string | null } | null {
+  const desc = video.description;
 
   const patterns = [
     /produto:\s*([^#\n]+)/i,
@@ -158,29 +250,18 @@ function identifyProduct(video: ScrapedVideo): string {
     /testando\s+([^#\n,]{5,})/i,
     /usando\s+([^#\n,]{5,})/i,
     /review\s+([^#\n,]{5,})/i,
-    /achei\s+([^#\n,]{5,})/i,
     /comprei\s+([^#\n,]{5,})/i,
   ];
 
   for (const pattern of patterns) {
     const match = desc.match(pattern);
-    if (match?.[1]) return match[1].trim().slice(0, 60);
+    if (match?.[1]) {
+      const name = match[1].trim().replace(/[#@].*$/, "").trim().slice(0, 60);
+      if (name.length >= 4) return { name, category: null };
+    }
   }
 
-  // Use non-generic hashtags as product name
-  const hashtags = desc.match(/#(\w+)/g) ?? [];
-  const skip = new Set(["tiktok", "tiktokshop", "tiktokshopbrasil", "tiktokshopbr", "viral",
-    "fyp", "foryou", "shop", "review", "trending", "brasil", "br", "ad", "shorts",
-    "reels", "maquiagem", "beleza", "makeup", "beauty", "skincare", "fashion", "moda"]);
-  const productHashtags = hashtags
-    .map((h) => h.slice(1))
-    .filter((h) => h.length > 3 && !skip.has(h.toLowerCase()))
-    .slice(0, 2);
-
-  if (productHashtags.length > 0) return productHashtags.join(" ").slice(0, 60);
-
-  // Fallback: first meaningful chunk of description
-  return video.description.slice(0, 50).replace(/[#\n]/g, " ").trim() || "Produto TikTok Shop";
+  return null;
 }
 
 // ── Mock data ───────────────────────────────────────────────────────────────
@@ -298,7 +379,7 @@ export async function scrapeTrendingProducts(
       return generateMockData(keywords);
     }
 
-    const products = groupVideosByProduct(allVideos);
+    const products = await groupVideosByProduct(allVideos);
 
     // Sort by total views (most viral first)
     products.sort((a, b) => {
