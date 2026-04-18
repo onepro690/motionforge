@@ -484,6 +484,7 @@ export async function assembleTakes(
       access: "public",
       contentType: "video/mp4",
       addRandomSuffix: false,
+      allowOverwrite: true,
     });
 
     return {

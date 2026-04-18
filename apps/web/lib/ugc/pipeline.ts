@@ -366,6 +366,7 @@ async function persistLastFrame(frame: { data: string; mimeType: string }, takeI
       access: "public",
       contentType: frame.mimeType,
       addRandomSuffix: false,
+      allowOverwrite: true,
     });
     console.log(`[persistLastFrame] Saved: ${blob.url}`);
     await prisma.ugcGeneratedTake.update({
@@ -1609,7 +1610,7 @@ export async function pollAndAssembleTakes(videoId: string): Promise<{
       }
 
       // Upload video to blob first (before any heavy processing to avoid OOM loops)
-      const blob = await put(`ugc-take-${take.id}.mp4`, videoBuffer, { access: "public", contentType: "video/mp4", addRandomSuffix: false });
+      const blob = await put(`ugc-take-${take.id}.mp4`, videoBuffer, { access: "public", contentType: "video/mp4", addRandomSuffix: false, allowOverwrite: true });
       videoUrl = blob.url;
 
       await prisma.generationJob.update({ where: { id: genJob.id }, data: { status: "COMPLETED", outputVideoUrl: videoUrl, completedAt: new Date() } });
