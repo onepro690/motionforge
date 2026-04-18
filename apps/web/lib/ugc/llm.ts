@@ -349,6 +349,12 @@ export async function generateVeoPrompts(
 
   const anatomyShort = `Anatomy correct: no cut-off limbs, no clipping through furniture, no fused hands or extra fingers. Keep the full head and upper body inside the frame throughout the take — no zoom-in crops, no head chopping, no body parts disappearing off-screen, stable framing as shown in the input image.`;
 
+  // Language lock: Veo 3 às vezes troca o idioma falado no meio da geração
+  // (começa em chinês, vira inglês, depois cala). Esse bloco RENOMEIA a
+  // língua alvo várias vezes e REJEITA explicitamente os idiomas que o Veo
+  // tende a defaultar. Fica antes E depois do script literal.
+  const languageLock = `LANGUAGE LOCK: 100% of the spoken audio in this take must be BRAZILIAN PORTUGUESE (português brasileiro, pt-BR). This is NON-NEGOTIABLE. FORBIDDEN LANGUAGES: English, Mandarin Chinese (普通话), Cantonese, Japanese, Korean, Spanish (español), European Portuguese (Portugal accent), French, German, Italian, Russian, Arabic, or any other language. If you cannot render the exact Brazilian Portuguese text provided, the person must stay SILENT with mouth closed — do NOT substitute another language, do NOT improvise, do NOT mumble, do NOT speak gibberish, do NOT vocalize nonsense syllables. Every single syllable that exits the person's mouth must be a Brazilian Portuguese syllable from the exact text given below. Pronunciation must be Brazilian (open vowels, soft "t" and "d" before "i", nasal endings "ão"/"em"), NOT Portuguese from Portugal.`;
+
   // Constrói um bloco de instruções de reprodução a partir da TAKE_SPEC ou das cenas.
   const buildReferenceBlock = (i: number): string => {
     const spec = takeSpecs?.[i];
@@ -422,7 +428,7 @@ export async function generateVeoPrompts(
         speechBlock = `${reenactmentHeader} Vertical 9:16 UGC video. The person in the input image speaks DIRECTLY TO CAMERA with natural lip-sync in BRAZILIAN PORTUGUESE (pt-BR). They say LITERALLY these ${wordCount} words, word-for-word, no paraphrasing, no additions, no removals, no translations, no English, no mumbling: "${takeScript}". Pronounce every word exactly as written. Start speaking within the first 0.3 seconds. Finish the last word before the take ends. After the last word close the mouth and stop — do NOT add any extra speech. AUDIO TRACK: ONLY the person's voice speaking this exact Portuguese text — ZERO background music, ZERO sound effects, ZERO other voices, ZERO other languages, ZERO singing.`;
       }
 
-      prompt = `${noTextLock} ${aspectLock} ${speechBlock} ${peopleLock} ${referenceBlock} ${sceneLock} ${colorLock} ${identityLock} ${forbidList} ${anatomyShort} ${noTextLock}`;
+      prompt = `${languageLock} ${noTextLock} ${aspectLock} ${speechBlock} ${languageLock} ${peopleLock} ${referenceBlock} ${sceneLock} ${colorLock} ${identityLock} ${forbidList} ${anatomyShort} ${noTextLock}`;
 
       // Pronunciation (opcional)
       if (/\bcarrinho\b/i.test(takeScript)) {
@@ -455,8 +461,8 @@ export async function generateVeoPrompts(
 
       // Tail reinforcement: Veo pesa começo E fim do prompt. Repetimos o
       // texto literal no final pra bloquear qualquer tendência de improvisar
-      // palavras diferentes ou parafrasear no meio da fala.
-      prompt += ` FINAL DIALOG LOCK: the spoken line in this take is EXACTLY this Brazilian Portuguese text and nothing else: "${takeScript}". Do not add words, do not skip words, do not translate, do not paraphrase, do not change order, do not substitute synonyms. Every syllable must match.`;
+      // palavras diferentes, parafrasear, ou trocar de idioma no meio da fala.
+      prompt += ` FINAL DIALOG LOCK: the spoken line in this take is EXACTLY this BRAZILIAN PORTUGUESE text and nothing else: "${takeScript}". This text is in pt-BR. Speak it in pt-BR only. Do NOT translate to English, do NOT translate to Chinese, do NOT translate to Spanish, do NOT translate to any other language. Do not add words, do not skip words, do not paraphrase, do not change order, do not substitute synonyms. Every syllable must match the pt-BR pronunciation of the written text above. If unsure about a word, stay silent with closed mouth rather than switching to another language.`;
     } else {
       // ── FASHION_SILENT_EXACT_MATCH_MODE / VOICEOVER ────────────────────
       // Vídeo silencioso: boca fechada, cenário fixo, só a pessoa é trocada.
