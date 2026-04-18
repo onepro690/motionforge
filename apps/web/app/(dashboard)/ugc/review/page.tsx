@@ -10,6 +10,7 @@ import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { DownloadButton } from "@/components/download-button";
 import { toast } from "sonner";
+import { proxyImage } from "@/lib/ugc/image-url";
 
 interface Take {
   id: string;
@@ -429,7 +430,7 @@ export default function ReviewPage() {
                           <>
                             <p className="text-xs text-white/40 text-center">Vídeo de referência usado pra gerar este UGC</p>
                             {ref.thumbnailUrl && (
-                              <img src={ref.thumbnailUrl} alt="Referência" className="max-w-[280px] rounded-xl aspect-[9/16] object-cover" />
+                              <img src={proxyImage(ref.thumbnailUrl)} alt="Referência" className="max-w-[280px] rounded-xl aspect-[9/16] object-cover" />
                             )}
                             <div className="text-center space-y-1">
                               {ref.creatorHandle && <p className="text-sm text-white">@{ref.creatorHandle}</p>}
