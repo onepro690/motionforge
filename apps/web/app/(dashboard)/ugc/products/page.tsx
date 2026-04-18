@@ -91,6 +91,7 @@ export default function ProductsPage() {
   const [charPickerProductId, setCharPickerProductId] = useState<string | null>(null);
   const [charPickerAction, setCharPickerAction] = useState<"approve" | "regen">("approve");
   const [transitionMode, setTransitionMode] = useState<"continuous" | "hard_cuts">("continuous");
+  const [narrationOverride, setNarrationOverride] = useState<"auto" | "speech" | "silent">("auto");
 
   const loadCharacters = useCallback(async () => {
     const res = await fetch("/api/ugc/characters");
@@ -134,7 +135,7 @@ export default function ProductsPage() {
     if (!productId) return;
     setCharPickerProductId(null);
 
-    const payload: Record<string, unknown> = { productIds: [productId], count: 1, transitionMode };
+    const payload: Record<string, unknown> = { productIds: [productId], count: 1, transitionMode, narrationOverride };
     if ("characterId" in opts) payload.characterId = opts.characterId;
     if ("noAvatar" in opts) payload.noAvatar = true;
 
@@ -556,6 +557,46 @@ export default function ProductsPage() {
                 >
                   <p className="text-xs font-semibold text-white">Cortes secos</p>
                   <p className="text-[10px] text-white/50 mt-0.5 leading-tight">Imita cortes da referência — mais rápido, cada take independente.</p>
+                </button>
+              </div>
+            </div>
+
+            {/* Toggle de tipo do vídeo (fala vs fashion) — previne bug da auto-detecção */}
+            <div className="rounded-xl border border-white/10 bg-white/[0.02] p-3 space-y-2">
+              <p className="text-[11px] uppercase tracking-wider text-white/40 font-semibold">O vídeo tem fala?</p>
+              <div className="grid grid-cols-3 gap-2">
+                <button
+                  onClick={() => setNarrationOverride("auto")}
+                  className={`rounded-lg border p-2.5 text-left transition-colors ${
+                    narrationOverride === "auto"
+                      ? "border-violet-500/50 bg-violet-500/10"
+                      : "border-white/10 bg-white/[0.02] hover:bg-white/[0.05]"
+                  }`}
+                >
+                  <p className="text-xs font-semibold text-white">Auto</p>
+                  <p className="text-[10px] text-white/50 mt-0.5 leading-tight">Gemini detecta. Pode errar com música alta.</p>
+                </button>
+                <button
+                  onClick={() => setNarrationOverride("speech")}
+                  className={`rounded-lg border p-2.5 text-left transition-colors ${
+                    narrationOverride === "speech"
+                      ? "border-sky-500/50 bg-sky-500/10"
+                      : "border-white/10 bg-white/[0.02] hover:bg-white/[0.05]"
+                  }`}
+                >
+                  <p className="text-xs font-semibold text-white">Tem fala</p>
+                  <p className="text-[10px] text-white/50 mt-0.5 leading-tight">Força lip-sync, usa o transcript.</p>
+                </button>
+                <button
+                  onClick={() => setNarrationOverride("silent")}
+                  className={`rounded-lg border p-2.5 text-left transition-colors ${
+                    narrationOverride === "silent"
+                      ? "border-rose-500/50 bg-rose-500/10"
+                      : "border-white/10 bg-white/[0.02] hover:bg-white/[0.05]"
+                  }`}
+                >
+                  <p className="text-xs font-semibold text-white">Sem fala</p>
+                  <p className="text-[10px] text-white/50 mt-0.5 leading-tight">Fashion/outfit — copia roupa do reference.</p>
                 </button>
               </div>
             </div>

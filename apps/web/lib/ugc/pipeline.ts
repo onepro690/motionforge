@@ -426,6 +426,12 @@ export async function runVideoPipeline(
   // "continuous" = encadeia takes pelo último frame (padrão, fala suave)
   // "hard_cuts"  = cada take em paralelo com frame próprio (imita cortes secos)
   const transitionMode: string = (video as unknown as { transitionMode?: string }).transitionMode ?? "continuous";
+  // User override da auto-detecção Gemini:
+  // - "auto"   = confia no Gemini
+  // - "speech" = força fala (Gemini às vezes marca silent em vídeos com música alta cobrindo voz)
+  // - "silent" = força sem fala (fashion/outfit)
+  const narrationOverride: "auto" | "speech" | "silent" =
+    ((video as unknown as { narrationOverride?: string }).narrationOverride ?? "auto") as "auto" | "speech" | "silent";
 
   await prisma.ugcGeneratedVideo.update({
     where: { id: videoId },
@@ -583,6 +589,9 @@ export async function runVideoPipeline(
 
       if (geminiAnalysis) {
         hasNarration = geminiAnalysis.hasNarration && geminiAnalysis.narrationStyle !== "none";
+        // User override vence auto-detecção.
+        if (narrationOverride === "speech") hasNarration = true;
+        else if (narrationOverride === "silent") hasNarration = false;
         if (geminiAnalysis.sceneCount && geminiAnalysis.sceneCount > 0) {
           geminiSceneCount = geminiAnalysis.sceneCount;
         }
@@ -605,13 +614,15 @@ export async function runVideoPipeline(
         // Gemini falhou 2x → scene count será determinado pelo ffmpeg scene detection
         // no passo de extractKeyFrames (detecta cortes visuais automaticamente).
         // Por enquanto, marca como "pendente ffmpeg" — o valor será sobrescrito.
-        hasNarration = false;
+        hasNarration = narrationOverride === "speech";
         geminiSceneCount = 0; // 0 = "não sabe, deixa o ffmpeg decidir"
         await log(videoId, "narration_detection", "failed",
-          "Gemini failed 2x → SILENT, scene count will be determined by ffmpeg scene detection");
+          `Gemini failed 2x → ${hasNarration ? "SPEECH (user override)" : "SILENT"}, scene count will be determined by ffmpeg scene detection`);
       }
     } else {
-      await log(videoId, "narration_detection", "completed", "No video URL available → defaulting to SILENT, 3 takes");
+      hasNarration = narrationOverride === "speech";
+      await log(videoId, "narration_detection", "completed",
+        `No video URL available → ${hasNarration ? "SPEECH (user override)" : "SILENT"}, 3 takes`);
     }
 
     // takeCount = max(cenas visuais, takes mínimos pela duração da fala)
@@ -896,7 +907,8 @@ export async function runVideoPipeline(
     // (música/lyrics detectados, transcript vazio ou muito curto), NÃO confia
     // no Gemini — muitos vídeos com letra cantada são misclassificados.
     // Sinal forte: duração longa com pouquíssimo texto por segundo.
-    if (hasNarration && bestReference?.id) {
+    // User override "speech" pula esse cross-check — confia no usuário.
+    if (hasNarration && bestReference?.id && narrationOverride !== "speech") {
       const transcriptText = referenceTranscript?.transcript?.trim() ?? "";
       const transcriptWords = transcriptText.split(/\s+/).filter((w) => w.length > 0).length;
       const whisperSaidNoSpeech = referenceTranscript?.hasSpeech === false;

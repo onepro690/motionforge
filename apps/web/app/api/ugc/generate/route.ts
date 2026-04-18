@@ -20,6 +20,7 @@ const schema = z.object({
   characterId: z.string().optional(), // personagem a usar como avatar
   noAvatar: z.boolean().optional(), // sem avatar — só troca fenótipo via prompt
   transitionMode: z.enum(["continuous", "hard_cuts"]).optional(), // modo de transição entre takes
+  narrationOverride: z.enum(["auto", "speech", "silent"]).optional(), // força fala/silent/auto
 });
 
 export async function POST(request: NextRequest) {
@@ -34,7 +35,7 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: "Invalid input", details: parsed.error.message }, { status: 400 });
     }
 
-    const { productIds, count, characterId, noAvatar, transitionMode } = parsed.data;
+    const { productIds, count, characterId, noAvatar, transitionMode, narrationOverride } = parsed.data;
 
     // Valida personagem se fornecido (pulado quando noAvatar=true)
     if (!noAvatar) {
@@ -103,6 +104,7 @@ export async function POST(request: NextRequest) {
           title: `${product.name} - v${Date.now()}`,
           currentStep: "queued",
           transitionMode: transitionMode ?? "continuous",
+          narrationOverride: narrationOverride ?? "auto",
         },
       });
 
