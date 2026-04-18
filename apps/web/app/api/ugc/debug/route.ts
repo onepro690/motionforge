@@ -12,6 +12,15 @@ export async function GET(request: NextRequest) {
 
   const view = request.nextUrl.searchParams.get("view");
 
+  if (view === "thumbs") {
+    const products = await prisma.ugcTrendingProduct.findMany({
+      orderBy: { createdAt: "desc" },
+      take: 10,
+      select: { id: true, name: true, thumbnailUrl: true },
+    });
+    return NextResponse.json(products, { status: 200 });
+  }
+
   if (view === "products") {
     const [all, approved, usedForGen] = await Promise.all([
       prisma.ugcTrendingProduct.findMany({
