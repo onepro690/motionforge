@@ -692,6 +692,7 @@ export async function runVideoPipeline(
     // mantém cenário + roupa + cor exata daquele momento). O resultado vira
     // input image-to-video do Veo POR TAKE.
     let perTakeImages: Record<string, { data: string; mimeType: string } | null> = {};
+    let perTakeLastImages: Record<string, { data: string; mimeType: string } | null> = {}; // lastFrame por take (Veo Quality interpola)
     let referenceFrameUrls: Record<string, string> = {}; // raw keyframe URLs por take
     let perTakeEditedUrls: Record<string, string | null> = {}; // Nano Banana result URLs por take
     let editedImage: { data: string; mimeType: string } | null = null;
@@ -884,6 +885,38 @@ export async function runVideoPipeline(
         // que cara/pessoa diferente em um take.
         const take1Image = editedByFrame[0] || null;
         const take1Url = editedUrlByFrame[0] || null;
+
+        // LAST FRAME EDIT: edita frame do FIM de cada cena usando o edited
+        // firstFrame como referência de identidade. Veo Quality interpola
+        // firstFrame → lastFrame → motion fica preso ao reference.
+        const editedEndByFrame: Record<number, { data: string; mimeType: string } | null> = {};
+        if (keyframes.endFrames && keyframes.endFrames.length === keyframes.frames.length) {
+          await log(videoId, "nano_banana_endframes", "started", `editing ${distinctFrameCount} end frames`);
+          await Promise.all(
+            Array.from({ length: distinctFrameCount }, (_, fi) => fi).map(async (fi) => {
+              const endFrameUrl = keyframes.endFrames[fi]?.url;
+              if (!endFrameUrl) return;
+              const identityRef = editedUrlByFrame[fi] ?? take1Url;
+              const sceneForFrame = referenceScenes[fi];
+              const sceneGroupInfo = sceneForFrame?.peopleCount && sceneForFrame.peopleCount > 1
+                ? { peopleCount: sceneForFrame.peopleCount, description: sceneForFrame.visuals }
+                : null;
+              const swap = () => phenotypeOnlyMode
+                ? swapAllPhenotypes(endFrameUrl, identityRef).catch(() => null)
+                : swapPersonWithAvatar(endFrameUrl, characterImageUrl!, identityRef, sceneGroupInfo, null).catch(() => null);
+              let edited = await swap();
+              if (!edited) edited = await swap();
+              if (edited) {
+                editedEndByFrame[fi] = await imageUrlToBase64(edited.url);
+                await log(videoId, `nano_banana_endframe${fi + 1}`, "completed", edited.url);
+              } else {
+                await log(videoId, `nano_banana_endframe${fi + 1}`, "failed", `fallback to raw end frame`);
+                editedEndByFrame[fi] = await imageUrlToBase64(endFrameUrl);
+              }
+            })
+          );
+        }
+
         for (let i = 0; i < takeCount; i++) {
           const key = `take${i + 1}`;
           // Para vídeos de fala com 1 cena: todos os takes usam o frame 0
@@ -892,6 +925,7 @@ export async function runVideoPipeline(
           const imgForTake = editedByFrame[frameIdx] || take1Image;
           const urlForTake = editedUrlByFrame[frameIdx] || take1Url;
           perTakeImages[key] = imgForTake;
+          perTakeLastImages[key] = editedEndByFrame[frameIdx] || null;
           perTakeEditedUrls[key] = urlForTake;
           referenceFrameUrls[key] = keyframes.frames[Math.min(i, keyframes.frames.length - 1)].url;
           if (!editedByFrame[frameIdx] && take1Image) {
@@ -1358,11 +1392,14 @@ export async function runVideoPipeline(
       // Escolhe a imagem certa pro take
       const take1Image = perTakeImages["take1"] || editedImage;
       let takeImage: { data: string; mimeType: string } | null;
+      let takeLastImage: { data: string; mimeType: string } | null = null;
       if (useContinuousChain) {
         takeImage = take1Image;
+        takeLastImage = perTakeLastImages["take1"] ?? null;
       } else {
         // HARD_CUTS ou SILENT: cada take usa seu próprio frame visual
         takeImage = perTakeImages[takeKey] || editedImage;
+        takeLastImage = perTakeLastImages[takeKey] ?? null;
       }
 
       if (!takeImage) {
@@ -1376,12 +1413,20 @@ export async function runVideoPipeline(
           `image-to-video mode (hasNarration=${hasNarration}, imageSize=${takeImage.data.length} bytes)`);
       }
 
+      // Quando temos lastFrame, FORÇA Veo Quality — fast model não suporta lastFrame.
+      // Veo Quality interpola firstFrame → lastFrame preservando motion do reference.
+      const effectiveModelId = takeLastImage ? "veo3-quality" : modelId;
+      if (takeLastImage) {
+        await log(videoId, `submit_take_${takeKey}`, "started",
+          `FIDELITY MODE: firstFrame + lastFrame → veo3-quality (motion interpolation)`);
+      }
+
       // Submit to Vertex AI
       try {
-        const operationName = await submitVeoTake(prompt, modelId, accessToken, takeImage, takeDuration);
+        const operationName = await submitVeoTake(prompt, effectiveModelId, accessToken, takeImage, takeDuration, takeLastImage);
         await prisma.generationJob.update({
           where: { id: genJob.id },
-          data: { externalTaskId: operationName },
+          data: { externalTaskId: operationName, provider: effectiveModelId },
         });
         await prisma.ugcGeneratedTake.update({
           where: { id: take.id },
@@ -1394,7 +1439,7 @@ export async function runVideoPipeline(
           let retryImage: { data: string; mimeType: string } | null = null;
           if (rawFrameUrl) retryImage = await imageUrlToBase64(rawFrameUrl).catch(() => null);
           try {
-            const operationName = await submitVeoTake(prompt, modelId, accessToken, retryImage, takeDuration);
+            const operationName = await submitVeoTake(prompt, effectiveModelId, accessToken, retryImage, takeDuration, takeLastImage);
             await prisma.generationJob.update({ where: { id: genJob.id }, data: { externalTaskId: operationName } });
             await prisma.ugcGeneratedTake.update({ where: { id: take.id }, data: { status: "PROCESSING" } });
           } catch (retryErr) {

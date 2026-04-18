@@ -344,7 +344,10 @@ async function detectSceneChanges(videoPath: string, durationSeconds: number): P
 
 export interface ExtractedFrames {
   frames: Array<{ url: string; timestamp: number }>;
-  detectedSceneCount: number; // Número de cenas detectadas pelo ffmpeg
+  // Frame do FIM de cada cena (mesmo índice que `frames`). Veo Quality
+  // interpola de firstFrame → lastFrame → copia o motion da referência.
+  endFrames: Array<{ url: string; timestamp: number }>;
+  detectedSceneCount: number;
 }
 
 export async function extractKeyFrames(
@@ -385,12 +388,12 @@ export async function extractKeyFrames(
     let sceneChanges: number[] = [];
     let detectedSceneCount = 1;
     let timestamps: number[];
+    let endTimestamps: number[];
     let actualCount: number;
 
     if (geminiTimeRanges && geminiTimeRanges.length > 0) {
-      // Gemini timeRanges tem prioridade — Gemini vê troca de cor do mesmo
-      // vestido em mesma pose, ffmpeg scene-detect não. Extrai 1 frame por
-      // range (no meio do range pra pegar a roupa em exibição estável).
+      // Gemini timeRanges: extrai 2 frames por cena — início (5%) e fim (95%).
+      // Veo Quality interpola entre os dois → copia motion do reference.
       const clampedRanges = geminiTimeRanges
         .map((r) => ({
           start: Math.max(0, Math.min(r.start, duration - 0.2)),
@@ -399,8 +402,9 @@ export async function extractKeyFrames(
         .filter((r) => r.end > r.start);
       detectedSceneCount = clampedRanges.length;
       actualCount = clampedRanges.length;
-      timestamps = clampedRanges.map((r) => r.start + (r.end - r.start) * 0.5);
-      console.log(`[reference-video] using Gemini timeRanges (${clampedRanges.length} scenes): ${timestamps.map((t) => t.toFixed(1) + "s").join(", ")}`);
+      timestamps = clampedRanges.map((r) => r.start + (r.end - r.start) * 0.05);
+      endTimestamps = clampedRanges.map((r) => r.start + (r.end - r.start) * 0.95);
+      console.log(`[reference-video] using Gemini timeRanges (${clampedRanges.length} scenes), firstFrames: ${timestamps.map((t) => t.toFixed(1) + "s").join(", ")}, lastFrames: ${endTimestamps.map((t) => t.toFixed(1) + "s").join(", ")}`);
     } else {
       // Fallback: ffmpeg scene detection
       sceneChanges = await detectSceneChanges(videoPath, duration);
@@ -411,66 +415,68 @@ export async function extractKeyFrames(
       if (sceneChanges.length > 0 && detectedSceneCount >= actualCount) {
         const boundaries = [0, ...sceneChanges, duration];
         timestamps = [];
+        endTimestamps = [];
         for (let i = 0; i < boundaries.length - 1; i++) {
           const start = boundaries[i];
           const end = boundaries[i + 1];
-          timestamps.push(start + (end - start) * 0.4);
-        }
-      } else if (sceneChanges.length > 0 && actualCount > detectedSceneCount) {
-        timestamps = [];
-        for (let i = 0; i < actualCount; i++) {
-          timestamps.push(((i + 0.5) / actualCount) * duration);
+          timestamps.push(start + (end - start) * 0.05);
+          endTimestamps.push(start + (end - start) * 0.95);
         }
       } else {
         timestamps = [];
+        endTimestamps = [];
         for (let i = 0; i < actualCount; i++) {
-          timestamps.push(((i + 0.5) / actualCount) * duration);
+          const sceneStart = (i / actualCount) * duration;
+          const sceneEnd = ((i + 1) / actualCount) * duration;
+          timestamps.push(sceneStart + (sceneEnd - sceneStart) * 0.05);
+          endTimestamps.push(sceneStart + (sceneEnd - sceneStart) * 0.95);
         }
       }
     }
 
-    console.log(`[reference-video] extracting ${timestamps.length} frames at: ${timestamps.map((t) => t.toFixed(1) + "s").join(", ")}`);
+    console.log(`[reference-video] extracting ${timestamps.length} first+last frame pairs`);
 
-    const frames: Array<{ url: string; timestamp: number }> = [];
-    for (let i = 0; i < timestamps.length; i++) {
-      const ts = Math.min(timestamps[i], duration - 0.1);
-      const framePath = join(tmpDir, `frame-${i}.jpg`);
+    const extractAndUpload = async (ts: number, tag: string, idx: number): Promise<{ url: string; timestamp: number }> => {
+      const clamped = Math.min(Math.max(ts, 0.05), duration - 0.1);
+      const framePath = join(tmpDir, `frame-${tag}-${idx}.jpg`);
       allFiles.push(framePath);
 
       await new Promise<void>((resolve, reject) => {
         ffmpeg(videoPath)
-          .seekInput(ts)
+          .seekInput(clamped)
           .frames(1)
-          // Center-crop para 9:16 vertical (UGC/TikTok/Reels) ANTES de sair do ffmpeg.
-          // Reference videos costumam ser 16:9 → se não cortarmos, o Nano Banana
-          // recebe uma imagem landscape e o Veo acaba empurrando ela pra 9:16
-          // com letterbox (borda preta em cima e embaixo). Crop aqui garante que
-          // toda a cadeia (Nano Banana → Veo → assembly) trabalha em 9:16 nativo.
-          .videoFilters([
-            "crop='min(iw\\,ih*9/16)':'min(ih\\,iw*16/9)'",
-          ])
+          .videoFilters(["crop='min(iw\\,ih*9/16)':'min(ih\\,iw*16/9)'"])
           .outputOptions(["-q:v", "2"])
           .output(framePath)
           .on("end", () => resolve())
           .on("error", (err: Error) => {
-            console.error(`[reference-video] frame ${i} extraction error at ${ts}s:`, err.message);
+            console.error(`[reference-video] frame ${tag}-${idx} extraction error at ${clamped}s:`, err.message);
             reject(err);
           })
           .run();
       });
 
       const frameBuf = await readFile(framePath);
-      console.log(`[reference-video] frame ${i} extracted: ${frameBuf.length} bytes at ${ts.toFixed(1)}s`);
-      const blob = await put(`ugc-ref-frame-${videoId}-take${i + 1}.jpg`, frameBuf, {
+      const blob = await put(`ugc-ref-frame-${videoId}-${tag}${idx + 1}.jpg`, frameBuf, {
         access: "public",
         contentType: "image/jpeg",
         addRandomSuffix: false,
       });
-      frames.push({ url: blob.url, timestamp: ts });
+      return { url: blob.url, timestamp: clamped };
+    };
+
+    const frames: Array<{ url: string; timestamp: number }> = [];
+    const endFrames: Array<{ url: string; timestamp: number }> = [];
+    for (let i = 0; i < timestamps.length; i++) {
+      const first = await extractAndUpload(timestamps[i], "take", i);
+      const last = await extractAndUpload(endTimestamps[i], "endtake", i);
+      frames.push(first);
+      endFrames.push(last);
+      console.log(`[reference-video] scene ${i + 1}: first=${first.timestamp.toFixed(2)}s last=${last.timestamp.toFixed(2)}s`);
     }
 
-    console.log(`[reference-video] all ${frames.length} frames extracted and uploaded`);
-    return { frames, detectedSceneCount };
+    console.log(`[reference-video] ${frames.length} first+last pairs extracted`);
+    return { frames, endFrames, detectedSceneCount };
   } catch (err) {
     console.error("[reference-video] frame extraction failed:", err);
     return null;
