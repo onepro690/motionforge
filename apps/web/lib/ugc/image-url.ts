@@ -11,7 +11,7 @@ const PROXY_HOSTS = [
 ];
 
 export function proxyImage(url: string | null | undefined): string {
-  if (!url) return "";
+  if (!url || typeof url !== "string" || url.trim() === "") return "";
   try {
     const parsed = new URL(url);
     const needsProxy = PROXY_HOSTS.some(
@@ -22,4 +22,21 @@ export function proxyImage(url: string | null | undefined): string {
   } catch {
     return url;
   }
+}
+
+// onError handler: tenta URL direta (sem proxy) se o proxy falhar; se essa
+// também falhar, esconde o <img> pra não ficar ícone quebrado aparecendo.
+export function handleImageError(originalUrl: string | null | undefined) {
+  return (e: { currentTarget: HTMLImageElement }) => {
+    const img = e.currentTarget;
+    if (!originalUrl) {
+      img.style.display = "none";
+      return;
+    }
+    if (img.src === originalUrl) {
+      img.style.display = "none";
+      return;
+    }
+    img.src = originalUrl;
+  };
 }

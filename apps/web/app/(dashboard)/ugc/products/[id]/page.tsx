@@ -12,7 +12,7 @@ import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { toast } from "sonner";
-import { proxyImage } from "@/lib/ugc/image-url";
+import { proxyImage, handleImageError } from "@/lib/ugc/image-url";
 
 type ProductStatus = "DETECTED" | "UNDER_REVIEW" | "APPROVED" | "REJECTED" | "SAVED_FOR_LATER" | "USED_FOR_GENERATION";
 
@@ -337,6 +337,7 @@ export default function ProductDetailPage({ params }: { params: Promise<{ id: st
             <img
               src={proxyImage(product.thumbnailUrl)}
               alt={product.name}
+              onError={handleImageError(product.thumbnailUrl)}
               className="w-full md:w-48 h-48 rounded-2xl object-cover border border-white/10"
             />
           ) : (
@@ -616,6 +617,7 @@ export default function ProductDetailPage({ params }: { params: Promise<{ id: st
                       <img
                         src={proxyImage(video.thumbnailUrl)}
                         alt=""
+                        onError={handleImageError(video.thumbnailUrl)}
                         className="w-full aspect-[9/16] object-cover"
                       />
                     ) : (

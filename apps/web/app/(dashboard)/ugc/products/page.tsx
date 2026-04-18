@@ -11,7 +11,7 @@ import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { toast } from "sonner";
-import { proxyImage } from "@/lib/ugc/image-url";
+import { proxyImage, handleImageError } from "@/lib/ugc/image-url";
 
 interface Character {
   id: string;
@@ -391,7 +391,7 @@ export default function ProductsPage() {
               <div className="flex items-start justify-between gap-2">
                 <div className="flex gap-3">
                   {product.thumbnailUrl ? (
-                    <img src={proxyImage(product.thumbnailUrl)} alt={product.name} className="w-12 h-12 rounded-lg object-cover shrink-0" />
+                    <img src={proxyImage(product.thumbnailUrl)} alt={product.name} onError={handleImageError(product.thumbnailUrl)} className="w-12 h-12 rounded-lg object-cover shrink-0" />
                   ) : (
                     <div className="w-12 h-12 rounded-lg bg-violet-500/10 flex items-center justify-center shrink-0">
                       <TrendingUp className="w-5 h-5 text-violet-400" />
