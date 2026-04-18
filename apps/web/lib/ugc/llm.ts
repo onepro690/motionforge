@@ -375,6 +375,21 @@ export async function generateVeoPrompts(
     return parts.join(" ");
   };
 
+  // Hard people-count lock: Veo 3 tende a adicionar pessoas extras quando
+  // a cena tem movimento + múltiplas bocas falando. Reforçamos com um block
+  // dedicado que aparece em TODO prompt (speech e silent), sempre que o
+  // Gemini/TAKE_SPEC nos deu um número. Sem número → instruímos a copiar
+  // o input image.
+  const buildPeopleLock = (i: number): string => {
+    const spec = takeSpecs?.[i];
+    const sceneForTake = scenes?.[i];
+    const pc = spec?.peopleCount ?? sceneForTake?.peopleCount ?? null;
+    if (pc && pc > 0) {
+      return `PEOPLE COUNT LOCK: the scene shows EXACTLY ${pc} ${pc === 1 ? "person" : "people"} — no more, no less. Do NOT add a ${pc + 1}${pc + 1 === 2 ? "nd" : pc + 1 === 3 ? "rd" : "th"} person, do NOT duplicate anyone, do NOT spawn bystanders/reflections/background people, do NOT split one person into multiple. If the input image has ${pc} ${pc === 1 ? "person" : "people"}, keep exactly ${pc} throughout the entire take.`;
+    }
+    return `PEOPLE COUNT LOCK: match the exact number of people visible in the input image. Do NOT add extra people, do NOT duplicate anyone, do NOT spawn bystanders or reflections. If the input image shows 1 person keep 1; if it shows 2 people keep 2; etc.`;
+  };
+
   const result: VeoPrompts = {};
   for (let i = 0; i < takeCount; i++) {
     const key = `take${i + 1}`;
@@ -382,6 +397,7 @@ export async function generateVeoPrompts(
     const sceneForTake = scenes?.[i];
     const spec = takeSpecs?.[i];
     const referenceBlock = buildReferenceBlock(i);
+    const peopleLock = buildPeopleLock(i);
 
     let prompt: string;
 
@@ -406,7 +422,7 @@ export async function generateVeoPrompts(
         speechBlock = `${reenactmentHeader} Vertical 9:16 UGC video. The person in the input image speaks DIRECTLY TO CAMERA with natural lip-sync in BRAZILIAN PORTUGUESE (pt-BR). They say LITERALLY these ${wordCount} words, word-for-word, no paraphrasing, no additions, no removals, no translations, no English, no mumbling: "${takeScript}". Pronounce every word exactly as written. Start speaking within the first 0.3 seconds. Finish the last word before the take ends. After the last word close the mouth and stop — do NOT add any extra speech. AUDIO TRACK: ONLY the person's voice speaking this exact Portuguese text — ZERO background music, ZERO sound effects, ZERO other voices, ZERO other languages, ZERO singing.`;
       }
 
-      prompt = `${noTextLock} ${aspectLock} ${speechBlock} ${referenceBlock} ${sceneLock} ${colorLock} ${identityLock} ${forbidList} ${anatomyShort} ${noTextLock}`;
+      prompt = `${noTextLock} ${aspectLock} ${speechBlock} ${peopleLock} ${referenceBlock} ${sceneLock} ${colorLock} ${identityLock} ${forbidList} ${anatomyShort} ${noTextLock}`;
 
       // Pronunciation (opcional)
       if (/\bcarrinho\b/i.test(takeScript)) {
@@ -436,6 +452,11 @@ export async function generateVeoPrompts(
           prompt += ` This is the final take — end cleanly.`;
         }
       }
+
+      // Tail reinforcement: Veo pesa começo E fim do prompt. Repetimos o
+      // texto literal no final pra bloquear qualquer tendência de improvisar
+      // palavras diferentes ou parafrasear no meio da fala.
+      prompt += ` FINAL DIALOG LOCK: the spoken line in this take is EXACTLY this Brazilian Portuguese text and nothing else: "${takeScript}". Do not add words, do not skip words, do not translate, do not paraphrase, do not change order, do not substitute synonyms. Every syllable must match.`;
     } else {
       // ── FASHION_SILENT_EXACT_MATCH_MODE / VOICEOVER ────────────────────
       // Vídeo silencioso: boca fechada, cenário fixo, só a pessoa é trocada.
@@ -446,7 +467,7 @@ export async function generateVeoPrompts(
         ? `${reenactmentHeader} Vertical 9:16 UGC video — ABSOLUTELY SILENT reenactment. The person's MOUTH MUST STAY CLOSED throughout the entire take — NO lip-sync, NO dialogue, NO speech, NO voiceover in any language, NO singing, NO whispering, NO mouthing of words. The person NEVER speaks and NEVER moves their lips in a way that implies speech. AUDIO TRACK: only the ambient/music feel of the reference — ZERO voices.`
         : `${reenactmentHeader} Vertical 9:16 UGC video. No on-camera speech in this take — the narration will be added as voice-over in post. Keep the mouth relaxed and closed unless the reference specifically shows it moving.`;
 
-      prompt = `${noTextLock} ${aspectLock} ${silentHeader} ${referenceBlock} ${sceneLock} ${colorLock} ${identityLock} ${forbidList} ${anatomyShort} ${noTextLock}`;
+      prompt = `${noTextLock} ${aspectLock} ${silentHeader} ${peopleLock} ${referenceBlock} ${sceneLock} ${colorLock} ${identityLock} ${forbidList} ${anatomyShort} ${noTextLock}`;
 
       // Para takes silent, o raw do GPT-4o é descartado — só rebaixa a
       // densidade do prompt e pode introduzir linguagem generativa.

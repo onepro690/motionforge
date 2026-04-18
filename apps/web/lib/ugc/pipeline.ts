@@ -23,6 +23,32 @@ import { execFile } from "child_process";
 
 ffmpeg.setFfmpegPath(ffmpegInstaller.path);
 
+// Parse Gemini timeRange strings ("0-2.5s", "2.5s-5s", "00:02-00:05") into
+// {start, end} seconds. Retorna null para ranges inválidos. Gemini pode
+// variar o formato entre cenas, então precisamos ser tolerantes.
+function parseGeminiTimeRange(raw: string | undefined | null): { start: number; end: number } | null {
+  if (!raw || typeof raw !== "string") return null;
+  const clean = raw.trim().toLowerCase().replace(/s\b/g, "").replace(/\s+/g, "");
+  // Aceita "0-2.5", "2.5-5", "00:02-00:05" (mm:ss)
+  const parts = clean.split(/[-–—]/);
+  if (parts.length !== 2) return null;
+  const toSec = (v: string): number | null => {
+    if (!v) return null;
+    if (v.includes(":")) {
+      const [m, s] = v.split(":").map((x) => parseFloat(x));
+      if (isNaN(m) || isNaN(s)) return null;
+      return m * 60 + s;
+    }
+    const n = parseFloat(v);
+    return isNaN(n) ? null : n;
+  };
+  const start = toSec(parts[0]);
+  const end = toSec(parts[1]);
+  if (start === null || end === null) return null;
+  if (end <= start) return null;
+  return { start, end };
+}
+
 // Get video duration using ffmpeg (no ffprobe needed)
 function getVideoDurationFfmpeg(videoPath: string): Promise<number> {
   return new Promise((resolve) => {
@@ -672,8 +698,22 @@ export async function runVideoPipeline(
     }
 
     if (refPlayUrl) {
-      await log(videoId, "extract_keyframes", "started", `duration=${refDuration ?? "unknown"}, targetTakes=${takeCount}, geminiProvided=${geminiProvidedSceneCount}`);
-      const keyframes = await extractKeyFrames(refPlayUrl, videoId, takeCount, refDuration).catch(async (e) => {
+      // Parse timeRanges do Gemini — prioridade máxima sobre ffmpeg scene-detect
+      // porque Gemini entende semanticamente quando um mesmo vestido troca de
+      // cor em mesma pose (caso em que histograma ffmpeg falha).
+      const parsedGeminiRanges = referenceScenes
+        .map((s) => parseGeminiTimeRange(s?.timeRange))
+        .filter((r): r is { start: number; end: number } => r !== null);
+      const useGeminiRanges = parsedGeminiRanges.length > 0 && refDuration && refDuration > 0;
+
+      await log(videoId, "extract_keyframes", "started", `duration=${refDuration ?? "unknown"}, targetTakes=${takeCount}, geminiProvided=${geminiProvidedSceneCount}, geminiRanges=${useGeminiRanges ? parsedGeminiRanges.length : 0}`);
+      const keyframes = await extractKeyFrames(
+        refPlayUrl,
+        videoId,
+        takeCount,
+        refDuration,
+        useGeminiRanges ? parsedGeminiRanges : null
+      ).catch(async (e) => {
         const msg = e instanceof Error ? e.message : String(e);
         console.error("[pipeline] extractKeyFrames error:", msg);
         await log(videoId, "extract_keyframes", "failed", `ERROR: ${msg.slice(0, 500)}`);

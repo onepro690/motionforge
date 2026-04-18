@@ -351,7 +351,12 @@ export async function extractKeyFrames(
   playUrl: string,
   videoId: string,
   targetCount: number = 3,
-  durationSeconds?: number | null
+  durationSeconds?: number | null,
+  // timeRanges do Gemini: prioridade máxima porque Gemini vê o conteúdo
+  // semântico (troca de cor do mesmo vestido em mesma pose, que ffmpeg
+  // scene-detect pode falhar em pegar). Se vier preenchido, extrai 1
+  // frame por range e ignora ffmpeg scene detection.
+  geminiTimeRanges?: Array<{ start: number; end: number }> | null
 ): Promise<ExtractedFrames | null> {
   const id = randomBytes(8).toString("hex");
   const tmpDir = join("/tmp", `ugc-frames-${id}`);
@@ -377,47 +382,50 @@ export async function extractKeyFrames(
       return null;
     }
 
-    // Detecta pontos de corte/mudança de cena com ffmpeg
-    const sceneChanges = await detectSceneChanges(videoPath, duration);
-    // Número de cenas = cortes + 1 (a primeira cena começa no início)
-    const detectedSceneCount = sceneChanges.length + 1;
-    console.log(`[reference-video] detected ${detectedSceneCount} scenes (${sceneChanges.length} cuts)`);
-
-    // Usa o maior entre targetCount (do pipeline) e detectedSceneCount (do ffmpeg)
-    const actualCount = Math.max(targetCount, detectedSceneCount);
-
-    // Calcula timestamps:
-    // 1) Se temos cortes reais E targetCount <= cenas detectadas:
-    //    → frame no MEIO de cada segmento entre cortes (captura cada roupa/cena)
-    // 2) Se targetCount > cenas (ex: speech video 50s com 1 cena):
-    //    → intervalos iguais ao longo do vídeo (frames espaçados pro speech)
-    // 3) Se sem cortes:
-    //    → intervalos iguais
+    let sceneChanges: number[] = [];
+    let detectedSceneCount = 1;
     let timestamps: number[];
-    if (sceneChanges.length > 0 && detectedSceneCount >= actualCount) {
-      // Pontos de corte reais → frame a 40% do segmento (evita motion blur
-      // dos dois lados — imediatamente após corte e antes do próximo corte
-      // costumam ter zoom/motion que cortam a pessoa no frame).
-      const boundaries = [0, ...sceneChanges, duration];
-      timestamps = [];
-      for (let i = 0; i < boundaries.length - 1; i++) {
-        const start = boundaries[i];
-        const end = boundaries[i + 1];
-        timestamps.push(start + (end - start) * 0.4);
-      }
-    } else if (sceneChanges.length > 0 && actualCount > detectedSceneCount) {
-      // Mais takes necessários que cenas detectadas (ex: speech video).
-      // Usa cortes como base e adiciona frames extras em intervalos iguais.
-      // Para speech: frames espaçados uniformemente cobrem todo o vídeo.
-      timestamps = [];
-      for (let i = 0; i < actualCount; i++) {
-        timestamps.push(((i + 0.5) / actualCount) * duration);
-      }
+    let actualCount: number;
+
+    if (geminiTimeRanges && geminiTimeRanges.length > 0) {
+      // Gemini timeRanges tem prioridade — Gemini vê troca de cor do mesmo
+      // vestido em mesma pose, ffmpeg scene-detect não. Extrai 1 frame por
+      // range (no meio do range pra pegar a roupa em exibição estável).
+      const clampedRanges = geminiTimeRanges
+        .map((r) => ({
+          start: Math.max(0, Math.min(r.start, duration - 0.2)),
+          end: Math.max(0, Math.min(r.end, duration)),
+        }))
+        .filter((r) => r.end > r.start);
+      detectedSceneCount = clampedRanges.length;
+      actualCount = clampedRanges.length;
+      timestamps = clampedRanges.map((r) => r.start + (r.end - r.start) * 0.5);
+      console.log(`[reference-video] using Gemini timeRanges (${clampedRanges.length} scenes): ${timestamps.map((t) => t.toFixed(1) + "s").join(", ")}`);
     } else {
-      // Sem cortes → intervalos iguais
-      timestamps = [];
-      for (let i = 0; i < actualCount; i++) {
-        timestamps.push(((i + 0.5) / actualCount) * duration);
+      // Fallback: ffmpeg scene detection
+      sceneChanges = await detectSceneChanges(videoPath, duration);
+      detectedSceneCount = sceneChanges.length + 1;
+      console.log(`[reference-video] detected ${detectedSceneCount} scenes (${sceneChanges.length} cuts)`);
+      actualCount = Math.max(targetCount, detectedSceneCount);
+
+      if (sceneChanges.length > 0 && detectedSceneCount >= actualCount) {
+        const boundaries = [0, ...sceneChanges, duration];
+        timestamps = [];
+        for (let i = 0; i < boundaries.length - 1; i++) {
+          const start = boundaries[i];
+          const end = boundaries[i + 1];
+          timestamps.push(start + (end - start) * 0.4);
+        }
+      } else if (sceneChanges.length > 0 && actualCount > detectedSceneCount) {
+        timestamps = [];
+        for (let i = 0; i < actualCount; i++) {
+          timestamps.push(((i + 0.5) / actualCount) * duration);
+        }
+      } else {
+        timestamps = [];
+        for (let i = 0; i < actualCount; i++) {
+          timestamps.push(((i + 0.5) / actualCount) * duration);
+        }
       }
     }
 
