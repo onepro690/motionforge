@@ -710,11 +710,15 @@ export async function runVideoPipeline(
         const editedByFrame: Record<number, { data: string; mimeType: string } | null> = {};
         const editedUrlByFrame: Record<number, string | null> = {};
 
-        // Pool de outfits UGC pra variar a roupa entre takes — usuário pediu
-        // "nunca repetir a mesma roupa". Cada frame distinto (não continuação)
-        // recebe um outfit único, preservando identidade e cenário.
-        // Frames marcados continuesPreviousScene=true herdam a imagem anterior
-        // (incluindo a roupa), então a continuidade narrativa é mantida.
+        // Outfit override só se aplica a vídeos de FALA. Em vídeos fashion
+        // (sem fala) cada keyframe do reference JÁ representa uma roupa
+        // diferente — o Nano Banana deve COPIAR a roupa do frame, não trocar
+        // por outra. Se sobrescrevêssemos, perderíamos as roupas reais que
+        // o usuário quer mostrar.
+        //
+        // Para vídeos de fala, o reference costuma repetir a mesma roupa em
+        // todos os takes (mesma cena falando). Aí o pool varia a roupa por
+        // take pra dar frescor visual.
         const outfitPool = [
           "casual oversized beige cropped t-shirt with light-wash straight jeans, minimal gold necklace",
           "soft pastel pink knit cardigan over a white ribbed tank top, high-waist denim shorts",
@@ -743,10 +747,14 @@ export async function runVideoPipeline(
           const sceneGroupInfo = sceneForFrame && sceneForFrame.peopleCount && sceneForFrame.peopleCount > 1
             ? { peopleCount: sceneForFrame.peopleCount, description: sceneForFrame.visuals }
             : null;
-          // Só aplica outfit override quando NÃO é grupo (grupo precisa manter
-          // as roupas originais de todos pra preservar a cena). Single person
-          // em cada frame distinto ganha outfit único.
-          const outfitForFrame = !sceneGroupInfo ? pickOutfit(fi) : null;
+          // Outfit override só em vídeos de FALA single-person.
+          // - Fashion (hasNarration=false): cada keyframe já traz uma roupa
+          //   distinta do reference — precisa COPIAR, não trocar. User pediu
+          //   explicitamente "usar exatamente a mesma roupa do reference".
+          // - Grupo: manter composição original.
+          // - Fala single-person: reference costuma repetir mesma roupa,
+          //   variamos por take pra dar frescor.
+          const outfitForFrame = hasNarration && !sceneGroupInfo ? pickOutfit(fi) : null;
           await log(videoId, `nano_banana_frame${fi + 1}`, "started",
             `[${mode}] frame ${fi + 1}${prevRefUrl ? " + prev take result" : ""}${sceneGroupInfo ? ` (GROUP: ${sceneGroupInfo.peopleCount} people)` : ""}${outfitForFrame ? ` (outfit: ${outfitForFrame.slice(0, 40)}...)` : ""}`);
           // 3 tentativas (Gemini imagens é estocástico — retry costuma funcionar).
