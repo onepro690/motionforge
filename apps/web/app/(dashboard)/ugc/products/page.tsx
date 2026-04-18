@@ -273,6 +273,23 @@ export default function ProductsPage() {
     }
   };
 
+  const [backfilling, setBackfilling] = useState(false);
+  const handleBackfillThumbs = async () => {
+    setBackfilling(true);
+    try {
+      const res = await fetch("/api/ugc/backfill-thumbs", { method: "POST" });
+      const json = await res.json();
+      if (res.ok) {
+        toast.success(`${json.fixed}/${json.total} imagens recuperadas`);
+        load();
+      } else {
+        toast.error(json.error ?? "Erro");
+      }
+    } finally {
+      setBackfilling(false);
+    }
+  };
+
   const filters = [
     { label: "Todos", value: "" },
     { label: "Detectados", value: "DETECTED" },
@@ -302,6 +319,17 @@ export default function ProductsPage() {
           >
             <Plus className="w-4 h-4 mr-2" />
             Adicionar Vídeo
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={handleBackfillThumbs}
+            disabled={backfilling}
+            className="border-white/10 text-white/70 hover:text-white"
+            title="Recupera thumbnails que expiraram do TikTok CDN"
+          >
+            {backfilling ? <Loader2 className="w-4 h-4 animate-spin mr-2" /> : <RefreshCw className="w-4 h-4 mr-2" />}
+            Recuperar Imagens
           </Button>
           <Button
             variant="outline"
