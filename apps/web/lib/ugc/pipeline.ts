@@ -186,12 +186,20 @@ async function submitVeoTake(
   modelId: string,
   accessToken: string,
   image?: { data: string; mimeType: string } | null,
-  durationSeconds: number = 8
+  durationSeconds: number = 8,
+  // lastFrame: quando disponível, restringe o Veo a interpolar entre
+  // firstFrame e lastFrame em vez de gerar 8s livres. Aumenta muito a
+  // fidelidade ao reference. Suportado no Quality (veo-3.0-generate-001);
+  // no Fast é ignorado pela API.
+  lastFrame?: { data: string; mimeType: string } | null
 ): Promise<string> {
   const veoModel = VEO3_MODEL_IDS[modelId] ?? "veo-3.0-fast-generate-001";
   const instance: Record<string, unknown> = { prompt };
   if (image) {
     instance.image = { bytesBase64Encoded: image.data, mimeType: image.mimeType };
+  }
+  if (lastFrame) {
+    instance.lastFrame = { bytesBase64Encoded: lastFrame.data, mimeType: lastFrame.mimeType };
   }
   const res = await fetch(`${VERTEX_BASE}/${veoModel}:predictLongRunning`, {
     method: "POST",
@@ -761,30 +769,11 @@ export async function runVideoPipeline(
         const editedByFrame: Record<number, { data: string; mimeType: string } | null> = {};
         const editedUrlByFrame: Record<number, string | null> = {};
 
-        // Outfit override só se aplica a vídeos de FALA. Em vídeos fashion
-        // (sem fala) cada keyframe do reference JÁ representa uma roupa
-        // diferente — o Nano Banana deve COPIAR a roupa do frame, não trocar
-        // por outra. Se sobrescrevêssemos, perderíamos as roupas reais que
-        // o usuário quer mostrar.
-        //
-        // Para vídeos de fala, o reference costuma repetir a mesma roupa em
-        // todos os takes (mesma cena falando). Aí o pool varia a roupa por
-        // take pra dar frescor visual.
-        const outfitPool = [
-          "casual oversized beige cropped t-shirt with light-wash straight jeans, minimal gold necklace",
-          "soft pastel pink knit cardigan over a white ribbed tank top, high-waist denim shorts",
-          "structured black blazer over a white fitted tee, slim dark jeans, small hoop earrings",
-          "loose sage-green linen button-up shirt with wide-leg cream trousers",
-          "vintage navy-blue cropped sweater with high-waist mom jeans and a thin leather belt",
-          "bright terracotta oversized hoodie with matching biker shorts, athleisure vibe",
-          "white long-sleeve fitted bodysuit with caramel-colored pleated midi skirt",
-          "black athletic crop top with grey joggers, sporty minimalist look",
-          "soft lavender off-shoulder sweater with light grey wide-leg sweatpants",
-          "classic denim jacket over a plain white tee with black leggings and dainty jewelry",
-        ];
-        // Permuta baseada no videoId pra cada vídeo ter outfits diferentes.
-        const outfitSeed = videoId.split("").reduce((a, c) => a + c.charCodeAt(0), 0);
-        const pickOutfit = (idx: number) => outfitPool[(outfitSeed + idx) % outfitPool.length];
+        // STRICT FIDELITY: sempre copiar a roupa do frame de referência.
+        // Em TODOS os modos (fala, silent, fashion, grupo) o Nano Banana deve
+        // reproduzir a roupa do reference — NUNCA sobrescrever por outra.
+        // Tentamos "variar" outfit antes e isso quebrou a fidelidade: o user
+        // quer ver o vídeo de referência recriado, não uma versão estilizada.
 
         // Edita os frames visuais distintos.
         // Frame 0 roda SEQUENCIAL (estabelece a referência de consistência).
@@ -798,16 +787,10 @@ export async function runVideoPipeline(
           const sceneGroupInfo = sceneForFrame && sceneForFrame.peopleCount && sceneForFrame.peopleCount > 1
             ? { peopleCount: sceneForFrame.peopleCount, description: sceneForFrame.visuals }
             : null;
-          // Outfit override só em vídeos de FALA single-person.
-          // - Fashion (hasNarration=false): cada keyframe já traz uma roupa
-          //   distinta do reference — precisa COPIAR, não trocar. User pediu
-          //   explicitamente "usar exatamente a mesma roupa do reference".
-          // - Grupo: manter composição original.
-          // - Fala single-person: reference costuma repetir mesma roupa,
-          //   variamos por take pra dar frescor.
-          const outfitForFrame = hasNarration && !sceneGroupInfo ? pickOutfit(fi) : null;
+          // FIDELITY MODE: nunca sobrescrever a roupa — copiar 100% do reference.
+          const outfitForFrame: string | null = null;
           await log(videoId, `nano_banana_frame${fi + 1}`, "started",
-            `[${mode}] frame ${fi + 1}${prevRefUrl ? " + prev take result" : ""}${sceneGroupInfo ? ` (GROUP: ${sceneGroupInfo.peopleCount} people)` : ""}${outfitForFrame ? ` (outfit: ${outfitForFrame.slice(0, 40)}...)` : ""}`);
+            `[${mode}] frame ${fi + 1}${prevRefUrl ? " + prev take result" : ""}${sceneGroupInfo ? ` (GROUP: ${sceneGroupInfo.peopleCount} people)` : ""}`);
           // 3 tentativas (Gemini imagens é estocástico — retry costuma funcionar).
           // Após a 1ª falha, re-injeta take1ResultUrl se tivermos — amarra identidade.
           const doSwap = (withPrev: string | null) => phenotypeOnlyMode
