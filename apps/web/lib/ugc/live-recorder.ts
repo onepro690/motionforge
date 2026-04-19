@@ -353,12 +353,9 @@ export async function finalizeRecording(id: string) {
         "-y",
         "-loglevel", "error",
         "-protocol_whitelist", "file,http,https,tcp,tls",
-        // Timeouts de rede pra HTTPS dos chunks.
-        "-rw_timeout", "15000000",
-        "-reconnect", "1",
-        "-reconnect_streamed", "1",
-        "-reconnect_delay_max", "3",
         // Tolerância a chunks com erros/desalinhamento de timestamp.
+        // (não usar -reconnect/-rw_timeout aqui — são opções de protocolo
+        // HTTP que o ffmpeg rejeita quando input é o concat demuxer)
         "-fflags", "+genpts+discardcorrupt+igndts",
         "-err_detect", "ignore_err",
         "-f", "concat",
