@@ -1,82 +1,22 @@
-// Fidelity Clone Mode — usa Half-Moon AI Video Face Swap via Fal pra
-// trocar SÓ o rosto do vídeo de referência pelo avatar do usuário. O modelo
-// opera frame-a-frame internamente preservando motion, timing, lip-sync e
-// áudio originais. É o único caminho que cumpre "copia 100%, só troca
-// personagem" produzindo vídeo com movimento real (não slideshow).
+// Fidelity Clone Mode — usa Pixverse Swap via Fal pra trocar a pessoa do
+// vídeo de referência pelo avatar do usuário. O modelo opera no vídeo
+// nativamente preservando motion, timing e áudio (original_sound_switch=true).
+// Produz vídeo com movimento real (não slideshow).
 //
 // Pipeline:
 //   1. Pega mp4 do TikTok via tikwm (URL direta sem watermark)
-//   2. Detecta gênero do avatar via Gemini (requisito da API)
-//   3. Submete job pro fal queue: source_face_url_1 + target_video_url
-//   4. Polla até concluir
-//   5. Rehospeda no Vercel Blob + update DB
+//   2. Submete job pro fal queue: image_url + video_url + mode=person
+//   3. Polla até concluir
+//   4. Rehospeda no Vercel Blob + update DB
 
 import { prisma } from "@motion/database";
 import { put } from "@vercel/blob";
 import { fetchTikwmDetail } from "./reference-video";
 
 const FAL_QUEUE = "https://queue.fal.run";
-const FAL_MODEL = "half-moon-ai/ai-face-swap/faceswapvideo";
+const FAL_MODEL = "fal-ai/pixverse/swap";
 const POLL_INTERVAL_MS = 5000;
 const MAX_POLL_MS = 270000; // 4.5min — margem pra 300s maxDuration
-
-type Gender = "male" | "female" | "non-binary";
-
-async function fetchImageBase64(url: string): Promise<{ data: string; mimeType: string } | null> {
-  try {
-    const res = await fetch(url, { signal: AbortSignal.timeout(15000) });
-    if (!res.ok) return null;
-    const data = Buffer.from(await res.arrayBuffer()).toString("base64");
-    const mimeType = res.headers.get("content-type") ?? "image/jpeg";
-    return { data, mimeType };
-  } catch {
-    return null;
-  }
-}
-
-// Half-Moon exige source_gender_1. Se errar, o swap não encontra o rosto
-// alvo no vídeo. Gemini 2.5 Flash resolve isso em ~2s.
-async function detectGender(avatarUrl: string): Promise<Gender> {
-  const apiKey = process.env.GOOGLE_AI_API_KEY?.trim();
-  if (!apiKey) return "female";
-
-  const img = await fetchImageBase64(avatarUrl);
-  if (!img) return "female";
-
-  try {
-    const res = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          contents: [
-            {
-              parts: [
-                {
-                  text: "Look at this person's photo. Reply with EXACTLY one word, no punctuation: 'male', 'female', or 'non-binary' based on apparent gender presentation.",
-                },
-                { inline_data: { mime_type: img.mimeType, data: img.data } },
-              ],
-            },
-          ],
-        }),
-        signal: AbortSignal.timeout(15000),
-      }
-    );
-    const data = (await res.json()) as {
-      candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }>;
-    };
-    const text = data.candidates?.[0]?.content?.parts?.[0]?.text?.trim().toLowerCase() ?? "";
-    console.log(`[fidelity-clone] gender detection → "${text}"`);
-    if (text.includes("non")) return "non-binary";
-    if (/^|\s(male)(\s|$)/.test(text) && !text.includes("female")) return "male";
-    return "female";
-  } catch (err) {
-    console.warn("[fidelity-clone] gender detection failed:", err);
-    return "female";
-  }
-}
 
 interface FalQueueSubmit {
   request_id: string;
@@ -96,9 +36,8 @@ interface FalVideoResult {
 }
 
 async function submitFaceSwapJob(params: {
-  sourceFaceUrl: string;
-  targetVideoUrl: string;
-  sourceGender: Gender;
+  imageUrl: string;
+  videoUrl: string;
 }): Promise<FalQueueSubmit> {
   const apiKey = process.env.FAL_KEY;
   if (!apiKey) throw new Error("FAL_KEY not configured");
@@ -107,9 +46,11 @@ async function submitFaceSwapJob(params: {
     method: "POST",
     headers: { Authorization: `Key ${apiKey}`, "Content-Type": "application/json" },
     body: JSON.stringify({
-      source_face_url_1: params.sourceFaceUrl,
-      source_gender_1: params.sourceGender,
-      target_video_url: params.targetVideoUrl,
+      video_url: params.videoUrl,
+      image_url: params.imageUrl,
+      mode: "person",
+      resolution: "720p",
+      original_sound_switch: true,
     }),
   });
   if (!res.ok) {
@@ -197,23 +138,14 @@ export async function runFidelityClone(videoId: string): Promise<void> {
   const detail = await fetchTikwmDetail(reference.videoUrl);
   if (!detail?.playUrl) throw new Error("Falha ao obter mp4 do TikTok via tikwm");
 
-  // Detecta gênero do avatar — Half-Moon exige source_gender_1 pra match.
-  await prisma.ugcGeneratedVideo.update({
-    where: { id: videoId },
-    data: { currentStep: "fidelity_clone_detecting_gender" },
-  });
-  const gender = await detectGender(video.character.imageUrl);
-  console.log(`[fidelity-clone] using gender=${gender} for avatar swap`);
-
   // Submete o job
   await prisma.ugcGeneratedVideo.update({
     where: { id: videoId },
     data: { currentStep: "fidelity_clone_submitting_fal" },
   });
   const submit = await submitFaceSwapJob({
-    sourceFaceUrl: video.character.imageUrl,
-    targetVideoUrl: detail.playUrl,
-    sourceGender: gender,
+    imageUrl: video.character.imageUrl,
+    videoUrl: detail.playUrl,
   });
   console.log(`[fidelity-clone] fal job submitted: ${submit.request_id}`);
 
