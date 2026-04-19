@@ -1,5 +1,6 @@
 // Cron: poll Vertex AI operations pra vídeos UGC em GENERATING_TAKES e
 // avança o pipeline (assembly) quando todos os takes terminam.
+// Também lida com fidelity clone (Fal queue) — detectado via transitionMode.
 //
 // Sem este cron, videos ficam presos aguardando alguém abrir a página
 // individual (que dispara pollAndAssembleTakes).
@@ -10,6 +11,7 @@
 import { NextResponse } from "next/server";
 import { prisma } from "@motion/database";
 import { pollAndAssembleTakes } from "@/lib/ugc/pipeline";
+import { pollFidelityClone, isFidelityClone } from "@/lib/ugc/fidelity-clone";
 
 export const maxDuration = 300;
 export const runtime = "nodejs";
@@ -25,14 +27,19 @@ export async function GET(req: Request) {
     where: { status: "GENERATING_TAKES" },
     orderBy: { createdAt: "asc" },
     take: 10,
-    select: { id: true },
+    select: { id: true, transitionMode: true },
   });
 
   const results: Array<{ id: string; status: string; ok: boolean; error?: string }> = [];
   for (const v of pending) {
     try {
-      const r = await pollAndAssembleTakes(v.id);
-      results.push({ id: v.id, status: r.status, ok: true });
+      if (isFidelityClone(v)) {
+        const r = await pollFidelityClone(v.id);
+        results.push({ id: v.id, status: r.status, ok: true });
+      } else {
+        const r = await pollAndAssembleTakes(v.id);
+        results.push({ id: v.id, status: r.status, ok: true });
+      }
     } catch (err) {
       results.push({
         id: v.id,

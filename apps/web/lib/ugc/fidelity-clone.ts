@@ -3,11 +3,13 @@
 // nativamente preservando motion, timing e áudio (original_sound_switch=true).
 // Produz vídeo com movimento real (não slideshow).
 //
-// Pipeline:
-//   1. Pega mp4 do TikTok via tikwm (URL direta sem watermark)
-//   2. Submete job pro fal queue: image_url + video_url + mode=person
-//   3. Polla até concluir
-//   4. Rehospeda no Vercel Blob + update DB
+// Arquitetura fire-and-forget:
+//   - startFidelityClone: submete job pro Fal e salva request_id em
+//     currentStep. Marca status=GENERATING_TAKES pra cron assumir.
+//   - pollFidelityClone (cron): checa status do Fal. Se COMPLETED, baixa
+//     o mp4, rehospeda no Blob e marca AWAITING_REVIEW. Se FAILED, marca
+//     FAILED. Se ainda processando, retorna pra tentar de novo no próximo
+//     tick do cron (a cada 2min).
 
 import { prisma } from "@motion/database";
 import { put } from "@vercel/blob";
@@ -15,13 +17,11 @@ import { fetchTikwmDetail } from "./reference-video";
 
 const FAL_QUEUE = "https://queue.fal.run";
 const FAL_MODEL = "fal-ai/pixverse/swap";
-const POLL_INTERVAL_MS = 5000;
-const MAX_POLL_MS = 270000; // 4.5min — margem pra 300s maxDuration
+const FIDELITY_STEP_PREFIX = "fidelity_clone_processing_";
+const FIDELITY_MAX_AGE_MS = 30 * 60 * 1000; // 30min — Pixverse típico <5min
 
 interface FalQueueSubmit {
   request_id: string;
-  status_url?: string;
-  response_url?: string;
 }
 
 interface FalStatus {
@@ -33,6 +33,16 @@ interface FalVideoResult {
   video?: { url: string; file_size?: number; content_type?: string };
   file?: { url: string; file_size?: number; content_type?: string };
   output?: { url: string };
+}
+
+export function extractFidelityRequestId(currentStep: string | null): string | null {
+  if (!currentStep) return null;
+  if (!currentStep.startsWith(FIDELITY_STEP_PREFIX)) return null;
+  return currentStep.slice(FIDELITY_STEP_PREFIX.length) || null;
+}
+
+export function isFidelityClone(video: { transitionMode?: string | null }): boolean {
+  return video.transitionMode === "fidelity_clone";
 }
 
 async function submitFaceSwapJob(params: {
@@ -60,49 +70,7 @@ async function submitFaceSwapJob(params: {
   return (await res.json()) as FalQueueSubmit;
 }
 
-async function pollFalJob(requestId: string): Promise<string> {
-  const apiKey = process.env.FAL_KEY!;
-  const statusUrl = `${FAL_QUEUE}/${FAL_MODEL}/requests/${requestId}/status`;
-  const resultUrl = `${FAL_QUEUE}/${FAL_MODEL}/requests/${requestId}`;
-
-  const start = Date.now();
-  while (Date.now() - start < MAX_POLL_MS) {
-    const statusRes = await fetch(statusUrl, {
-      headers: { Authorization: `Key ${apiKey}` },
-      signal: AbortSignal.timeout(15000),
-    });
-    if (!statusRes.ok) {
-      console.warn(`[fidelity-clone] poll status ${statusRes.status} — retrying`);
-      await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
-      continue;
-    }
-    const status = (await statusRes.json()) as FalStatus;
-    console.log(`[fidelity-clone] fal job ${requestId} status=${status.status}`);
-
-    if (status.status === "COMPLETED") {
-      const r = await fetch(resultUrl, {
-        headers: { Authorization: `Key ${apiKey}` },
-        signal: AbortSignal.timeout(30000),
-      });
-      if (!r.ok) throw new Error(`Fal result fetch failed: ${r.status}`);
-      const result = (await r.json()) as FalVideoResult;
-      const videoUrl = result.video?.url ?? result.file?.url ?? result.output?.url;
-      if (!videoUrl) {
-        throw new Error(`Fal completed but no video URL in result: ${JSON.stringify(result).slice(0, 300)}`);
-      }
-      return videoUrl;
-    }
-    if (status.status === "FAILED") {
-      const logs = (status.logs ?? []).map((l) => l.message).join(" | ");
-      throw new Error(`Fal job failed: ${logs || "no logs"}`);
-    }
-
-    await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
-  }
-  throw new Error(`Fal job ${requestId} timed out after ${MAX_POLL_MS / 1000}s`);
-}
-
-export async function runFidelityClone(videoId: string): Promise<void> {
+export async function startFidelityClone(videoId: string): Promise<void> {
   const video = await prisma.ugcGeneratedVideo.findUnique({
     where: { id: videoId },
     include: {
@@ -118,11 +86,13 @@ export async function runFidelityClone(videoId: string): Promise<void> {
     throw new Error("FAL_KEY não configurado — fidelity clone requer fal.ai");
   }
 
-  // Cron poll-ugc-videos só pega GENERATING_TAKES, então usamos SUBMITTING_TAKES
-  // pra evitar race condition que marca o vídeo como FAILED falsamente.
   await prisma.ugcGeneratedVideo.update({
     where: { id: videoId },
-    data: { status: "SUBMITTING_TAKES", currentStep: "fidelity_clone_starting", generationStartedAt: new Date() },
+    data: {
+      status: "SUBMITTING_TAKES",
+      currentStep: "fidelity_clone_fetching_reference",
+      generationStartedAt: new Date(),
+    },
   });
 
   const reference = [...video.product.detectedVideos]
@@ -130,15 +100,9 @@ export async function runFidelityClone(videoId: string): Promise<void> {
     .find((v) => v.videoUrl);
   if (!reference?.videoUrl) throw new Error("Produto sem vídeo de referência com URL do TikTok");
 
-  await prisma.ugcGeneratedVideo.update({
-    where: { id: videoId },
-    data: { currentStep: "fidelity_clone_fetching_reference" },
-  });
-
   const detail = await fetchTikwmDetail(reference.videoUrl);
   if (!detail?.playUrl) throw new Error("Falha ao obter mp4 do TikTok via tikwm");
 
-  // Submete o job
   await prisma.ugcGeneratedVideo.update({
     where: { id: videoId },
     data: { currentStep: "fidelity_clone_submitting_fal" },
@@ -149,19 +113,94 @@ export async function runFidelityClone(videoId: string): Promise<void> {
   });
   console.log(`[fidelity-clone] fal job submitted: ${submit.request_id}`);
 
-  // Poll até concluir
+  // Salva duração e request_id. GENERATING_TAKES faz o cron assumir o polling.
   await prisma.ugcGeneratedVideo.update({
     where: { id: videoId },
-    data: { status: "ASSEMBLING", currentStep: `fidelity_clone_processing_${submit.request_id}` },
+    data: {
+      status: "GENERATING_TAKES",
+      currentStep: `${FIDELITY_STEP_PREFIX}${submit.request_id}`,
+      durationSeconds: detail.durationSeconds ?? null,
+    },
   });
-  const falOutputUrl = await pollFalJob(submit.request_id);
-  console.log(`[fidelity-clone] fal output: ${falOutputUrl}`);
+}
 
-  // Rehospeda no Blob pra ter URL persistente (Fal URLs expiram)
+// Chamada pelo cron. Uma iteração: checa status. Se pronto, finaliza. Se
+// ainda processando, retorna sem erro. Se timeout/falha, marca FAILED.
+export async function pollFidelityClone(videoId: string): Promise<{ status: string }> {
+  const video = await prisma.ugcGeneratedVideo.findUnique({
+    where: { id: videoId },
+    select: {
+      id: true,
+      currentStep: true,
+      generationStartedAt: true,
+    },
+  });
+  if (!video) throw new Error(`video ${videoId} not found`);
+
+  const requestId = extractFidelityRequestId(video.currentStep);
+  if (!requestId) {
+    throw new Error(`video ${videoId} não tem request_id em currentStep`);
+  }
+
+  const apiKey = process.env.FAL_KEY;
+  if (!apiKey) throw new Error("FAL_KEY not configured");
+
+  // Timeout absoluto — se passou do MAX_AGE, aborta.
+  const started = video.generationStartedAt?.getTime() ?? Date.now();
+  if (Date.now() - started > FIDELITY_MAX_AGE_MS) {
+    await prisma.ugcGeneratedVideo.update({
+      where: { id: videoId },
+      data: {
+        status: "FAILED",
+        errorMessage: `Fidelity clone timeout — Fal job ${requestId} não concluiu em ${FIDELITY_MAX_AGE_MS / 60000}min`,
+      },
+    });
+    return { status: "FAILED" };
+  }
+
+  const statusUrl = `${FAL_QUEUE}/${FAL_MODEL}/requests/${requestId}/status`;
+  const statusRes = await fetch(statusUrl, {
+    headers: { Authorization: `Key ${apiKey}` },
+    signal: AbortSignal.timeout(15000),
+  });
+  if (!statusRes.ok) {
+    console.warn(`[fidelity-clone] poll status ${statusRes.status} — retry no próximo tick`);
+    return { status: "PENDING" };
+  }
+  const status = (await statusRes.json()) as FalStatus;
+  console.log(`[fidelity-clone] ${videoId} fal=${requestId} status=${status.status}`);
+
+  if (status.status === "FAILED") {
+    const logs = (status.logs ?? []).map((l) => l.message).join(" | ");
+    await prisma.ugcGeneratedVideo.update({
+      where: { id: videoId },
+      data: { status: "FAILED", errorMessage: `Fal job failed: ${logs || "no logs"}` },
+    });
+    return { status: "FAILED" };
+  }
+
+  if (status.status !== "COMPLETED") {
+    return { status: status.status };
+  }
+
+  // COMPLETED — baixa o resultado e rehospeda
+  const resultUrl = `${FAL_QUEUE}/${FAL_MODEL}/requests/${requestId}`;
+  const r = await fetch(resultUrl, {
+    headers: { Authorization: `Key ${apiKey}` },
+    signal: AbortSignal.timeout(30000),
+  });
+  if (!r.ok) throw new Error(`Fal result fetch failed: ${r.status}`);
+  const result = (await r.json()) as FalVideoResult;
+  const falOutputUrl = result.video?.url ?? result.file?.url ?? result.output?.url;
+  if (!falOutputUrl) {
+    throw new Error(`Fal completed but no video URL: ${JSON.stringify(result).slice(0, 300)}`);
+  }
+
   await prisma.ugcGeneratedVideo.update({
     where: { id: videoId },
     data: { currentStep: "fidelity_clone_persisting" },
   });
+
   const videoRes = await fetch(falOutputUrl, { signal: AbortSignal.timeout(120000) });
   if (!videoRes.ok) throw new Error(`Falha ao baixar video do Fal: ${videoRes.status}`);
   const videoBuf = Buffer.from(await videoRes.arrayBuffer());
@@ -178,10 +217,16 @@ export async function runFidelityClone(videoId: string): Promise<void> {
       currentStep: "done",
       errorMessage: null,
       finalVideoUrl: blob.url,
-      durationSeconds: detail.durationSeconds ?? null,
       takeCount: 1,
       generationCompletedAt: new Date(),
     },
   });
-  console.log(`[fidelity-clone] DONE: ${blob.url}`);
+  console.log(`[fidelity-clone] DONE ${videoId}: ${blob.url}`);
+  return { status: "COMPLETED" };
+}
+
+// Wrapper mantido pra compatibilidade com pipeline.ts — apenas dispara
+// o submit e retorna. Cron cuida do resto.
+export async function runFidelityClone(videoId: string): Promise<void> {
+  await startFidelityClone(videoId);
 }

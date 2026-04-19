@@ -37,6 +37,13 @@ export async function POST(request: NextRequest) {
 
     const { productIds, count, characterId, noAvatar, transitionMode, narrationOverride } = parsed.data;
 
+    // Fidelity clone exige personagem com foto — face swap precisa de imagem fonte.
+    if (transitionMode === "fidelity_clone" && noAvatar) {
+      return NextResponse.json({
+        error: "Clone fiel requer um personagem com foto. Desative 'Sem avatar' ou escolha outro modo.",
+      }, { status: 400 });
+    }
+
     // Valida personagem se fornecido (pulado quando noAvatar=true)
     if (!noAvatar) {
       if (characterId) {
