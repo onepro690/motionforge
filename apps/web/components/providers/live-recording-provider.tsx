@@ -89,6 +89,10 @@ export function LiveRecordingProvider({
       ensureTicker();
 
       let consecutiveErrors = 0;
+      // Razão pela qual o loop parou — só finaliza se for iniciativa do
+      // usuário (Parar) ou confirmação do TikTok (live acabou).
+      // Erro de rede/auth NÃO finaliza — deixa cron/chain continuarem.
+      let reasonToFinalize: "user_stop" | "live_ended" | null = null;
       try {
         while (!stopFlags.current.get(sessionId)) {
           const res = await fetch(
@@ -100,22 +104,32 @@ export function LiveRecordingProvider({
             },
           ).catch(() => null);
 
-          if (stopFlags.current.get(sessionId)) break;
+          if (stopFlags.current.get(sessionId)) {
+            reasonToFinalize = "user_stop";
+            break;
+          }
 
           if (!res || !res.ok) {
-            let stillLive = true;
+            let stillLiveReported: boolean | undefined;
             if (res) {
               const text = await res.text().catch(() => "");
               try {
                 const j = JSON.parse(text) as { stillLive?: boolean };
-                if (typeof j.stillLive === "boolean") stillLive = j.stillLive;
+                if (typeof j.stillLive === "boolean") stillLiveReported = j.stillLive;
               } catch {
                 /* ignore parse err */
               }
             }
-            if (!stillLive) break;
+            // Só finaliza se servidor confirmou explicitamente !stillLive.
+            if (stillLiveReported === false) {
+              reasonToFinalize = "live_ended";
+              break;
+            }
             consecutiveErrors++;
-            if (consecutiveErrors >= 5) break;
+            if (consecutiveErrors >= 5) {
+              // Desiste do loop no cliente, MAS não finaliza — cron continua.
+              break;
+            }
             await new Promise((r) => setTimeout(r, 3000));
             continue;
           }
@@ -138,21 +152,30 @@ export function LiveRecordingProvider({
               },
             };
           });
-          if (!json.stillLive) break;
-          if (stopFlags.current.get(sessionId)) break;
+          if (json.stillLive === false) {
+            reasonToFinalize = "live_ended";
+            break;
+          }
+          if (stopFlags.current.get(sessionId)) {
+            reasonToFinalize = "user_stop";
+            break;
+          }
         }
 
-        // Finaliza: concatena chunks
-        setStates((s) => {
-          const prev = s[sessionId];
-          if (!prev) return s;
-          return { ...s, [sessionId]: { ...prev, finalizing: true } };
-        });
-        await fetch(`/api/ugc/lives/${sessionId}/record-now`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ finalize: true }),
-        }).catch(() => null);
+        if (reasonToFinalize) {
+          setStates((s) => {
+            const prev = s[sessionId];
+            if (!prev) return s;
+            return { ...s, [sessionId]: { ...prev, finalizing: true } };
+          });
+          await fetch(`/api/ugc/lives/${sessionId}/record-now`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ finalize: true }),
+          }).catch(() => null);
+        }
+        // Se reasonToFinalize === null (erros de rede no cliente), o loop
+        // para aqui mas a gravação continua no servidor via cron + chain.
       } finally {
         runningIds.current.delete(sessionId);
         stopFlags.current.delete(sessionId);

@@ -713,19 +713,21 @@ export async function fetchFullRoomInfo(roomId: string): Promise<FullRoomInfo | 
   }
 }
 
-// Checa se o room ainda está ao vivo (status=2). Usado pelo loop de gravação.
+// Checa se o room ainda está ao vivo. Usado pelo loop de gravação.
 //
-// IMPORTANTE: sob incerteza (timeout, rate limit, erro de rede) retorna TRUE
-// pra não parar gravação por falso negativo. Só retorna false quando o
-// TikTok confirma explicitamente que status !== 2. Tenta até 3x antes de
-// aceitar resposta definitiva; se todas falharem, assume ainda live.
+// IMPORTANTE: só retorna FALSE quando TikTok confirma EXPLICITAMENTE que a
+// live acabou (status=4). Qualquer outro valor — timeout, rate limit, status
+// ambíguo (1, 3, etc), null — retorna TRUE pra não parar a gravação por
+// falso negativo. Tenta 3x com 500ms entre tentativas.
 export async function isLiveActive(roomId: string): Promise<boolean> {
   for (let attempt = 0; attempt < 3; attempt++) {
     const info = await fetchFullRoomInfo(roomId);
-    if (info) return info.status === 2;
+    if (info?.status === 4) return false; // explicit ended
+    if (info?.status === 2) return true; // explicit live
+    // Qualquer outro valor (null, 0, 1, 3, etc) = continua tentando
     if (attempt < 2) await new Promise((r) => setTimeout(r, 500));
   }
-  // 3 falhas de rede seguidas: assume ainda live (evita false stop).
+  // 3 tentativas sem confirmação definitiva: assume ainda live.
   return true;
 }
 
