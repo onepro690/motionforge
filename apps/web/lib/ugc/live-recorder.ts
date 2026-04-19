@@ -108,11 +108,13 @@ export async function recordChunk(
   // Lock atômico: só adquire se ainda não estiver DONE/FAILED e ninguém
   // com lock vigente. Previne duas execuções (chain + cron, dois chains)
   // rodando chunks em paralelo no mesmo session.
+  // Aceita NONE (1ª gravação), QUEUED e RECORDING — qualquer status que
+  // permita começar/continuar gravando.
   const now = new Date();
   const lockAcquired = await prisma.liveSession.updateMany({
     where: {
       id,
-      recordingStatus: { in: ["QUEUED", "RECORDING"] },
+      recordingStatus: { in: ["NONE", "QUEUED", "RECORDING"] },
       OR: [
         { recordingLockedUntil: null },
         { recordingLockedUntil: { lt: now } },
