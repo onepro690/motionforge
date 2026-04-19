@@ -240,9 +240,13 @@ export async function runFidelityClone(videoId: string): Promise<void> {
     const { frameUrls, audioPath, fps } = await extractFramesAndAudio(refBuf, workDir);
     if (frameUrls.length === 0) throw new Error("ffmpeg extraiu 0 frames do vídeo de referência");
 
+    // Evitar status=GENERATING_TAKES: o cron poll-ugc-videos pega vídeos nesse
+    // status e roda pollAndAssembleTakes, que tem um bug com takes=[] — marca
+    // erradamente como FAILED "Todos os takes falharam". Fidelity clone não
+    // cria takes em DB, então usa SUBMITTING_TAKES (não polled) durante swap.
     await prisma.ugcGeneratedVideo.update({
       where: { id: videoId },
-      data: { status: "GENERATING_TAKES", currentStep: `fidelity_clone_swapping_${frameUrls.length}_frames` },
+      data: { status: "SUBMITTING_TAKES", currentStep: `fidelity_clone_swapping_${frameUrls.length}_frames` },
     });
     const swappedUrls = await swapFramesBatch(frameUrls, video.character.imageUrl);
     const successCount = swappedUrls.filter(Boolean).length;
@@ -267,8 +271,9 @@ export async function runFidelityClone(videoId: string): Promise<void> {
     await prisma.ugcGeneratedVideo.update({
       where: { id: videoId },
       data: {
-        status: "DRAFT_GENERATED",
+        status: "AWAITING_REVIEW",
         currentStep: "done",
+        errorMessage: null,
         finalVideoUrl: blob.url,
         thumbnailUrl: thumbUrl,
         durationSeconds: frameUrls.length / fps,

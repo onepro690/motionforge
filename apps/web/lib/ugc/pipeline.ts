@@ -1799,7 +1799,8 @@ export async function pollAndAssembleTakes(videoId: string): Promise<{
   }
 
   // Se TODOS os takes falharam permanentemente (excederam retries), marca vídeo como FAILED
-  if (permanentlyFailed === video.takes.length) {
+  // Guard: takes vazio não conta como falha — pode ser fidelity clone rodando ainda
+  if (video.takes.length > 0 && permanentlyFailed === video.takes.length) {
     const failedReasons = video.takes
       .filter(t => t.errorMessage)
       .map(t => `Take ${t.takeIndex + 1}: ${t.errorMessage}`)
