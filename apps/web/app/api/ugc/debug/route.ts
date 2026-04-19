@@ -3,6 +3,7 @@ import { auth } from "@/lib/auth";
 import { headers } from "next/headers";
 import { prisma } from "@motion/database";
 import { pollFidelityClone } from "@/lib/ugc/fidelity-clone";
+import { finalizeRecording } from "@/lib/ugc/live-recorder";
 
 export async function GET(request: NextRequest) {
   const secret = request.nextUrl.searchParams.get("secret");
@@ -136,6 +137,21 @@ export async function POST(request: NextRequest) {
       select: { id: true, status: true, currentStep: true, generationStartedAt: true },
     });
     return NextResponse.json({ recovered: updated }, { status: 200 });
+  }
+
+  if (action === "retry-finalize-live") {
+    // Reseta status pra RECORDING e chama finalizeRecording de novo.
+    // Usa os chunks que ainda estão no Blob.
+    await prisma.liveSession.update({
+      where: { id: videoId },
+      data: { recordingStatus: "RECORDING", recordingError: null },
+    });
+    const result = await finalizeRecording(videoId);
+    const after = await prisma.liveSession.findUnique({
+      where: { id: videoId },
+      select: { recordingStatus: true, recordingUrl: true, recordingError: true },
+    });
+    return NextResponse.json({ result, after }, { status: 200 });
   }
 
   if (action === "poll-now") {

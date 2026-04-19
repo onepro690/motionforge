@@ -217,18 +217,13 @@ export async function finalizeRecording(id: string) {
   await mkdir(workDir, { recursive: true });
 
   try {
-    const localPaths: string[] = [];
-    for (let i = 0; i < chunks.length; i++) {
-      const resp = await fetch(chunks[i].url);
-      const buf = Buffer.from(await resp.arrayBuffer());
-      const p = join(workDir, `chunk-${i.toString().padStart(4, "0")}.mp4`);
-      await writeFile(p, buf);
-      localPaths.push(p);
-    }
-
+    // ffmpeg concat demuxer lê direto das URLs HTTPS — evita baixar
+    // todos os chunks pra /tmp (que é limitado e estoura com ~5 chunks
+    // 720p). Só o final.mp4 fica em /tmp. protocol_whitelist é
+    // necessário pro concat aceitar URLs http/https.
     const listPath = join(workDir, "list.txt");
-    const listContent = localPaths
-      .map((p) => `file '${p.replace(/'/g, "'\\''")}'`)
+    const listContent = chunks
+      .map((c) => `file '${c.url.replace(/'/g, "'\\''")}'`)
       .join("\n");
     await writeFile(listPath, listContent);
 
@@ -236,6 +231,7 @@ export async function finalizeRecording(id: string) {
     await runFfmpeg([
       "-y",
       "-loglevel", "error",
+      "-protocol_whitelist", "file,http,https,tcp,tls",
       "-f", "concat",
       "-safe", "0",
       "-i", listPath,
@@ -245,6 +241,8 @@ export async function finalizeRecording(id: string) {
     ]);
 
     const finalBuf = await readFile(finalLocal);
+    // Libera /tmp antes do upload (final.mp4 buffered em RAM agora)
+    await unlink(finalLocal).catch(() => {});
     const finalKey = `ugc/lives/${id}/final.mp4`;
     const finalBlob = await put(finalKey, finalBuf, {
       access: "public",
