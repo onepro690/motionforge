@@ -42,6 +42,33 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({ totalCount, approved, usedForGen, recent20: all }, { status: 200 });
   }
 
+  if (view === "lives-recording") {
+    const { list } = await import("@vercel/blob");
+    const lives = await prisma.liveSession.findMany({
+      where: { recordingStatus: { in: ["QUEUED", "RECORDING", "DONE", "FAILED"] } },
+      orderBy: { updatedAt: "desc" },
+      take: 20,
+      select: {
+        id: true, roomId: true, hostHandle: true, isLive: true,
+        recordingStatus: true, recordingUrl: true, recordingError: true,
+        recordingStartedAt: true, recordingEndedAt: true, recordingLockedUntil: true,
+        recordingDurationSeconds: true, updatedAt: true,
+      },
+    });
+    // Conta chunks no Blob pra cada live
+    const withChunks = await Promise.all(
+      lives.map(async (l) => {
+        try {
+          const listing = await list({ prefix: `ugc/lives/${l.id}/chunks/` });
+          return { ...l, chunkCount: listing.blobs.length, chunkUrls: listing.blobs.map((b) => b.url).slice(0, 5) };
+        } catch {
+          return { ...l, chunkCount: -1, chunkUrls: [] };
+        }
+      }),
+    );
+    return NextResponse.json(withChunks, { status: 200 });
+  }
+
   if (view === "videos-products") {
     const videos = await prisma.ugcGeneratedVideo.findMany({
       orderBy: { createdAt: "desc" },
