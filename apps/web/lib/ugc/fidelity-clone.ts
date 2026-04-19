@@ -16,7 +16,10 @@ import { put } from "@vercel/blob";
 import { fetchTikwmDetail } from "./reference-video";
 
 const FAL_QUEUE = "https://queue.fal.run";
-const FAL_MODEL = "fal-ai/pixverse/swap";
+// Submit usa o slug completo do modelo; status/result usam só o namespace
+// do app (sem o subpath `/swap`) — padrão Fal queue API.
+const FAL_SUBMIT_PATH = "fal-ai/pixverse/swap";
+const FAL_QUEUE_NAMESPACE = "fal-ai/pixverse";
 const FIDELITY_STEP_PREFIX = "fidelity_clone_processing_";
 const FIDELITY_MAX_AGE_MS = 30 * 60 * 1000; // 30min — Pixverse típico <5min
 
@@ -52,7 +55,7 @@ async function submitFaceSwapJob(params: {
   const apiKey = process.env.FAL_KEY;
   if (!apiKey) throw new Error("FAL_KEY not configured");
 
-  const res = await fetch(`${FAL_QUEUE}/${FAL_MODEL}`, {
+  const res = await fetch(`${FAL_QUEUE}/${FAL_SUBMIT_PATH}`, {
     method: "POST",
     headers: { Authorization: `Key ${apiKey}`, "Content-Type": "application/json" },
     body: JSON.stringify({
@@ -158,7 +161,7 @@ export async function pollFidelityClone(videoId: string): Promise<{ status: stri
     return { status: "FAILED" };
   }
 
-  const statusUrl = `${FAL_QUEUE}/${FAL_MODEL}/requests/${requestId}/status`;
+  const statusUrl = `${FAL_QUEUE}/${FAL_QUEUE_NAMESPACE}/requests/${requestId}/status`;
   const statusRes = await fetch(statusUrl, {
     headers: { Authorization: `Key ${apiKey}` },
     signal: AbortSignal.timeout(15000),
@@ -184,7 +187,7 @@ export async function pollFidelityClone(videoId: string): Promise<{ status: stri
   }
 
   // COMPLETED — baixa o resultado e rehospeda
-  const resultUrl = `${FAL_QUEUE}/${FAL_MODEL}/requests/${requestId}`;
+  const resultUrl = `${FAL_QUEUE}/${FAL_QUEUE_NAMESPACE}/requests/${requestId}`;
   const r = await fetch(resultUrl, {
     headers: { Authorization: `Key ${apiKey}` },
     signal: AbortSignal.timeout(30000),
