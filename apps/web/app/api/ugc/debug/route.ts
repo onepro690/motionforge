@@ -139,6 +139,24 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ recovered: updated }, { status: 200 });
   }
 
+  if (action === "mark-live-done") {
+    // Quando finalize gerou o final.mp4 e fez upload mas timed out antes
+    // do update DB. recordingUrl já está presente, só falta marcar DONE.
+    const live = await prisma.liveSession.findUnique({
+      where: { id: videoId },
+      select: { recordingUrl: true },
+    });
+    if (!live?.recordingUrl) {
+      return NextResponse.json({ error: "sem recordingUrl — rode retry-finalize-live" }, { status: 400 });
+    }
+    const updated = await prisma.liveSession.update({
+      where: { id: videoId },
+      data: { recordingStatus: "DONE", recordingError: null, recordingEndedAt: new Date() },
+      select: { recordingStatus: true, recordingUrl: true },
+    });
+    return NextResponse.json({ updated }, { status: 200 });
+  }
+
   if (action === "retry-finalize-live") {
     // Reseta status pra RECORDING e chama finalizeRecording de novo.
     // Usa os chunks que ainda estão no Blob.
