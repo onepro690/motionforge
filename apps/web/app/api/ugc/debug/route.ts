@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { auth } from "@/lib/auth";
 import { headers } from "next/headers";
 import { prisma } from "@motion/database";
+import { pollFidelityClone } from "@/lib/ugc/fidelity-clone";
 
 export async function GET(request: NextRequest) {
   const secret = request.nextUrl.searchParams.get("secret");
@@ -108,6 +109,15 @@ export async function POST(request: NextRequest) {
       select: { id: true, status: true, currentStep: true, generationStartedAt: true },
     });
     return NextResponse.json({ recovered: updated }, { status: 200 });
+  }
+
+  if (action === "poll-now") {
+    const r = await pollFidelityClone(videoId);
+    const after = await prisma.ugcGeneratedVideo.findUnique({
+      where: { id: videoId },
+      select: { status: true, currentStep: true, errorMessage: true, finalVideoUrl: true },
+    });
+    return NextResponse.json({ pollResult: r, after }, { status: 200 });
   }
 
   return NextResponse.json({ error: "unknown action" }, { status: 400 });
