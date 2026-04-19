@@ -79,3 +79,36 @@ export async function GET(request: NextRequest) {
 
   return NextResponse.json(recentVideos, { status: 200 });
 }
+
+export async function POST(request: NextRequest) {
+  const secret = request.nextUrl.searchParams.get("secret");
+  if (secret !== "motionforge2026") {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+  const action = request.nextUrl.searchParams.get("action");
+  const videoId = request.nextUrl.searchParams.get("videoId");
+  if (!videoId) return NextResponse.json({ error: "videoId required" }, { status: 400 });
+
+  if (action === "recover-fidelity") {
+    const video = await prisma.ugcGeneratedVideo.findUnique({
+      where: { id: videoId },
+      select: { id: true, status: true, currentStep: true },
+    });
+    if (!video) return NextResponse.json({ error: "not found" }, { status: 404 });
+    if (!video.currentStep?.startsWith("fidelity_clone_processing_")) {
+      return NextResponse.json({ error: "no fidelity request_id in currentStep", currentStep: video.currentStep }, { status: 400 });
+    }
+    const updated = await prisma.ugcGeneratedVideo.update({
+      where: { id: videoId },
+      data: {
+        status: "GENERATING_TAKES",
+        errorMessage: null,
+        generationStartedAt: new Date(),
+      },
+      select: { id: true, status: true, currentStep: true, generationStartedAt: true },
+    });
+    return NextResponse.json({ recovered: updated }, { status: 200 });
+  }
+
+  return NextResponse.json({ error: "unknown action" }, { status: 400 });
+}
