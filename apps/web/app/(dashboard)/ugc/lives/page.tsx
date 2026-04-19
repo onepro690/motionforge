@@ -276,6 +276,35 @@ function RecordingCard({ session, onDeleteRecording }: {
   session: LiveSession;
   onDeleteRecording: (id: string) => void;
 }) {
+  const [downloading, setDownloading] = useState(false);
+
+  async function handleDownload() {
+    if (!session.recordingUrl || downloading) return;
+    setDownloading(true);
+    try {
+      // Fetch + createObjectURL força download cross-origin (o atributo
+      // `download` no <a> é ignorado pra Blob em domínio diferente).
+      const resp = await fetch(session.recordingUrl);
+      if (!resp.ok) throw new Error("fetch falhou");
+      const blob = await resp.blob();
+      const url = URL.createObjectURL(blob);
+      const handle = session.hostHandle || "live";
+      const date = new Date(session.startedAt ?? session.scrapedAt).toISOString().slice(0, 10);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `${handle}-${date}.mp4`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } catch {
+      // Fallback: abre em aba nova
+      window.open(session.recordingUrl, "_blank", "noopener,noreferrer");
+    } finally {
+      setDownloading(false);
+    }
+  }
+
   if (!session.recordingUrl) return null;
   return (
     <div className="bg-white/[0.03] border border-white/[0.06] rounded-xl overflow-hidden hover:border-violet-500/20 transition-all flex flex-col">
@@ -296,12 +325,13 @@ function RecordingCard({ session, onDeleteRecording }: {
           </div>
         </div>
         <div className="flex gap-1 flex-shrink-0">
-          <a href={session.recordingUrl} target="_blank" rel="noopener noreferrer">
-            <Button size="sm" variant="outline"
-              className="text-[10px] border-white/10 text-white/60 hover:text-white gap-1 px-2">
-              <Download className="w-3 h-3" />
-            </Button>
-          </a>
+          <Button size="sm" variant="outline"
+            onClick={handleDownload}
+            disabled={downloading}
+            title="Baixar gravação"
+            className="text-[10px] border-white/10 text-white/60 hover:text-white gap-1 px-2">
+            {downloading ? <Loader2 className="w-3 h-3 animate-spin" /> : <Download className="w-3 h-3" />}
+          </Button>
           <Button size="sm" variant="outline"
             onClick={() => onDeleteRecording(session.id)}
             title="Apagar gravação"
