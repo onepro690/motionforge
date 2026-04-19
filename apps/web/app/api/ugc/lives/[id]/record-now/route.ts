@@ -85,6 +85,24 @@ export async function POST(
     });
   }
 
+  // Se usuário clicou Gravar numa session DONE/FAILED (ex: live ainda ativa,
+  // quer regravar; ou falhou e quer retry), reseta o estado antes. Só pra
+  // chamadas de cliente — chain não deve ressuscitar sessions finalizadas.
+  if (!isChainCall && (live.recordingStatus === "DONE" || live.recordingStatus === "FAILED")) {
+    await prisma.liveSession.update({
+      where: { id },
+      data: {
+        recordingStatus: "NONE",
+        recordingUrl: null,
+        recordingError: null,
+        recordingStartedAt: null,
+        recordingEndedAt: null,
+        recordingDurationSeconds: null,
+        recordingLockedUntil: null,
+      },
+    });
+  }
+
   // Chamada chaineada (server-side) usa chunks longos (250s) pra maximizar
   // throughput. Chamada do cliente continua curta (45s default) pra feedback
   // rápido da UI.
