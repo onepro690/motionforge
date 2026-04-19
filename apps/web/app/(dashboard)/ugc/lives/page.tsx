@@ -1,13 +1,14 @@
 "use client";
 
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { Button } from "@/components/ui/button";
 import {
   Radio, RefreshCw, Play, ExternalLink, Users,
   Heart, Clock, TrendingUp, Eye, Package, AlertTriangle,
-  CheckCircle, Video, Loader2, Ban, Download, Trash2, Plus, X,
+  CheckCircle, Video, Loader2, Ban, Download, Trash2, Plus, X, Image as ImageIcon,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { useLiveRecording } from "@/components/providers/live-recording-provider";
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -335,20 +336,11 @@ export default function LivesPage() {
   const [actioning, setActioning]   = useState<Set<string>>(new Set());
   const [manualInput, setManualInput] = useState("");
   const [addingManual, setAddingManual] = useState(false);
-  // Controle do loop de gravação por sessionId
-  const stopFlags = useRef<Map<string, boolean>>(new Map());
-  // Set de IDs aguardando chunk atual finalizar após clique em Parar
-  const [finalizingStop, setFinalizingStop] = useState<Set<string>>(new Set());
-  const [recordingProgress, setRecordingProgress] = useState<Record<string, { chunks: number; seconds: number }>>({});
-  // Timestamp (ms) em que cada gravação começou — usado pro ticker ao vivo.
-  const [recordStartedAt, setRecordStartedAt] = useState<Record<string, number>>({});
-  // Ticker: força re-render a cada 1s enquanto houver alguma gravação ativa.
-  const [, setTick] = useState(0);
-  useEffect(() => {
-    if (Object.keys(recordStartedAt).length === 0) return;
-    const iv = setInterval(() => setTick((t) => t + 1), 1000);
-    return () => clearInterval(iv);
-  }, [recordStartedAt]);
+  const [backfilling, setBackfilling] = useState(false);
+  const [backfillResult, setBackfillResult] = useState<{ fixed: number; failed: number; total: number } | null>(null);
+
+  // Gravação vive no provider do layout (sobrevive à navegação entre seções).
+  const rec = useLiveRecording();
 
   const loadSessions = useCallback(async (f: Filter = filter, p: number = page) => {
     setLoading(true);
@@ -381,13 +373,14 @@ export default function LivesPage() {
     } finally { setScraping(false); }
   }
 
-  async function handleRecord(id: string) {
-    // Inicia loop contínuo de chunks até live encerrar ou usuário clicar Parar.
-    // Cada iteração grava um chunk de 240s via /record-now, depois checa stillLive.
-    // Quando encerra: chama /record-now { finalize: true } pra concatenar chunks.
-    stopFlags.current.set(id, false);
-    setActioning((s) => new Set(s).add(id));
-    setRecordStartedAt((m) => ({ ...m, [id]: Date.now() }));
+  function handleRecord(id: string) {
+    // Dispara o loop no provider global. Continua rodando mesmo se o
+    // usuário navegar pra outra seção do dashboard. Quando terminar,
+    // recarrega a lista pra mostrar status DONE.
+    rec.startRecording(id, () => {
+      void loadSessions(filter, page);
+    });
+    // Update otimista: marca RECORDING na UI imediatamente
     setData((d) =>
       d
         ? {
@@ -398,108 +391,25 @@ export default function LivesPage() {
           }
         : d,
     );
-    setRecordingProgress((p) => ({ ...p, [id]: { chunks: 0, seconds: 0 } }));
-
-    let consecutiveErrors = 0;
-    let userStopped = false;
-    try {
-      while (!stopFlags.current.get(id)) {
-        // Chunks de 45s: stop fica "quase instantâneo" (máx ~45s de espera)
-        // e garante que o ffmpeg sempre termina e salva o chunk no blob.
-        const res = await fetch(`/api/ugc/lives/${id}/record-now`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ durationSeconds: 45 }),
-        }).catch(() => null);
-
-        if (stopFlags.current.get(id)) {
-          userStopped = true;
-          break;
-        }
-
-        if (!res || !res.ok) {
-          // Parse body (JSON ou texto) pra extrair stillLive/msg
-          let msg = "Sem detalhe";
-          let stillLive = true;
-          if (res) {
-            const text = await res.text().catch(() => "");
-            try {
-              const j = JSON.parse(text) as { message?: string; error?: string; stillLive?: boolean };
-              msg = j.message ?? j.error ?? text.slice(0, 120);
-              if (typeof j.stillLive === "boolean") stillLive = j.stillLive;
-            } catch {
-              msg = text.slice(0, 120) || res.statusText;
-            }
-          }
-          consecutiveErrors++;
-          console.warn(`[record] chunk err (${consecutiveErrors}):`, msg);
-
-          // Se backend confirma que live encerrou, para na hora pra finalizar.
-          if (!stillLive) break;
-
-          // Aborta só depois de 5 falhas seguidas. Entre tentativas, 3s.
-          // Cron continua no BG então não é crítico dar up rápido.
-          if (consecutiveErrors >= 5) break;
-          await new Promise((r) => setTimeout(r, 3000));
-          continue;
-        }
-        consecutiveErrors = 0;
-
-        const json = (await res.json()) as {
-          chunkSeconds?: number;
-          cumulativeSeconds?: number;
-          stillLive?: boolean;
-        };
-        setRecordingProgress((p) => ({
-          ...p,
-          [id]: {
-            chunks: (p[id]?.chunks ?? 0) + 1,
-            seconds: json.cumulativeSeconds ?? p[id]?.seconds ?? 0,
-          },
-        }));
-        if (!json.stillLive) break;
-        if (stopFlags.current.get(id)) { userStopped = true; break; }
-      }
-
-      // Finaliza: concatena chunks num único mp4 e marca DONE.
-      // Quando userStopped=true (abort/parar), finalize imediatamente os chunks
-      // já no blob — o chunk em andamento foi descartado mas os anteriores valem.
-      const finRes = await fetch(`/api/ugc/lives/${id}/record-now`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ finalize: true }),
-      }).catch(() => null);
-      if (!finRes || !finRes.ok) {
-        console.warn("[record] finalize failed, cron pegará no próximo ciclo");
-      }
-      await loadSessions(filter, page);
-    } finally {
-      stopFlags.current.delete(id);
-      setFinalizingStop((s) => { const n = new Set(s); n.delete(id); return n; });
-      setRecordStartedAt((m) => {
-        const n = { ...m };
-        delete n[id];
-        return n;
-      });
-      setRecordingProgress((p) => {
-        const n = { ...p };
-        delete n[id];
-        return n;
-      });
-      setActioning((s) => {
-        const n = new Set(s);
-        n.delete(id);
-        return n;
-      });
-    }
   }
 
   function handleStopRecording(id: string) {
-    // Sinaliza stop graceful: loop sai depois do chunk atual completar
-    // (máx ~45s). Abortar o fetch mataria o ffmpeg no meio e perderíamos
-    // o chunk em andamento, então deixamos ele terminar e salvar no blob.
-    stopFlags.current.set(id, true);
-    setFinalizingStop((s) => new Set(s).add(id));
+    // Stop graceful: loop sai depois do chunk atual completar (~45s).
+    rec.stopRecording(id);
+  }
+
+  async function handleBackfillThumbs() {
+    setBackfilling(true);
+    try {
+      const res = await fetch("/api/ugc/lives/backfill-thumbs", { method: "POST" });
+      if (res.ok) {
+        const json = (await res.json()) as { fixed: number; failed: number; total: number };
+        setBackfillResult(json);
+        await loadSessions(filter, page);
+      }
+    } finally {
+      setBackfilling(false);
+    }
   }
 
   async function handleDelete(id: string, handle: string) {
@@ -594,12 +504,34 @@ export default function LivesPage() {
           </h1>
           <p className="text-sm text-white/50 mt-1">Detecta lives ao vivo, captura stream e grava automaticamente</p>
         </div>
-        <Button onClick={handleScrape} disabled={scraping}
-          className="gap-2 bg-red-500 hover:bg-red-600 text-white">
-          <RefreshCw className={cn("w-4 h-4", scraping && "animate-spin")} />
-          {scraping ? "Buscando lives…" : "Buscar Lives ao Vivo"}
-        </Button>
+        <div className="flex gap-2">
+          <Button
+            variant="outline"
+            onClick={handleBackfillThumbs}
+            disabled={backfilling}
+            className="gap-2 border-white/10 text-white/70 hover:text-white"
+            title="Re-busca thumbnails e avatares que expiraram do CDN do TikTok"
+          >
+            {backfilling ? <Loader2 className="w-4 h-4 animate-spin" /> : <ImageIcon className="w-4 h-4" />}
+            Recuperar Imagens
+          </Button>
+          <Button onClick={handleScrape} disabled={scraping}
+            className="gap-2 bg-red-500 hover:bg-red-600 text-white">
+            <RefreshCw className={cn("w-4 h-4", scraping && "animate-spin")} />
+            {scraping ? "Buscando lives…" : "Buscar Lives ao Vivo"}
+          </Button>
+        </div>
       </div>
+
+      {backfillResult && (
+        <div className="flex items-center gap-2 text-xs text-emerald-400/80">
+          <CheckCircle className="w-4 h-4" />
+          {backfillResult.fixed}/{backfillResult.total} imagens recuperadas
+          {backfillResult.failed > 0 && (
+            <span className="text-white/40">· {backfillResult.failed} sem fonte</span>
+          )}
+        </div>
+      )}
 
       {/* Manual live input */}
       <div className="bg-white/[0.03] border border-white/[0.06] rounded-xl p-4">
@@ -748,16 +680,19 @@ export default function LivesPage() {
           </div>
         ) : (
           <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-4">
-            {sessions.map((s) => (
-              <LiveCard key={s.id} session={s}
-                onRecord={handleRecord} onCancel={handleCancel}
-                onDelete={handleDelete} onDeleteRecording={handleDeleteRecording}
-                onStop={handleStopRecording}
-                progress={recordingProgress[s.id]}
-                recording={actioning.has(s.id)}
-                startedAt={recordStartedAt[s.id]}
-                finalizing={finalizingStop.has(s.id)} />
-            ))}
+            {sessions.map((s) => {
+              const recState = rec.getState(s.id);
+              return (
+                <LiveCard key={s.id} session={s}
+                  onRecord={handleRecord} onCancel={handleCancel}
+                  onDelete={handleDelete} onDeleteRecording={handleDeleteRecording}
+                  onStop={handleStopRecording}
+                  progress={recState ? { chunks: recState.chunks, seconds: recState.seconds } : undefined}
+                  recording={rec.isRecording(s.id)}
+                  startedAt={recState?.startedAt}
+                  finalizing={recState?.finalizing} />
+              );
+            })}
           </div>
         )
       )}
