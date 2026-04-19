@@ -1509,6 +1509,18 @@ export async function pollAndAssembleTakes(videoId: string): Promise<{
     return { allDone: false, failedCount: 0, status: video.status };
   }
 
+  // Fidelity clone não usa takes — polling é via Fal queue em fidelity-clone.ts
+  const transitionMode = (video as unknown as { transitionMode?: string }).transitionMode;
+  if (transitionMode === "fidelity_clone") {
+    const { pollFidelityClone } = await import("./fidelity-clone");
+    const r = await pollFidelityClone(videoId);
+    return {
+      allDone: r.status === "COMPLETED" || r.status === "FAILED",
+      failedCount: r.status === "FAILED" ? 1 : 0,
+      status: r.status,
+    };
+  }
+
   const MAX_RETRIES = 3; // Cada take pode ser retentado até 3x (total 4 tentativas, cada com frame diferente)
 
   // Check status of all GenerationJobs
