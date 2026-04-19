@@ -89,10 +89,9 @@ function RecBadge({ status }: { status: string }) {
 
 // ── Live Card ────────────────────────────────────────────────────────────────
 
-function LiveCard({ session, onRecord, onCancel, onDelete, onDeleteRecording, onStop, progress, recording, startedAt, finalizing }: {
+function LiveCard({ session, onRecord, onDelete, onDeleteRecording, onStop, progress, recording, startedAt, finalizing }: {
   session: LiveSession;
   onRecord: (id: string) => void;
-  onCancel: (id: string) => void;
   onDelete: (id: string, handle: string) => void;
   onDeleteRecording: (id: string) => void;
   onStop: (id: string) => void;
@@ -243,33 +242,26 @@ function LiveCard({ session, onRecord, onCancel, onDelete, onDeleteRecording, on
               </Button>
             </a>
           )}
-          {canRecord && !recording && (
+          {canRecord && !recording && !isRecording && (
             <Button size="sm"
               onClick={() => onRecord(session.id)}
               className="flex-1 text-[10px] gap-1 bg-red-500 hover:bg-red-600 text-white">
               <Video className="w-3 h-3" />Gravar
             </Button>
           )}
-          {recording && !finalizing && (
+          {(recording || isRecording) && !finalizing && (
             <Button size="sm" variant="outline"
               onClick={() => onStop(session.id)}
               className="flex-1 text-[10px] gap-1 border-red-500/30 text-red-400 hover:text-red-300">
               <Ban className="w-3 h-3" />
-              Parar{progress && progress.chunks > 0 ? ` (${progress.chunks} chunk${progress.chunks > 1 ? "s" : ""})` : ""}
+              Parar e salvar{progress && progress.chunks > 0 ? ` (${progress.chunks} chunk${progress.chunks > 1 ? "s" : ""})` : ""}
             </Button>
           )}
-          {recording && finalizing && (
+          {finalizing && (
             <Button size="sm" variant="outline" disabled
               className="flex-1 text-[10px] gap-1 border-yellow-500/30 text-yellow-400">
               <Loader2 className="w-3 h-3 animate-spin" />
-              Finalizando chunk…
-            </Button>
-          )}
-          {isRecording && !recording && (
-            <Button size="sm" variant="outline"
-              onClick={() => onCancel(session.id)}
-              className="flex-1 text-[10px] gap-1 border-white/10 text-white/50 hover:text-white">
-              <Ban className="w-3 h-3" />Limpar
+              Finalizando…
             </Button>
           )}
         </div>
@@ -393,9 +385,28 @@ export default function LivesPage() {
     );
   }
 
-  function handleStopRecording(id: string) {
-    // Stop graceful: loop sai depois do chunk atual completar (~45s).
-    rec.stopRecording(id);
+  async function handleStopRecording(id: string) {
+    // Dois casos:
+    // 1. Provider está gravando (aba aberta nesta sessão) → stop graceful,
+    //    o próprio loop chama finalize no fim.
+    // 2. Só o DB diz RECORDING (cron está mantendo em BG) → chamamos
+    //    finalize direto no server. Concatena os chunks já no Blob e
+    //    marca DONE — preserva tudo que foi gravado até agora.
+    if (rec.isRecording(id)) {
+      rec.stopRecording(id);
+      return;
+    }
+    setActioning((s) => new Set(s).add(id));
+    try {
+      await fetch(`/api/ugc/lives/${id}/record-now`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ finalize: true }),
+      });
+      await loadSessions(filter, page);
+    } finally {
+      setActioning((s) => { const n = new Set(s); n.delete(id); return n; });
+    }
   }
 
   async function handleBackfillThumbs() {
@@ -467,20 +478,6 @@ export default function LivesPage() {
       }
     } finally {
       setAddingManual(false);
-    }
-  }
-
-  async function handleCancel(id: string) {
-    setActioning((s) => new Set(s).add(id));
-    try {
-      await fetch(`/api/ugc/lives/${id}`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action: "cancel_recording" }),
-      });
-      await loadSessions(filter, page);
-    } finally {
-      setActioning((s) => { const n = new Set(s); n.delete(id); return n; });
     }
   }
 
@@ -684,7 +681,7 @@ export default function LivesPage() {
               const recState = rec.getState(s.id);
               return (
                 <LiveCard key={s.id} session={s}
-                  onRecord={handleRecord} onCancel={handleCancel}
+                  onRecord={handleRecord}
                   onDelete={handleDelete} onDeleteRecording={handleDeleteRecording}
                   onStop={handleStopRecording}
                   progress={recState ? { chunks: recState.chunks, seconds: recState.seconds } : undefined}
