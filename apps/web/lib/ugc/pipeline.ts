@@ -459,7 +459,15 @@ export async function runVideoPipeline(
   const phenotypeOnlyMode = !characterImageUrl;
   // "continuous" = encadeia takes pelo último frame (padrão, fala suave)
   // "hard_cuts"  = cada take em paralelo com frame próprio (imita cortes secos)
+  // "fidelity_clone" = copia o reference frame-a-frame (Nano Banana), mantém
+  //   áudio original. Bypassa totalmente o Veo. Requer personagem com foto.
   const transitionMode: string = (video as unknown as { transitionMode?: string }).transitionMode ?? "continuous";
+
+  if (transitionMode === "fidelity_clone") {
+    const { runFidelityClone } = await import("./fidelity-clone");
+    await runFidelityClone(videoId);
+    return;
+  }
   // User override da auto-detecção Gemini:
   // - "auto"   = confia no Gemini
   // - "speech" = força fala (Gemini às vezes marca silent em vídeos com música alta cobrindo voz)

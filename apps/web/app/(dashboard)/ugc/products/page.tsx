@@ -91,7 +91,7 @@ export default function ProductsPage() {
   const [characters, setCharacters] = useState<Character[]>([]);
   const [charPickerProductId, setCharPickerProductId] = useState<string | null>(null);
   const [charPickerAction, setCharPickerAction] = useState<"approve" | "regen">("approve");
-  const [transitionMode, setTransitionMode] = useState<"continuous" | "hard_cuts">("continuous");
+  const [transitionMode, setTransitionMode] = useState<"continuous" | "hard_cuts" | "fidelity_clone">("continuous");
   const [narrationOverride, setNarrationOverride] = useState<"auto" | "speech" | "silent">("auto");
 
   const loadCharacters = useCallback(async () => {
@@ -563,8 +563,8 @@ export default function ProductsPage() {
 
             {/* Toggle de transição entre takes */}
             <div className="rounded-xl border border-white/10 bg-white/[0.02] p-3 space-y-2">
-              <p className="text-[11px] uppercase tracking-wider text-white/40 font-semibold">Transição entre takes</p>
-              <div className="grid grid-cols-2 gap-2">
+              <p className="text-[11px] uppercase tracking-wider text-white/40 font-semibold">Modo de geração</p>
+              <div className="grid grid-cols-3 gap-2">
                 <button
                   onClick={() => setTransitionMode("continuous")}
                   className={`rounded-lg border p-2.5 text-left transition-colors ${
@@ -574,7 +574,7 @@ export default function ProductsPage() {
                   }`}
                 >
                   <p className="text-xs font-semibold text-white">Contínuo</p>
-                  <p className="text-[10px] text-white/50 mt-0.5 leading-tight">Takes encadeados pelo último frame — fala suave sem pulos.</p>
+                  <p className="text-[10px] text-white/50 mt-0.5 leading-tight">Veo encadeia takes pelo último frame.</p>
                 </button>
                 <button
                   onClick={() => setTransitionMode("hard_cuts")}
@@ -585,9 +585,26 @@ export default function ProductsPage() {
                   }`}
                 >
                   <p className="text-xs font-semibold text-white">Cortes secos</p>
-                  <p className="text-[10px] text-white/50 mt-0.5 leading-tight">Imita cortes da referência — mais rápido, cada take independente.</p>
+                  <p className="text-[10px] text-white/50 mt-0.5 leading-tight">Veo imita cortes — cada take independente.</p>
+                </button>
+                <button
+                  onClick={() => setTransitionMode("fidelity_clone")}
+                  className={`rounded-lg border p-2.5 text-left transition-colors ${
+                    transitionMode === "fidelity_clone"
+                      ? "border-rose-500/50 bg-rose-500/10"
+                      : "border-white/10 bg-white/[0.02] hover:bg-white/[0.05]"
+                  }`}
+                  title="Copia o vídeo de referência frame-a-frame trocando só o personagem. Requer avatar."
+                >
+                  <p className="text-xs font-semibold text-white">Clone fiel</p>
+                  <p className="text-[10px] text-white/50 mt-0.5 leading-tight">Copia 100% o reference, só troca personagem. ~5min.</p>
                 </button>
               </div>
+              {transitionMode === "fidelity_clone" && (
+                <p className="text-[10px] text-rose-300/80 leading-tight">
+                  ⚠ Modo Clone Fiel: bypassa Veo e usa face-swap frame-a-frame. Áudio e motion idênticos ao reference. Exige avatar com foto.
+                </p>
+              )}
             </div>
 
             {/* Toggle de tipo do vídeo (fala vs fashion) — previne bug da auto-detecção */}

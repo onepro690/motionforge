@@ -19,7 +19,7 @@ const schema = z.object({
   count: z.number().int().min(1).max(10).default(1),
   characterId: z.string().optional(), // personagem a usar como avatar
   noAvatar: z.boolean().optional(), // sem avatar — só troca fenótipo via prompt
-  transitionMode: z.enum(["continuous", "hard_cuts"]).optional(), // modo de transição entre takes
+  transitionMode: z.enum(["continuous", "hard_cuts", "fidelity_clone"]).optional(), // fidelity_clone bypassa Veo e faz face-swap frame-a-frame
   narrationOverride: z.enum(["auto", "speech", "silent"]).optional(), // força fala/silent/auto
 });
 
