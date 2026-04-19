@@ -9,13 +9,39 @@
 //
 // Autenticação: Vercel Cron envia header `authorization: Bearer $CRON_SECRET`.
 
-import { NextResponse } from "next/server";
+import { NextResponse, after } from "next/server";
 import { prisma } from "@motion/database";
 import { recordChunk, finalizeRecording } from "@/lib/ugc/live-recorder";
 import { isLiveActive } from "@/lib/ugc/live-scraper";
 
 export const maxDuration = 300;
 export const runtime = "nodejs";
+
+function triggerChain(id: string, cronSecret: string) {
+  const baseUrl =
+    process.env.VERCEL_URL
+      ? `https://${process.env.VERCEL_URL}`
+      : process.env.NEXT_PUBLIC_APP_URL ?? "http://localhost:3000";
+  after(async () => {
+    const controller = new AbortController();
+    const t = setTimeout(() => controller.abort(), 3000);
+    try {
+      await fetch(`${baseUrl}/api/ugc/lives/${id}/record-now`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          authorization: `Bearer ${cronSecret}`,
+        },
+        body: JSON.stringify({ chained: true }),
+        signal: controller.signal,
+      });
+    } catch {
+      /* expected abort */
+    } finally {
+      clearTimeout(t);
+    }
+  });
+}
 
 export async function GET(req: Request) {
   const authHeader = req.headers.get("authorization") ?? "";
@@ -73,6 +99,11 @@ export async function GET(req: Request) {
       chunk,
       finalResult,
     });
+  }
+
+  // Chunk ok e live ainda rolando: reinicia o chain (caso tenha quebrado).
+  if (chunk.ok && chunk.stillLive && expected) {
+    triggerChain(target.id, expected);
   }
 
   return NextResponse.json({

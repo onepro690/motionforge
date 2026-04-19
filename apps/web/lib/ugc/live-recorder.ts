@@ -7,6 +7,7 @@ import { prisma } from "@motion/database";
 import { fetchHlsUrl, isLiveActive } from "@/lib/ugc/live-scraper";
 import { put, list, del } from "@vercel/blob";
 import { spawn } from "child_process";
+import { Readable } from "stream";
 import { mkdir, readFile, writeFile, unlink, rm } from "fs/promises";
 import { tmpdir } from "os";
 import { join } from "path";
@@ -217,38 +218,66 @@ export async function finalizeRecording(id: string) {
   await mkdir(workDir, { recursive: true });
 
   try {
-    // ffmpeg concat demuxer lê direto das URLs HTTPS — evita baixar
-    // todos os chunks pra /tmp (que é limitado e estoura com ~5 chunks
-    // 720p). Só o final.mp4 fica em /tmp. protocol_whitelist é
-    // necessário pro concat aceitar URLs http/https.
+    // Streaming end-to-end: ffmpeg lê chunks direto das URLs HTTPS (concat
+    // demuxer) e escreve o MP4 final em stdout, que é consumido pelo
+    // Vercel Blob put via ReadableStream. NADA toca /tmp — suporta lives
+    // arbitrariamente longas (4h+ / múltiplos GB).
+    //
+    // Fragmented MP4 (frag_keyframe+empty_moov+default_base_moof) é
+    // necessário porque +faststart requer output seekable, que pipe não é.
+    // fMP4 é reprodutível em browsers e compatível com HTML5 video tag.
     const listPath = join(workDir, "list.txt");
     const listContent = chunks
       .map((c) => `file '${c.url.replace(/'/g, "'\\''")}'`)
       .join("\n");
     await writeFile(listPath, listContent);
 
-    const finalLocal = join(workDir, "final.mp4");
-    await runFfmpeg([
-      "-y",
-      "-loglevel", "error",
-      "-protocol_whitelist", "file,http,https,tcp,tls",
-      "-f", "concat",
-      "-safe", "0",
-      "-i", listPath,
-      "-c", "copy",
-      "-movflags", "+faststart",
-      finalLocal,
-    ]);
-
-    const finalBuf = await readFile(finalLocal);
-    // Libera /tmp antes do upload (final.mp4 buffered em RAM agora)
-    await unlink(finalLocal).catch(() => {});
     const finalKey = `ugc/lives/${id}/final.mp4`;
-    const finalBlob = await put(finalKey, finalBuf, {
-      access: "public",
-      contentType: "video/mp4",
-      allowOverwrite: true,
+    const proc = spawn(
+      FFMPEG,
+      [
+        "-y",
+        "-loglevel", "error",
+        "-protocol_whitelist", "file,http,https,tcp,tls",
+        "-f", "concat",
+        "-safe", "0",
+        "-i", listPath,
+        "-c", "copy",
+        "-f", "mp4",
+        "-movflags", "frag_keyframe+empty_moov+default_base_moof",
+        "pipe:1",
+      ],
+      { stdio: ["ignore", "pipe", "pipe"] },
+    );
+
+    let stderr = "";
+    proc.stderr.on("data", (d) => {
+      stderr += d.toString();
     });
+
+    const uploadPromise = put(
+      finalKey,
+      Readable.toWeb(proc.stdout) as ReadableStream<Uint8Array>,
+      { access: "public", contentType: "video/mp4", allowOverwrite: true },
+    );
+
+    const exitCode = await new Promise<number | null>((resolve, reject) => {
+      proc.on("close", resolve);
+      proc.on("error", reject);
+    });
+
+    if (exitCode !== 0) {
+      // Tenta abortar o upload parcial pra não deixar blob inválido
+      try {
+        const partial = await uploadPromise;
+        await del(partial.url).catch(() => null);
+      } catch {
+        /* upload pode ter falhado junto */
+      }
+      throw new Error(`ffmpeg exit ${exitCode}: ${stderr.slice(0, 500)}`);
+    }
+
+    const finalBlob = await uploadPromise;
 
     for (const c of chunks) {
       await del(c.url).catch(() => null);
