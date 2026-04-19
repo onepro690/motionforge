@@ -50,7 +50,22 @@ export async function POST(
   }
 
   if (body.finalize) {
-    const result = await finalizeRecording(id);
+    let result = await finalizeRecording(id);
+    // Se outro finalize (chain/cron) já está rodando, espera e verifica.
+    // Até 60s total. Se concluiu, retorna sucesso; senão, avisa cliente.
+    if (!result.ok && result.error === "finalize_locked") {
+      for (let i = 0; i < 30; i++) {
+        await new Promise((r) => setTimeout(r, 2000));
+        const check = await prisma.liveSession.findUnique({
+          where: { id },
+          select: { recordingStatus: true },
+        });
+        if (check?.recordingStatus === "DONE" || check?.recordingStatus === "FAILED") {
+          result = await finalizeRecording(id);
+          break;
+        }
+      }
+    }
     if (!result.ok) {
       return NextResponse.json(
         { error: result.error, message: "message" in result ? result.message : undefined },

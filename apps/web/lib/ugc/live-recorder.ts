@@ -147,15 +147,28 @@ export async function recordChunk(
     await runFfmpeg([
       "-y",
       "-loglevel", "error",
+      // Timeouts pra não travar a função se HLS morrer no meio.
+      "-rw_timeout", "15000000", // 15s em microsegundos (read/write)
+      "-reconnect", "1",
+      "-reconnect_streamed", "1",
+      "-reconnect_delay_max", "3",
       "-t", String(requested),
       "-i", streamUrl,
       "-c", "copy",
       "-bsf:a", "aac_adtstoasc",
       "-movflags", "+faststart",
+      // Tolerância a pacotes corrompidos durante stream instável.
+      "-fflags", "+genpts+discardcorrupt",
+      "-err_detect", "ignore_err",
       outPath,
     ]);
 
     const buf = await readFile(outPath);
+    // Valida chunk antes de subir. Arquivo muito pequeno = stream morreu
+    // quase imediatamente, só header mp4 sem conteúdo útil.
+    if (buf.length < 10_000) {
+      throw new Error(`chunk vazio/corrompido (${buf.length} bytes)`);
+    }
     const chunkKey = `ugc/lives/${id}/chunks/${Date.now()}.mp4`;
     const blob = await put(chunkKey, buf, {
       access: "public",
@@ -222,11 +235,34 @@ export async function finalizeRecording(id: string) {
     };
   }
 
+  // Lock atômico: previne dois finalize rodando ao mesmo tempo (chain
+  // após último chunk + cron no próximo tick). Compartilha o mesmo campo
+  // recordingLockedUntil que o recordChunk — um segura o outro.
+  const lockAcquired = await prisma.liveSession.updateMany({
+    where: {
+      id,
+      recordingStatus: { notIn: ["DONE"] },
+      OR: [
+        { recordingLockedUntil: null },
+        { recordingLockedUntil: { lt: new Date() } },
+      ],
+    },
+    data: {
+      recordingLockedUntil: new Date(Date.now() + 290_000),
+    },
+  });
+  if (lockAcquired.count === 0) {
+    return { ok: false as const, error: "finalize_locked" };
+  }
+
   const prefix = `ugc/lives/${id}/chunks/`;
   const listing = await list({ prefix });
-  const chunks = [...listing.blobs].sort(
+  // Filtra chunks corrompidos/vazios (< 10KB = só header mp4, sem conteúdo).
+  // Sem isso, 1 chunk ruim entre 60 bons quebraria o concat inteiro.
+  const allChunks = [...listing.blobs].sort(
     (a, b) => new Date(a.uploadedAt).getTime() - new Date(b.uploadedAt).getTime(),
   );
+  const chunks = allChunks.filter((c) => c.size >= 10_000);
 
   if (chunks.length === 0) {
     // Se já tem recordingUrl (finalize passado fez upload mas não atualizou
@@ -270,7 +306,8 @@ export async function finalizeRecording(id: string) {
       contentType: "video/mp4",
       allowOverwrite: true,
     });
-    await del(chunks[0].url).catch(() => null);
+    // Marca DONE ANTES de deletar chunks. Se DB falhar, chunks ficam pro
+    // retry. Se deleção falhar depois, não tem problema (cron pode relimpar).
     const updated = await prisma.liveSession.update({
       where: { id },
       data: {
@@ -281,6 +318,11 @@ export async function finalizeRecording(id: string) {
         recordingLockedUntil: null,
       },
     });
+    await del(chunks[0].url).catch(() => null);
+    // Limpa também os chunks descartados (corrompidos) que filtramos.
+    for (const c of allChunks) {
+      if (c.size < 10_000) await del(c.url).catch(() => null);
+    }
     return { ok: true as const, finalUrl: finalBlob.url, chunks: 1, updated };
   }
 
@@ -309,6 +351,14 @@ export async function finalizeRecording(id: string) {
         "-y",
         "-loglevel", "error",
         "-protocol_whitelist", "file,http,https,tcp,tls",
+        // Timeouts de rede pra HTTPS dos chunks.
+        "-rw_timeout", "15000000",
+        "-reconnect", "1",
+        "-reconnect_streamed", "1",
+        "-reconnect_delay_max", "3",
+        // Tolerância a chunks com erros/desalinhamento de timestamp.
+        "-fflags", "+genpts+discardcorrupt+igndts",
+        "-err_detect", "ignore_err",
         "-f", "concat",
         "-safe", "0",
         "-i", listPath,
@@ -349,10 +399,9 @@ export async function finalizeRecording(id: string) {
 
     const finalBlob = await uploadPromise;
 
-    for (const c of chunks) {
-      await del(c.url).catch(() => null);
-    }
-
+    // Marca DONE ANTES de deletar chunks. Se DB falhar, chunks ficam pro
+    // retry (nossa recovery idempotente pega). Se deleção falhar, cron
+    // pode limpar depois — chunks órfãos não quebram nada.
     const updated = await prisma.liveSession.update({
       where: { id },
       data: {
@@ -364,9 +413,51 @@ export async function finalizeRecording(id: string) {
       },
     });
 
+    // Deleta chunks válidos + filtrados (corrompidos).
+    for (const c of allChunks) {
+      await del(c.url).catch(() => null);
+    }
+
     return { ok: true as const, finalUrl: finalBlob.url, chunks: chunks.length, updated };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
+    // Fallback: se concat falhou, pelo menos salva o maior chunk como
+    // gravação final. Melhor do que marcar FAILED e perder tudo que gravou.
+    try {
+      const largest = [...chunks].sort((a, b) => b.size - a.size)[0];
+      if (largest) {
+        const finalKey = `ugc/lives/${id}/final.mp4`;
+        const resp = await fetch(largest.url);
+        if (resp.ok) {
+          const buf = Buffer.from(await resp.arrayBuffer());
+          const finalBlob = await put(finalKey, buf, {
+            access: "public",
+            contentType: "video/mp4",
+            allowOverwrite: true,
+          });
+          const updated = await prisma.liveSession.update({
+            where: { id },
+            data: {
+              recordingStatus: "DONE",
+              recordingUrl: finalBlob.url,
+              recordingEndedAt: new Date(),
+              recordingError: `fallback_concat_failed: ${message.slice(0, 400)}`,
+              recordingLockedUntil: null,
+            },
+          });
+          for (const c of allChunks) await del(c.url).catch(() => null);
+          return {
+            ok: true as const,
+            finalUrl: finalBlob.url,
+            chunks: 1,
+            updated,
+            fallback: true,
+          };
+        }
+      }
+    } catch {
+      /* fallback falhou tambem — marca FAILED abaixo */
+    }
     await prisma.liveSession.update({
       where: { id },
       data: {
