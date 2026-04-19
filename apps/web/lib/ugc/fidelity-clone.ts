@@ -1,198 +1,164 @@
-// Fidelity Clone Mode — copia o vídeo de referência frame-a-frame trocando
-// SÓ a identidade do personagem via Nano Banana. Mantém motion, timing,
-// lip-sync e áudio original intactos. É o único caminho que cumpre o
-// requisito "literalmente copiar o vídeo, mudar só o personagem".
+// Fidelity Clone Mode — usa Half-Moon AI Video Face Swap via Fal pra
+// trocar SÓ o rosto do vídeo de referência pelo avatar do usuário. O modelo
+// opera frame-a-frame internamente preservando motion, timing, lip-sync e
+// áudio originais. É o único caminho que cumpre "copia 100%, só troca
+// personagem" produzindo vídeo com movimento real (não slideshow).
 //
 // Pipeline:
-//   1. Baixa mp4 do TikTok (via tikwm)
-//   2. Extrai frames em FPS reduzido + áudio em arquivo separado
-//   3. Roda cada frame no Nano Banana (concorrência limitada)
-//      com a foto do avatar como identity lock
-//   4. Remonta o vídeo com ffmpeg: frames swapped + áudio original
-//   5. Sobe no Vercel Blob
+//   1. Pega mp4 do TikTok via tikwm (URL direta sem watermark)
+//   2. Detecta gênero do avatar via Gemini (requisito da API)
+//   3. Submete job pro fal queue: source_face_url_1 + target_video_url
+//   4. Polla até concluir
+//   5. Rehospeda no Vercel Blob + update DB
 
 import { prisma } from "@motion/database";
 import { put } from "@vercel/blob";
-import ffmpegInstaller from "@ffmpeg-installer/ffmpeg";
-import ffmpeg from "fluent-ffmpeg";
-import { writeFile, readFile, unlink, mkdir, readdir } from "fs/promises";
-import { join } from "path";
-import { randomBytes } from "crypto";
-import { swapPersonWithAvatar } from "./nano-banana";
 import { fetchTikwmDetail } from "./reference-video";
 
-ffmpeg.setFfmpegPath(ffmpegInstaller.path);
+const FAL_QUEUE = "https://queue.fal.run";
+const FAL_MODEL = "half-moon-ai/ai-face-swap/faceswapvideo";
+const POLL_INTERVAL_MS = 5000;
+const MAX_POLL_MS = 270000; // 4.5min — margem pra 300s maxDuration
 
-// Compromisso entre fidelidade e tempo de execução.
-// Frames = FPS × duração. Cada frame ~15-30s no Nano Banana.
-// Budget Vercel 300s → limite prático 40-50 frames.
-const TARGET_FPS = 4;
-const MAX_DURATION_SECONDS = 10;
-const CONCURRENCY = 5;
+type Gender = "male" | "female" | "non-binary";
 
-async function downloadBuffer(url: string, timeoutMs = 60000): Promise<Buffer> {
-  const res = await fetch(url, { signal: AbortSignal.timeout(timeoutMs) });
-  if (!res.ok) throw new Error(`download failed ${res.status}`);
-  return Buffer.from(await res.arrayBuffer());
-}
-
-async function extractFramesAndAudio(
-  videoBuffer: Buffer,
-  workDir: string
-): Promise<{ frameUrls: string[]; audioPath: string | null; fps: number }> {
-  const videoPath = join(workDir, "ref.mp4");
-  const framesDir = join(workDir, "frames");
-  const audioPath = join(workDir, "audio.m4a");
-  await mkdir(framesDir, { recursive: true });
-  await writeFile(videoPath, videoBuffer);
-
-  // Extrai frames limitados por -t MAX_DURATION e FPS TARGET_FPS.
-  await new Promise<void>((resolve, reject) => {
-    ffmpeg(videoPath)
-      .outputOptions([
-        "-t", String(MAX_DURATION_SECONDS),
-        "-vf", `fps=${TARGET_FPS}`,
-        "-q:v", "2",
-      ])
-      .output(join(framesDir, "frame-%04d.jpg"))
-      .on("end", () => resolve())
-      .on("error", (err: Error) => reject(err))
-      .run();
-  });
-
-  // Extrai áudio (mp4→m4a). Se o vídeo não tiver áudio, marca null.
-  let audioOk = false;
+async function fetchImageBase64(url: string): Promise<{ data: string; mimeType: string } | null> {
   try {
-    await new Promise<void>((resolve, reject) => {
-      ffmpeg(videoPath)
-        .outputOptions(["-t", String(MAX_DURATION_SECONDS), "-vn", "-acodec", "aac", "-b:a", "128k"])
-        .output(audioPath)
-        .on("end", () => resolve())
-        .on("error", (err: Error) => reject(err))
-        .run();
-    });
-    const stat = await readFile(audioPath).then((b) => b.byteLength).catch(() => 0);
-    audioOk = stat > 100;
+    const res = await fetch(url, { signal: AbortSignal.timeout(15000) });
+    if (!res.ok) return null;
+    const data = Buffer.from(await res.arrayBuffer()).toString("base64");
+    const mimeType = res.headers.get("content-type") ?? "image/jpeg";
+    return { data, mimeType };
   } catch {
-    audioOk = false;
+    return null;
   }
-
-  const files = (await readdir(framesDir)).filter((f) => f.endsWith(".jpg")).sort();
-  console.log(`[fidelity-clone] extracted ${files.length} frames at ${TARGET_FPS}fps, audio=${audioOk}`);
-
-  // Sobe cada frame no Blob pra Nano Banana conseguir baixar via URL.
-  const frameUrls: string[] = [];
-  for (const file of files) {
-    const buf = await readFile(join(framesDir, file));
-    const blob = await put(`fidelity-frame-${randomBytes(4).toString("hex")}-${file}`, buf, {
-      access: "public",
-      contentType: "image/jpeg",
-      addRandomSuffix: true,
-    });
-    frameUrls.push(blob.url);
-  }
-
-  return { frameUrls, audioPath: audioOk ? audioPath : null, fps: TARGET_FPS };
 }
 
-async function swapFramesBatch(
-  frameUrls: string[],
-  avatarUrl: string
-): Promise<(string | null)[]> {
-  // Primeiro frame: sem previousTakeResult. Serve como âncora.
-  // Demais frames: passa o PRIMEIRO swapped como IMAGE 3 — garante mesma
-  // identidade em todo o vídeo (Nano Banana trata IMAGE 2 como ground truth
-  // mas IMAGE 3 ajuda com estilo/iluminação consistentes).
-  const results: (string | null)[] = new Array(frameUrls.length).fill(null);
+// Half-Moon exige source_gender_1. Se errar, o swap não encontra o rosto
+// alvo no vídeo. Gemini 2.5 Flash resolve isso em ~2s.
+async function detectGender(avatarUrl: string): Promise<Gender> {
+  const apiKey = process.env.GOOGLE_AI_API_KEY?.trim();
+  if (!apiKey) return "female";
 
-  // Frame 0 — sequencial, bloqueia o resto.
-  const first = await swapPersonWithAvatar(frameUrls[0], avatarUrl, null);
-  if (!first) {
-    console.error("[fidelity-clone] frame 0 swap failed — aborting");
-    return results;
-  }
-  results[0] = first.url;
-  console.log(`[fidelity-clone] frame 0 → ${first.url.substring(0, 60)}`);
+  const img = await fetchImageBase64(avatarUrl);
+  if (!img) return "female";
 
-  // Restantes em paralelo (em chunks de CONCURRENCY).
-  const rest = frameUrls.slice(1);
-  for (let i = 0; i < rest.length; i += CONCURRENCY) {
-    const chunk = rest.slice(i, i + CONCURRENCY);
-    const chunkResults = await Promise.all(
-      chunk.map(async (url, idx) => {
-        const globalIdx = i + idx + 1;
-        try {
-          const res = await swapPersonWithAvatar(url, avatarUrl, first.url);
-          if (res) console.log(`[fidelity-clone] frame ${globalIdx} ok`);
-          else console.warn(`[fidelity-clone] frame ${globalIdx} null result`);
-          return res?.url ?? null;
-        } catch (err) {
-          console.error(`[fidelity-clone] frame ${globalIdx} failed:`, err);
-          return null;
-        }
-      })
-    );
-    chunkResults.forEach((url, idx) => {
-      results[i + idx + 1] = url;
-    });
-  }
-
-  return results;
-}
-
-async function assembleFinalVideo(
-  swappedUrls: (string | null)[],
-  audioPath: string | null,
-  fps: number,
-  workDir: string
-): Promise<Buffer> {
-  const outDir = join(workDir, "swapped");
-  await mkdir(outDir, { recursive: true });
-
-  // Baixa cada frame swapped e salva numerado. Se algum falhou (null),
-  // reaproveita o último frame bem-sucedido pra não deixar gap.
-  let lastGoodBuf: Buffer | null = null;
-  for (let i = 0; i < swappedUrls.length; i++) {
-    const url = swappedUrls[i];
-    let buf: Buffer | null = null;
-    if (url) {
-      try {
-        buf = await downloadBuffer(url, 30000);
-      } catch (err) {
-        console.warn(`[fidelity-clone] failed to download swapped frame ${i}:`, err);
+  try {
+    const res = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          contents: [
+            {
+              parts: [
+                {
+                  text: "Look at this person's photo. Reply with EXACTLY one word, no punctuation: 'male', 'female', or 'non-binary' based on apparent gender presentation.",
+                },
+                { inline_data: { mime_type: img.mimeType, data: img.data } },
+              ],
+            },
+          ],
+        }),
+        signal: AbortSignal.timeout(15000),
       }
-    }
-    if (!buf) buf = lastGoodBuf;
-    if (!buf) throw new Error(`no usable frame at index ${i} and no prior fallback`);
-    await writeFile(join(outDir, `frame-${String(i).padStart(4, "0")}.jpg`), buf);
-    lastGoodBuf = buf;
+    );
+    const data = (await res.json()) as {
+      candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }>;
+    };
+    const text = data.candidates?.[0]?.content?.parts?.[0]?.text?.trim().toLowerCase() ?? "";
+    console.log(`[fidelity-clone] gender detection → "${text}"`);
+    if (text.includes("non")) return "non-binary";
+    if (/^|\s(male)(\s|$)/.test(text) && !text.includes("female")) return "male";
+    return "female";
+  } catch (err) {
+    console.warn("[fidelity-clone] gender detection failed:", err);
+    return "female";
   }
+}
 
-  const outPath = join(workDir, "final.mp4");
+interface FalQueueSubmit {
+  request_id: string;
+  status_url?: string;
+  response_url?: string;
+}
 
-  // Remonta: frames (concat a TARGET_FPS) + áudio original (se houver).
-  await new Promise<void>((resolve, reject) => {
-    const cmd = ffmpeg()
-      .input(join(outDir, "frame-%04d.jpg"))
-      .inputOptions(["-framerate", String(fps)]);
-    if (audioPath) cmd.input(audioPath);
-    cmd
-      .outputOptions([
-        "-c:v", "libx264",
-        "-pix_fmt", "yuv420p",
-        "-r", "30",            // upsample visual pra 30fps (ffmpeg duplica frames)
-        "-preset", "veryfast",
-        "-crf", "22",
-        ...(audioPath ? ["-c:a", "aac", "-b:a", "128k", "-shortest"] : []),
-        "-movflags", "+faststart",
-      ])
-      .output(outPath)
-      .on("end", () => resolve())
-      .on("error", (err: Error) => reject(err))
-      .run();
+interface FalStatus {
+  status: "IN_QUEUE" | "IN_PROGRESS" | "COMPLETED" | "FAILED" | string;
+  logs?: Array<{ message: string }>;
+}
+
+interface FalVideoResult {
+  video?: { url: string; file_size?: number; content_type?: string };
+  file?: { url: string; file_size?: number; content_type?: string };
+  output?: { url: string };
+}
+
+async function submitFaceSwapJob(params: {
+  sourceFaceUrl: string;
+  targetVideoUrl: string;
+  sourceGender: Gender;
+}): Promise<FalQueueSubmit> {
+  const apiKey = process.env.FAL_KEY;
+  if (!apiKey) throw new Error("FAL_KEY not configured");
+
+  const res = await fetch(`${FAL_QUEUE}/${FAL_MODEL}`, {
+    method: "POST",
+    headers: { Authorization: `Key ${apiKey}`, "Content-Type": "application/json" },
+    body: JSON.stringify({
+      source_face_url_1: params.sourceFaceUrl,
+      source_gender_1: params.sourceGender,
+      target_video_url: params.targetVideoUrl,
+    }),
   });
+  if (!res.ok) {
+    const txt = await res.text();
+    throw new Error(`Fal submit failed ${res.status}: ${txt.slice(0, 400)}`);
+  }
+  return (await res.json()) as FalQueueSubmit;
+}
 
-  return readFile(outPath);
+async function pollFalJob(requestId: string): Promise<string> {
+  const apiKey = process.env.FAL_KEY!;
+  const statusUrl = `${FAL_QUEUE}/${FAL_MODEL}/requests/${requestId}/status`;
+  const resultUrl = `${FAL_QUEUE}/${FAL_MODEL}/requests/${requestId}`;
+
+  const start = Date.now();
+  while (Date.now() - start < MAX_POLL_MS) {
+    const statusRes = await fetch(statusUrl, {
+      headers: { Authorization: `Key ${apiKey}` },
+      signal: AbortSignal.timeout(15000),
+    });
+    if (!statusRes.ok) {
+      console.warn(`[fidelity-clone] poll status ${statusRes.status} — retrying`);
+      await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
+      continue;
+    }
+    const status = (await statusRes.json()) as FalStatus;
+    console.log(`[fidelity-clone] fal job ${requestId} status=${status.status}`);
+
+    if (status.status === "COMPLETED") {
+      const r = await fetch(resultUrl, {
+        headers: { Authorization: `Key ${apiKey}` },
+        signal: AbortSignal.timeout(30000),
+      });
+      if (!r.ok) throw new Error(`Fal result fetch failed: ${r.status}`);
+      const result = (await r.json()) as FalVideoResult;
+      const videoUrl = result.video?.url ?? result.file?.url ?? result.output?.url;
+      if (!videoUrl) {
+        throw new Error(`Fal completed but no video URL in result: ${JSON.stringify(result).slice(0, 300)}`);
+      }
+      return videoUrl;
+    }
+    if (status.status === "FAILED") {
+      const logs = (status.logs ?? []).map((l) => l.message).join(" | ");
+      throw new Error(`Fal job failed: ${logs || "no logs"}`);
+    }
+
+    await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
+  }
+  throw new Error(`Fal job ${requestId} timed out after ${MAX_POLL_MS / 1000}s`);
 }
 
 export async function runFidelityClone(videoId: string): Promise<void> {
@@ -207,13 +173,17 @@ export async function runFidelityClone(videoId: string): Promise<void> {
   if (!video.character?.imageUrl) {
     throw new Error("Fidelity Clone exige um personagem com foto. Selecione um avatar.");
   }
+  if (!process.env.FAL_KEY) {
+    throw new Error("FAL_KEY não configurado — fidelity clone requer fal.ai");
+  }
 
+  // Cron poll-ugc-videos só pega GENERATING_TAKES, então usamos SUBMITTING_TAKES
+  // pra evitar race condition que marca o vídeo como FAILED falsamente.
   await prisma.ugcGeneratedVideo.update({
     where: { id: videoId },
-    data: { status: "BRIEFING", currentStep: "fidelity_clone_starting", generationStartedAt: new Date() },
+    data: { status: "SUBMITTING_TAKES", currentStep: "fidelity_clone_starting", generationStartedAt: new Date() },
   });
 
-  // Pega o vídeo de referência com mais views que tenha URL do TikTok.
   const reference = [...video.product.detectedVideos]
     .sort((a, b) => Number((b.views ?? 0n) - (a.views ?? 0n)))
     .find((v) => v.videoUrl);
@@ -227,74 +197,59 @@ export async function runFidelityClone(videoId: string): Promise<void> {
   const detail = await fetchTikwmDetail(reference.videoUrl);
   if (!detail?.playUrl) throw new Error("Falha ao obter mp4 do TikTok via tikwm");
 
-  const workId = randomBytes(6).toString("hex");
-  const workDir = join("/tmp", `fidelity-${workId}`);
-  await mkdir(workDir, { recursive: true });
+  // Detecta gênero do avatar — Half-Moon exige source_gender_1 pra match.
+  await prisma.ugcGeneratedVideo.update({
+    where: { id: videoId },
+    data: { currentStep: "fidelity_clone_detecting_gender" },
+  });
+  const gender = await detectGender(video.character.imageUrl);
+  console.log(`[fidelity-clone] using gender=${gender} for avatar swap`);
 
-  try {
-    await prisma.ugcGeneratedVideo.update({
-      where: { id: videoId },
-      data: { currentStep: "fidelity_clone_extracting_frames" },
-    });
-    const refBuf = await downloadBuffer(detail.playUrl);
-    const { frameUrls, audioPath, fps } = await extractFramesAndAudio(refBuf, workDir);
-    if (frameUrls.length === 0) throw new Error("ffmpeg extraiu 0 frames do vídeo de referência");
+  // Submete o job
+  await prisma.ugcGeneratedVideo.update({
+    where: { id: videoId },
+    data: { currentStep: "fidelity_clone_submitting_fal" },
+  });
+  const submit = await submitFaceSwapJob({
+    sourceFaceUrl: video.character.imageUrl,
+    targetVideoUrl: detail.playUrl,
+    sourceGender: gender,
+  });
+  console.log(`[fidelity-clone] fal job submitted: ${submit.request_id}`);
 
-    // Evitar status=GENERATING_TAKES: o cron poll-ugc-videos pega vídeos nesse
-    // status e roda pollAndAssembleTakes, que tem um bug com takes=[] — marca
-    // erradamente como FAILED "Todos os takes falharam". Fidelity clone não
-    // cria takes em DB, então usa SUBMITTING_TAKES (não polled) durante swap.
-    await prisma.ugcGeneratedVideo.update({
-      where: { id: videoId },
-      data: { status: "SUBMITTING_TAKES", currentStep: `fidelity_clone_swapping_${frameUrls.length}_frames` },
-    });
-    const swappedUrls = await swapFramesBatch(frameUrls, video.character.imageUrl);
-    const successCount = swappedUrls.filter(Boolean).length;
-    if (successCount === 0) throw new Error("Nano Banana falhou em todos os frames");
-    console.log(`[fidelity-clone] ${successCount}/${frameUrls.length} frames swapped`);
+  // Poll até concluir
+  await prisma.ugcGeneratedVideo.update({
+    where: { id: videoId },
+    data: { status: "ASSEMBLING", currentStep: `fidelity_clone_processing_${submit.request_id}` },
+  });
+  const falOutputUrl = await pollFalJob(submit.request_id);
+  console.log(`[fidelity-clone] fal output: ${falOutputUrl}`);
 
-    await prisma.ugcGeneratedVideo.update({
-      where: { id: videoId },
-      data: { status: "ASSEMBLING", currentStep: "fidelity_clone_assembling" },
-    });
-    const finalBuf = await assembleFinalVideo(swappedUrls, audioPath, fps, workDir);
+  // Rehospeda no Blob pra ter URL persistente (Fal URLs expiram)
+  await prisma.ugcGeneratedVideo.update({
+    where: { id: videoId },
+    data: { currentStep: "fidelity_clone_persisting" },
+  });
+  const videoRes = await fetch(falOutputUrl, { signal: AbortSignal.timeout(120000) });
+  if (!videoRes.ok) throw new Error(`Falha ao baixar video do Fal: ${videoRes.status}`);
+  const videoBuf = Buffer.from(await videoRes.arrayBuffer());
+  const blob = await put(`fidelity-final-${videoId}.mp4`, videoBuf, {
+    access: "public",
+    contentType: "video/mp4",
+    addRandomSuffix: true,
+  });
 
-    const blob = await put(`fidelity-final-${videoId}.mp4`, finalBuf, {
-      access: "public",
-      contentType: "video/mp4",
-      addRandomSuffix: true,
-    });
-
-    // Thumbnail do primeiro frame swapped
-    const thumbUrl = swappedUrls.find((u) => u) ?? null;
-
-    await prisma.ugcGeneratedVideo.update({
-      where: { id: videoId },
-      data: {
-        status: "AWAITING_REVIEW",
-        currentStep: "done",
-        errorMessage: null,
-        finalVideoUrl: blob.url,
-        thumbnailUrl: thumbUrl,
-        durationSeconds: frameUrls.length / fps,
-        takeCount: 1,
-        generationCompletedAt: new Date(),
-      },
-    });
-    console.log(`[fidelity-clone] DONE: ${blob.url}`);
-  } finally {
-    // Limpa workdir
-    try {
-      const files = await readdir(workDir).catch(() => []);
-      for (const f of files) {
-        const full = join(workDir, f);
-        await unlink(full).catch(async () => {
-          const sub = await readdir(full).catch(() => []);
-          for (const s of sub) await unlink(join(full, s)).catch(() => {});
-          await (await import("fs/promises")).rmdir(full).catch(() => {});
-        });
-      }
-      await (await import("fs/promises")).rmdir(workDir).catch(() => {});
-    } catch {}
-  }
+  await prisma.ugcGeneratedVideo.update({
+    where: { id: videoId },
+    data: {
+      status: "AWAITING_REVIEW",
+      currentStep: "done",
+      errorMessage: null,
+      finalVideoUrl: blob.url,
+      durationSeconds: detail.durationSeconds ?? null,
+      takeCount: 1,
+      generationCompletedAt: new Date(),
+    },
+  });
+  console.log(`[fidelity-clone] DONE: ${blob.url}`);
 }
