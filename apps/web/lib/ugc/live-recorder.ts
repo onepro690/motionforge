@@ -53,6 +53,18 @@ export async function recordChunk(
   const live = await prisma.liveSession.findUnique({ where: { id } });
   if (!live) return { ok: false, error: "not_found", message: "session", stillLive: false };
 
+  // Bail se já foi finalizada. Sem isso, um chunk atrasado (chain + cron
+  // rodando em paralelo) poderia ressuscitar uma session DONE e causar
+  // double-finalize (→ FAILED no_chunks porque chunks foram deletados).
+  if (live.recordingStatus === "DONE" || live.recordingStatus === "FAILED") {
+    return {
+      ok: false,
+      error: "already_finalized",
+      message: `session status=${live.recordingStatus}`,
+      stillLive: false,
+    };
+  }
+
   // Cap em 220s: precisa caber ffmpeg + upload blob + DB updates dentro dos
   // 300s de maxDuration da serverless. 240s dava timeout em borderline cases.
   const requested = Math.max(10, Math.min(durationSeconds, 220));
@@ -93,18 +105,39 @@ export async function recordChunk(
     };
   }
 
-  // Lock + RECORDING. Expira em ~280s (pouco mais que chunk+overhead).
-  await prisma.liveSession.update({
-    where: { id },
+  // Lock atômico: só adquire se ainda não estiver DONE/FAILED e ninguém
+  // com lock vigente. Previne duas execuções (chain + cron, dois chains)
+  // rodando chunks em paralelo no mesmo session.
+  const now = new Date();
+  const lockAcquired = await prisma.liveSession.updateMany({
+    where: {
+      id,
+      recordingStatus: { in: ["QUEUED", "RECORDING"] },
+      OR: [
+        { recordingLockedUntil: null },
+        { recordingLockedUntil: { lt: now } },
+      ],
+    },
     data: {
       recordingStatus: "RECORDING",
-      recordingStartedAt: live.recordingStartedAt ?? new Date(),
+      recordingStartedAt: live.recordingStartedAt ?? now,
       recordingError: null,
       recordingLockedUntil: new Date(Date.now() + 280_000),
       hlsUrl,
       flvUrl,
     },
   });
+
+  if (lockAcquired.count === 0) {
+    // Outra execução está gravando (ou session acabou de ser finalizada).
+    // stillLive=false pra que o chain não continue se for chamada chaineada.
+    return {
+      ok: false,
+      error: "locked",
+      message: "outra execução já está gravando este chunk",
+      stillLive: false,
+    };
+  }
 
   const workDir = join(tmpdir(), `live-chunk-${randomBytes(6).toString("hex")}`);
   await mkdir(workDir, { recursive: true });
@@ -172,6 +205,23 @@ export async function recordChunk(
 }
 
 export async function finalizeRecording(id: string) {
+  // Idempotência: se já foi finalizada com sucesso, retorna o existente.
+  // Previne double-finalize de race (chain atrasado + cron rodando junto).
+  const existing = await prisma.liveSession.findUnique({
+    where: { id },
+    select: { recordingStatus: true, recordingUrl: true },
+  });
+  if (existing?.recordingStatus === "DONE" && existing.recordingUrl) {
+    const updated = await prisma.liveSession.findUnique({ where: { id } });
+    return {
+      ok: true as const,
+      finalUrl: existing.recordingUrl,
+      chunks: 0,
+      updated: updated!,
+      idempotent: true,
+    };
+  }
+
   const prefix = `ugc/lives/${id}/chunks/`;
   const listing = await list({ prefix });
   const chunks = [...listing.blobs].sort(
@@ -179,6 +229,26 @@ export async function finalizeRecording(id: string) {
   );
 
   if (chunks.length === 0) {
+    // Se já tem recordingUrl (finalize passado fez upload mas não atualizou
+    // DB a tempo), marca DONE ao invés de FAILED.
+    if (existing?.recordingUrl) {
+      const updated = await prisma.liveSession.update({
+        where: { id },
+        data: {
+          recordingStatus: "DONE",
+          recordingError: null,
+          recordingEndedAt: new Date(),
+          recordingLockedUntil: null,
+        },
+      });
+      return {
+        ok: true as const,
+        finalUrl: existing.recordingUrl,
+        chunks: 0,
+        updated,
+        recovered: true,
+      };
+    }
     await prisma.liveSession.update({
       where: { id },
       data: {
