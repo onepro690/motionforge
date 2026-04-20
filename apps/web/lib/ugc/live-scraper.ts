@@ -740,16 +740,60 @@ export async function isLiveActive(roomId: string): Promise<boolean> {
   return true;
 }
 
-// Confirmação FORTE de encerramento: roda isLiveActive duas vezes com
-// intervalo grande entre elas. Só retorna true se AMBAS confirmarem que
-// a live acabou. Usado antes de finalizar gravação pra evitar falso
-// positivo em janela de instabilidade curta do TikTok.
+// Proof-of-life via stream real: tenta baixar o master HLS e checa se
+// contém segmentos (#EXTINF). Se a stream ainda serve bytes, a live está
+// viva independentemente do que o JSON status diz. TikTok às vezes reporta
+// status=4 por 30s+ durante transcoder transition / reconnect, mas a
+// stream continua servindo — isso enganava confirmLiveEnded antes.
+export async function probeStreamAlive(roomId: string): Promise<boolean> {
+  const info = await fetchFullRoomInfo(roomId);
+  const url = info?.hlsUrl || info?.flvUrl;
+  if (!url) return false;
+  try {
+    const res = await fetch(url, {
+      headers: { "User-Agent": randomUA() },
+      signal: AbortSignal.timeout(8000),
+    });
+    if (!res.ok) return false;
+    // HLS: precisa conter #EXTINF (segmentos ativos).
+    // FLV direto: qualquer resposta com bytes significativos.
+    if (res.headers.get("content-type")?.includes("mpegurl")) {
+      const text = await res.text();
+      return /\#EXTINF/i.test(text);
+    }
+    // Para FLV/bytes brutos, só checa que tem conteúdo
+    const reader = res.body?.getReader();
+    if (!reader) return false;
+    const { value } = await reader.read();
+    reader.cancel().catch(() => {});
+    return !!value && value.length > 0;
+  } catch {
+    return false;
+  }
+}
+
+// Confirmação FORTE de encerramento. Combina status JSON + proof-of-life
+// via stream bytes. Live só é considerada encerrada quando TODAS estas
+// condições se mantêm em DUAS janelas separadas por 15s:
+//   1. isLiveActive retorna false (status=4 confirmado 2x consecutivo)
+//   2. probeStreamAlive retorna false (HLS sem segmentos OU FLV vazio)
+// Qualquer indício de vida em qualquer momento → returna false (continua gravando).
 export async function confirmLiveEnded(roomId: string): Promise<boolean> {
-  const first = await isLiveActive(roomId);
-  if (first) return false; // ainda está live
-  await new Promise((r) => setTimeout(r, 15_000)); // 15s de espera
-  const second = await isLiveActive(roomId);
-  return !second;
+  // Janela 1
+  const statusFirst = await isLiveActive(roomId);
+  if (statusFirst) return false;
+  const streamFirst = await probeStreamAlive(roomId);
+  if (streamFirst) return false;
+
+  await new Promise((r) => setTimeout(r, 15_000));
+
+  // Janela 2
+  const statusSecond = await isLiveActive(roomId);
+  if (statusSecond) return false;
+  const streamSecond = await probeStreamAlive(roomId);
+  if (streamSecond) return false;
+
+  return true;
 }
 
 // Exported for recording pipeline / refresh

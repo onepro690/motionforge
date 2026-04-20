@@ -4,7 +4,7 @@
 // finalizeRecording: concat todos os chunks num mp4 final + DONE.
 
 import { prisma } from "@motion/database";
-import { fetchHlsUrl, isLiveActive } from "@/lib/ugc/live-scraper";
+import { fetchHlsUrl, probeStreamAlive } from "@/lib/ugc/live-scraper";
 import { put, list, del } from "@vercel/blob";
 import { spawn } from "child_process";
 import { Readable } from "stream";
@@ -251,14 +251,18 @@ export async function recordChunk(
       },
     });
 
-    const stillLive = live.roomId ? await isLiveActive(live.roomId) : false;
-
+    // Proof-of-life direto: se gravou bytes suficientes (> 10KB passou no
+    // check acima), a stream está servindo. Não consulta isLiveActive aqui
+    // pois TikTok reporta status=4 falso durante reconnect/transcoder transition
+    // mesmo com stream continuando — isso cortava lives de 3h+ em ~1-2min.
+    // Live só é marcada como encerrada quando ffmpeg FALHA em baixar conteúdo
+    // (catch block abaixo + cron com confirmLiveEnded = isLiveActive + probeStreamAlive).
     return {
       ok: true,
       chunkUrl: blob.url,
       chunkSeconds: requested,
       cumulativeSeconds: cumulative,
-      stillLive,
+      stillLive: true,
     };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
@@ -271,7 +275,10 @@ export async function recordChunk(
         recordingLockedUntil: null,
       },
     });
-    const stillLive = live.roomId ? await isLiveActive(live.roomId).catch(() => false) : false;
+    // Proof-of-life via stream real. Se HLS ainda serve segmentos, retry.
+    // Chunk pode ter falhado por razão transiente (rede, WAF, reconnect)
+    // mesmo com live viva. probeStreamAlive é mais confiável que status JSON.
+    const stillLive = live.roomId ? await probeStreamAlive(live.roomId).catch(() => false) : false;
     return { ok: false, error: "chunk_failed", message, stillLive };
   } finally {
     // Libera /tmp imediatamente. Sem isso, containers Fluid Compute reusados
