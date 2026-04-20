@@ -11,7 +11,7 @@
 
 import { NextResponse, after } from "next/server";
 import { prisma } from "@motion/database";
-import { recordChunk, finalizeRecording } from "@/lib/ugc/live-recorder";
+import { recordChunk } from "@/lib/ugc/live-recorder";
 import { isLiveActive, confirmLiveEnded } from "@/lib/ugc/live-scraper";
 
 export const maxDuration = 300;
@@ -33,6 +33,32 @@ function triggerChain(id: string, cronSecret: string) {
           authorization: `Bearer ${cronSecret}`,
         },
         body: JSON.stringify({ chained: true }),
+        signal: controller.signal,
+      });
+    } catch {
+      /* expected abort */
+    } finally {
+      clearTimeout(t);
+    }
+  });
+}
+
+function triggerFinalize(id: string, cronSecret: string) {
+  const baseUrl =
+    process.env.VERCEL_URL
+      ? `https://${process.env.VERCEL_URL}`
+      : process.env.NEXT_PUBLIC_APP_URL ?? "http://localhost:3000";
+  after(async () => {
+    const controller = new AbortController();
+    const t = setTimeout(() => controller.abort(), 3000);
+    try {
+      await fetch(`${baseUrl}/api/ugc/lives/${id}/record-now`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          authorization: `Bearer ${cronSecret}`,
+        },
+        body: JSON.stringify({ finalize: true, confirmFirst: true }),
         signal: controller.signal,
       });
     } catch {
@@ -90,13 +116,14 @@ export async function GET(req: Request) {
         sessionId: target.id,
       });
     }
-    const result = await finalizeRecording(target.id);
+    // Finalize em invocação separada pra não arriscar timeout (concat pode
+    // demorar 30-60s em recordings longas).
+    if (expected) triggerFinalize(target.id, expected);
     return NextResponse.json({
       ok: true,
       processed: 1,
-      action: "finalized",
+      action: "finalize_triggered",
       sessionId: target.id,
-      result,
     });
   }
 
@@ -109,14 +136,13 @@ export async function GET(req: Request) {
       ? await confirmLiveEnded(target.roomId)
       : true;
     if (confirmedEnded) {
-      const finalResult = await finalizeRecording(target.id);
+      if (expected) triggerFinalize(target.id, expected);
       return NextResponse.json({
         ok: true,
         processed: 1,
-        action: "chunk+finalized",
+        action: "chunk+finalize_triggered",
         sessionId: target.id,
         chunk,
-        finalResult,
       });
     }
     // Flap — reinicia chain pra continuar gravando.

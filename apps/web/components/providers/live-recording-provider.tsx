@@ -105,14 +105,22 @@ export function LiveRecordingProvider({
             payload.restart = true;
             isFirstCall = false;
           }
+          // Abort após 75s: se servidor trava, não queremos esperar os 300s
+          // inteiros do timeout da função — isso gastava 5min por erro e o
+          // loop desistia em 25min (5 erros × 5min). Chunk normal é ~45s
+          // + 10-15s overhead; 75s cobre o feliz caminho com folga.
+          const controller = new AbortController();
+          const abortTimer = setTimeout(() => controller.abort(), 75_000);
           const res = await fetch(
             `/api/ugc/lives/${sessionId}/record-now`,
             {
               method: "POST",
               headers: { "Content-Type": "application/json" },
               body: JSON.stringify(payload),
+              signal: controller.signal,
             },
           ).catch(() => null);
+          clearTimeout(abortTimer);
 
           if (stopFlags.current.get(sessionId)) {
             reasonToFinalize = "user_stop";
@@ -142,8 +150,10 @@ export function LiveRecordingProvider({
               break;
             }
             consecutiveErrors++;
-            if (consecutiveErrors >= 5) {
-              // Desiste do loop no cliente, MAS não finaliza — cron continua.
+            // Tolera muito mais erros: cron roda a cada 2min, e erros
+            // transientes (timeout, WAF TikTok, network) não devem matar
+            // o loop. 60 erros × 3s = 3min de recuperação antes de desistir.
+            if (consecutiveErrors >= 60) {
               break;
             }
             await new Promise((r) => setTimeout(r, 3000));

@@ -24,6 +24,7 @@ interface Body {
   finalize?: boolean;
   chained?: boolean;
   restart?: boolean;
+  confirmFirst?: boolean;
 }
 
 export async function POST(
@@ -52,6 +53,42 @@ export async function POST(
   }
 
   if (body.finalize) {
+    // confirmFirst: chain dispara finalize via HTTP e pede verificação dupla.
+    // Se TikTok volta pra status=2 (flap), retorna sem finalizar — deixa
+    // chain/cron continuarem gravando. User clicando Parar NÃO usa isso
+    // (finalize imediato).
+    if (body.confirmFirst && isChainCall && live.roomId) {
+      const ended = await confirmLiveEnded(live.roomId);
+      if (!ended) {
+        // Dispara novo chain pra voltar a gravar.
+        if (cronSecret) {
+          const baseUrl =
+            process.env.VERCEL_URL
+              ? `https://${process.env.VERCEL_URL}`
+              : process.env.NEXT_PUBLIC_APP_URL ?? "http://localhost:3000";
+          after(async () => {
+            const controller = new AbortController();
+            const t = setTimeout(() => controller.abort(), 3000);
+            try {
+              await fetch(`${baseUrl}/api/ugc/lives/${id}/record-now`, {
+                method: "POST",
+                headers: {
+                  "Content-Type": "application/json",
+                  authorization: `Bearer ${cronSecret}`,
+                },
+                body: JSON.stringify({ chained: true }),
+                signal: controller.signal,
+              });
+            } catch {
+              /* abort esperado */
+            } finally {
+              clearTimeout(t);
+            }
+          });
+        }
+        return NextResponse.json({ ok: true, action: "flap_recovered" });
+      }
+    }
     let result = await finalizeRecording(id);
     // Se outro finalize (chain/cron) já está rodando, espera e verifica.
     // Até 60s total. Se concluiu, retorna sucesso; senão, avisa cliente.
@@ -155,42 +192,32 @@ export async function POST(
     });
   }
 
-  // Se live caiu durante o chunk e esta foi chamada chaineada, confirma
-  // encerramento com dupla verificação (15s de intervalo) antes de finalizar.
-  // Evita finalização prematura por flap momentâneo do TikTok.
-  if (result.ok && !result.stillLive && isChainCall && live.roomId) {
-    const roomId = live.roomId;
+  // Se live caiu durante o chunk e esta foi chamada chaineada, dispara
+  // finalize em invocação SEPARADA (fire-and-forget HTTP) com confirmFirst.
+  // Evita que confirmLiveEnded (22s) + concat (30s+) extrapolem os 300s
+  // da função atual, que já gastou até 250s no chunk.
+  if (result.ok && !result.stillLive && isChainCall && cronSecret && live.roomId) {
+    const baseUrl =
+      process.env.VERCEL_URL
+        ? `https://${process.env.VERCEL_URL}`
+        : process.env.NEXT_PUBLIC_APP_URL ?? "http://localhost:3000";
     after(async () => {
+      const controller = new AbortController();
+      const t = setTimeout(() => controller.abort(), 3000);
       try {
-        const ended = await confirmLiveEnded(roomId);
-        if (ended) {
-          await finalizeRecording(id);
-        } else if (cronSecret) {
-          // Flap: reinicia chain pra continuar gravando.
-          const baseUrl =
-            process.env.VERCEL_URL
-              ? `https://${process.env.VERCEL_URL}`
-              : process.env.NEXT_PUBLIC_APP_URL ?? "http://localhost:3000";
-          const controller = new AbortController();
-          const t = setTimeout(() => controller.abort(), 3000);
-          try {
-            await fetch(`${baseUrl}/api/ugc/lives/${id}/record-now`, {
-              method: "POST",
-              headers: {
-                "Content-Type": "application/json",
-                authorization: `Bearer ${cronSecret}`,
-              },
-              body: JSON.stringify({ chained: true }),
-              signal: controller.signal,
-            });
-          } catch {
-            /* abort esperado */
-          } finally {
-            clearTimeout(t);
-          }
-        }
+        await fetch(`${baseUrl}/api/ugc/lives/${id}/record-now`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            authorization: `Bearer ${cronSecret}`,
+          },
+          body: JSON.stringify({ finalize: true, confirmFirst: true }),
+          signal: controller.signal,
+        });
       } catch {
-        /* cron finaliza no próximo tick */
+        /* abort esperado */
+      } finally {
+        clearTimeout(t);
       }
     });
   }
