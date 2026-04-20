@@ -22,6 +22,7 @@ interface Body {
   durationSeconds?: number;
   finalize?: boolean;
   chained?: boolean;
+  restart?: boolean;
 }
 
 export async function POST(
@@ -85,10 +86,15 @@ export async function POST(
     });
   }
 
-  // Se usuário clicou Gravar numa session DONE/FAILED (ex: live ainda ativa,
-  // quer regravar; ou falhou e quer retry), reseta o estado antes. Só pra
-  // chamadas de cliente — chain não deve ressuscitar sessions finalizadas.
-  if (!isChainCall && (live.recordingStatus === "DONE" || live.recordingStatus === "FAILED")) {
+  // Reset SÓ quando cliente pediu explicitamente (restart: true), ou seja,
+  // user clicou Gravar de novo numa session já finalizada. Chamadas normais
+  // do loop (restart !== true) em session DONE retornam already_finalized
+  // com stillLive=false pra loop parar sem destruir o recordingUrl salvo.
+  //
+  // Bug que isso resolve: chain/cron finaliza a session em paralelo, depois
+  // o próximo /record-now do loop do cliente caía no reset e apagava a
+  // gravação de X minutos, começando do zero.
+  if (!isChainCall && body.restart && (live.recordingStatus === "DONE" || live.recordingStatus === "FAILED")) {
     await prisma.liveSession.update({
       where: { id },
       data: {
@@ -101,6 +107,12 @@ export async function POST(
         recordingLockedUntil: null,
       },
     });
+  } else if (!isChainCall && !body.restart && live.recordingStatus === "DONE") {
+    // Loop do cliente: live já foi finalizada (chain/cron). Sai limpo.
+    return NextResponse.json(
+      { error: "already_finalized", stillLive: false, finalUrl: live.recordingUrl },
+      { status: 409 },
+    );
   }
 
   // Chamada chaineada (server-side) usa chunks longos (250s) pra maximizar

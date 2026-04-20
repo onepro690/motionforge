@@ -89,18 +89,28 @@ export function LiveRecordingProvider({
       ensureTicker();
 
       let consecutiveErrors = 0;
+      let isFirstCall = true;
       // Razão pela qual o loop parou — só finaliza se for iniciativa do
       // usuário (Parar) ou confirmação do TikTok (live acabou).
       // Erro de rede/auth NÃO finaliza — deixa cron/chain continuarem.
+      // "already_finalized" significa que chain/cron já finalizou — loop
+      // sai sem disparar finalize extra (que apagaria a recording).
       let reasonToFinalize: "user_stop" | "live_ended" | null = null;
       try {
         while (!stopFlags.current.get(sessionId)) {
+          const payload: { durationSeconds: number; restart?: boolean } = {
+            durationSeconds: 45,
+          };
+          if (isFirstCall) {
+            payload.restart = true;
+            isFirstCall = false;
+          }
           const res = await fetch(
             `/api/ugc/lives/${sessionId}/record-now`,
             {
               method: "POST",
               headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ durationSeconds: 45 }),
+              body: JSON.stringify(payload),
             },
           ).catch(() => null);
 
@@ -111,14 +121,20 @@ export function LiveRecordingProvider({
 
           if (!res || !res.ok) {
             let stillLiveReported: boolean | undefined;
+            let errorCode: string | undefined;
             if (res) {
               const text = await res.text().catch(() => "");
               try {
-                const j = JSON.parse(text) as { stillLive?: boolean };
+                const j = JSON.parse(text) as { stillLive?: boolean; error?: string };
                 if (typeof j.stillLive === "boolean") stillLiveReported = j.stillLive;
+                if (typeof j.error === "string") errorCode = j.error;
               } catch {
                 /* ignore parse err */
               }
+            }
+            // Chain/cron já finalizou: sai do loop sem chamar finalize.
+            if (errorCode === "already_finalized") {
+              break;
             }
             // Só finaliza se servidor confirmou explicitamente !stillLive.
             if (stillLiveReported === false) {
