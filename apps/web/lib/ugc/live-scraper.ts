@@ -716,19 +716,40 @@ export async function fetchFullRoomInfo(roomId: string): Promise<FullRoomInfo | 
 // Checa se o room ainda está ao vivo. Usado pelo loop de gravação.
 //
 // IMPORTANTE: só retorna FALSE quando TikTok confirma EXPLICITAMENTE que a
-// live acabou (status=4). Qualquer outro valor — timeout, rate limit, status
-// ambíguo (1, 3, etc), null — retorna TRUE pra não parar a gravação por
-// falso negativo. Tenta 3x com 500ms entre tentativas.
+// live acabou (status=4) em DUAS leituras consecutivas — TikTok às vezes
+// reporta status=4 transiente durante reconnect/transcode switch, o que
+// causava finalização falsa no meio de lives de 3h+.
+//
+// Qualquer outro valor — timeout, rate limit, status ambíguo (0, 1, 3), null
+// — retorna TRUE pra não parar a gravação por falso negativo.
+// Até 6 tentativas com 1500ms entre elas (max ~9s) pra achar confirmação.
 export async function isLiveActive(roomId: string): Promise<boolean> {
-  for (let attempt = 0; attempt < 3; attempt++) {
+  let endedStreak = 0;
+  for (let attempt = 0; attempt < 6; attempt++) {
     const info = await fetchFullRoomInfo(roomId);
-    if (info?.status === 4) return false; // explicit ended
-    if (info?.status === 2) return true; // explicit live
-    // Qualquer outro valor (null, 0, 1, 3, etc) = continua tentando
-    if (attempt < 2) await new Promise((r) => setTimeout(r, 500));
+    if (info?.status === 2) return true;
+    if (info?.status === 4) {
+      endedStreak++;
+      if (endedStreak >= 2) return false; // 2 confirmações consecutivas
+    } else {
+      endedStreak = 0; // resetou — precisa reconfirmar
+    }
+    if (attempt < 5) await new Promise((r) => setTimeout(r, 1500));
   }
-  // 3 tentativas sem confirmação definitiva: assume ainda live.
+  // Sem confirmação dupla: assume ainda live.
   return true;
+}
+
+// Confirmação FORTE de encerramento: roda isLiveActive duas vezes com
+// intervalo grande entre elas. Só retorna true se AMBAS confirmarem que
+// a live acabou. Usado antes de finalizar gravação pra evitar falso
+// positivo em janela de instabilidade curta do TikTok.
+export async function confirmLiveEnded(roomId: string): Promise<boolean> {
+  const first = await isLiveActive(roomId);
+  if (first) return false; // ainda está live
+  await new Promise((r) => setTimeout(r, 15_000)); // 15s de espera
+  const second = await isLiveActive(roomId);
+  return !second;
 }
 
 // Exported for recording pipeline / refresh

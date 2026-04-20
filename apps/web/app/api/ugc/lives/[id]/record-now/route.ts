@@ -14,6 +14,7 @@ import { auth } from "@/lib/auth";
 import { headers } from "next/headers";
 import { prisma } from "@motion/database";
 import { recordChunk, finalizeRecording } from "@/lib/ugc/live-recorder";
+import { confirmLiveEnded } from "@/lib/ugc/live-scraper";
 
 export const maxDuration = 300;
 export const runtime = "nodejs";
@@ -154,11 +155,40 @@ export async function POST(
     });
   }
 
-  // Se live caiu durante o chunk e esta foi chamada chaineada, finaliza agora.
-  if (result.ok && !result.stillLive && isChainCall) {
+  // Se live caiu durante o chunk e esta foi chamada chaineada, confirma
+  // encerramento com dupla verificação (15s de intervalo) antes de finalizar.
+  // Evita finalização prematura por flap momentâneo do TikTok.
+  if (result.ok && !result.stillLive && isChainCall && live.roomId) {
+    const roomId = live.roomId;
     after(async () => {
       try {
-        await finalizeRecording(id);
+        const ended = await confirmLiveEnded(roomId);
+        if (ended) {
+          await finalizeRecording(id);
+        } else if (cronSecret) {
+          // Flap: reinicia chain pra continuar gravando.
+          const baseUrl =
+            process.env.VERCEL_URL
+              ? `https://${process.env.VERCEL_URL}`
+              : process.env.NEXT_PUBLIC_APP_URL ?? "http://localhost:3000";
+          const controller = new AbortController();
+          const t = setTimeout(() => controller.abort(), 3000);
+          try {
+            await fetch(`${baseUrl}/api/ugc/lives/${id}/record-now`, {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+                authorization: `Bearer ${cronSecret}`,
+              },
+              body: JSON.stringify({ chained: true }),
+              signal: controller.signal,
+            });
+          } catch {
+            /* abort esperado */
+          } finally {
+            clearTimeout(t);
+          }
+        }
       } catch {
         /* cron finaliza no próximo tick */
       }

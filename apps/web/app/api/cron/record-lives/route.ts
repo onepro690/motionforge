@@ -12,7 +12,7 @@
 import { NextResponse, after } from "next/server";
 import { prisma } from "@motion/database";
 import { recordChunk, finalizeRecording } from "@/lib/ugc/live-recorder";
-import { isLiveActive } from "@/lib/ugc/live-scraper";
+import { isLiveActive, confirmLiveEnded } from "@/lib/ugc/live-scraper";
 
 export const maxDuration = 300;
 export const runtime = "nodejs";
@@ -73,9 +73,23 @@ export async function GET(req: Request) {
   const target = candidates[0];
 
   // Checa se ainda está live antes de gastar 240s gravando lixo.
+  // Dupla confirmação (isLiveActive + espera 15s + isLiveActive) pra não
+  // finalizar em falso positivo durante reconnect do TikTok.
   const stillLive = target.roomId ? await isLiveActive(target.roomId) : false;
 
   if (!stillLive) {
+    const confirmedEnded = target.roomId
+      ? await confirmLiveEnded(target.roomId)
+      : true;
+    if (!confirmedEnded) {
+      // Flap transiente — não finaliza, deixa pro próximo tick.
+      return NextResponse.json({
+        ok: true,
+        processed: 0,
+        action: "skipped_flap",
+        sessionId: target.id,
+      });
+    }
     const result = await finalizeRecording(target.id);
     return NextResponse.json({
       ok: true,
@@ -88,16 +102,31 @@ export async function GET(req: Request) {
 
   const chunk = await recordChunk(target.id, 200);
 
-  // Se a live acabou durante este chunk, finaliza já.
+  // Se a live acabou durante este chunk, confirma com segunda leitura
+  // antes de finalizar. Chunk pode ter pego status=4 transiente.
   if (chunk.ok && !chunk.stillLive) {
-    const finalResult = await finalizeRecording(target.id);
+    const confirmedEnded = target.roomId
+      ? await confirmLiveEnded(target.roomId)
+      : true;
+    if (confirmedEnded) {
+      const finalResult = await finalizeRecording(target.id);
+      return NextResponse.json({
+        ok: true,
+        processed: 1,
+        action: "chunk+finalized",
+        sessionId: target.id,
+        chunk,
+        finalResult,
+      });
+    }
+    // Flap — reinicia chain pra continuar gravando.
+    if (expected) triggerChain(target.id, expected);
     return NextResponse.json({
       ok: true,
       processed: 1,
-      action: "chunk+finalized",
+      action: "chunk+flap_recovered",
       sessionId: target.id,
       chunk,
-      finalResult,
     });
   }
 
