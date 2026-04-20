@@ -33,9 +33,13 @@ import {
 
 const CHUNK_MS = 30_000;
 
-// Output 9:16 — canvas final que vai pro MediaRecorder.
-const OUT_W = 540;
-const OUT_H = 960;
+// Output 9:16 em 1080p — canvas final que vai pro MediaRecorder.
+// 1080x1920 é o padrão de "Full HD vertical" esperado por TikTok/Reels.
+// Nota: se a fonte (aba capturada) for menor que 1080 na largura do crop,
+// o drawImage vai upscale — sem detalhe novo, mas o container do arquivo
+// fica em 1080p (resolução/bitrate do arquivo ficam consistentes).
+const OUT_W = 1080;
+const OUT_H = 1920;
 const TARGET_ASPECT = OUT_W / OUT_H; // 0.5625
 
 // Ambient types — File System Access API ainda não está no lib.dom.d.ts
@@ -469,6 +473,11 @@ export function LiveRecordingProvider({
         rawStream = await navigator.mediaDevices.getDisplayMedia({
           video: {
             frameRate: { ideal: 30, max: 30 },
+            // Hint pro Chrome capturar em alta resolução. Tab capture
+            // normalmente entrega na resolução renderizada da aba; esses
+            // ideals só ajudam quando o Chrome tem margem pra subir.
+            width: { ideal: 2560 },
+            height: { ideal: 1440 },
           } as MediaTrackConstraints,
           audio: {
             suppressLocalAudioPlayback: true,
@@ -609,11 +618,18 @@ export function LiveRecordingProvider({
       const writable = rt.writable;
       const fileHandle = rt.fileHandle;
 
-      // Normaliza e clampa o crop recebido.
-      const sw = Math.max(1, Math.round(crop.w));
-      const sh = Math.max(1, Math.round(crop.h));
-      const sx = Math.max(0, Math.round(crop.x));
-      const sy = Math.max(0, Math.round(crop.y));
+      // Converte o crop (em pixels da fonte, como vistos no preview) pra
+      // coordenadas normalizadas [0-1]. A dimensão real do videoEl em
+      // runtime pode diferir da lida pelo probe (tab capture pode mudar
+      // resolução após resize da janela ou devicePixelRatio), então
+      // guardar o crop em proporção torna ele resolução-independente.
+      const probeW = state.sourceWidth ?? 0;
+      const probeH = state.sourceHeight ?? 0;
+      if (probeW === 0 || probeH === 0) return;
+      const nx = Math.max(0, Math.min(1, crop.x / probeW));
+      const ny = Math.max(0, Math.min(1, crop.y / probeH));
+      const nw = Math.max(0.01, Math.min(1 - nx, crop.w / probeW));
+      const nh = Math.max(0.01, Math.min(1 - ny, crop.h / probeH));
 
       // 1. videoEl offscreen recebe o track raw.
       const videoEl = document.createElement("video");
@@ -661,11 +677,13 @@ export function LiveRecordingProvider({
         const vw = videoEl.videoWidth;
         const vh = videoEl.videoHeight;
         if (vw > 0 && vh > 0) {
-          // Clampa o crop contra as dimensões atuais (caso o source mude).
-          const cx = Math.min(sx, Math.max(0, vw - 1));
-          const cy = Math.min(sy, Math.max(0, vh - 1));
-          const cw = Math.min(sw, vw - cx);
-          const ch = Math.min(sh, vh - cy);
+          // Denormaliza o crop usando as dimensões ATUAIS do track. Se o
+          // source tiver mudado de 1920x1080 pra 1280x720 entre probe e
+          // gravação, o crop continua apontando pra mesma região visual.
+          const cx = Math.max(0, Math.min(Math.round(nx * vw), vw - 1));
+          const cy = Math.max(0, Math.min(Math.round(ny * vh), vh - 1));
+          const cw = Math.max(1, Math.min(Math.round(nw * vw), vw - cx));
+          const ch = Math.max(1, Math.min(Math.round(nh * vh), vh - cy));
           ctx.drawImage(videoEl, cx, cy, cw, ch, 0, 0, OUT_W, OUT_H);
         }
         if (hasRVFC) {
@@ -696,8 +714,10 @@ export function LiveRecordingProvider({
       try {
         recorder = new MediaRecorder(combined, {
           mimeType,
-          videoBitsPerSecond: 2_500_000,
-          audioBitsPerSecond: 128_000,
+          // 1080p 30fps em vp9 fica limpo em ~8Mbps. vp8 precisa de mais;
+          // como fallback pro vp8 mantém 8Mbps (um pouco pior mas ok).
+          videoBitsPerSecond: 8_000_000,
+          audioBitsPerSecond: 192_000,
         });
       } catch (err) {
         updateState(sessionId, {
