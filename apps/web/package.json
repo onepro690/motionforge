@@ -3,7 +3,7 @@
   "version": "0.0.1",
   "scripts": {
     "dev": "next dev",
-    "build": "node -e \"const fs=require('fs'),p='../../node_modules/@ffmpeg/core/dist/esm';fs.mkdirSync('public/ffmpeg',{recursive:true});['ffmpeg-core.js','ffmpeg-core.wasm'].forEach(f=>{try{fs.copyFileSync(p+'/'+f,'public/ffmpeg/'+f)}catch(e){}})\" && prisma generate --schema=../../packages/database/prisma/schema.prisma && next build",
+    "build": "node -e \"const fs=require('fs'),p='../../node_modules/@ffmpeg/core/dist/umd';fs.mkdirSync('public/ffmpeg',{recursive:true});['ffmpeg-core.js','ffmpeg-core.wasm'].forEach(f=>{try{fs.copyFileSync(p+'/'+f,'public/ffmpeg/'+f)}catch(e){}})\" && prisma generate --schema=../../packages/database/prisma/schema.prisma && next build",
     "start": "next start",
     "lint": "next lint"
   },

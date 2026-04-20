@@ -20,6 +20,7 @@ import {
   TrendingUp,
   Radio,
   UserCircle,
+  FileVideo,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import {
@@ -48,6 +49,7 @@ const ugcNavItems = [
   { href: "/ugc/review", label: "Review", icon: LayoutDashboard },
   { href: "/ugc/lives", label: "Lives Shop", icon: Radio },
   { href: "/ugc/personagens", label: "Personagens", icon: UserCircle },
+  { href: "/ugc/converter", label: "Conversor MP4", icon: FileVideo },
 ];
 
 interface SidebarProps {
