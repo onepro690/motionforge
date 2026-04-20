@@ -13,6 +13,7 @@ import { NextResponse, after } from "next/server";
 import { prisma } from "@motion/database";
 import { recordChunk } from "@/lib/ugc/live-recorder";
 import { isLiveActive, confirmLiveEnded } from "@/lib/ugc/live-scraper";
+import { list } from "@vercel/blob";
 
 export const maxDuration = 300;
 export const runtime = "nodejs";
@@ -97,6 +98,28 @@ export async function GET(req: Request) {
   }
 
   const target = candidates[0];
+
+  // Gravações iniciadas pelo navegador (getDisplayMedia) não podem ser
+  // continuadas no servidor — o browser é a única fonte. Se vemos .webm.part,
+  // a sessão é browser-recorded: o cron não toca. Se a aba do usuário foi
+  // fechada e não manda mais chunks, o endpoint finalize (chamado via
+  // sendBeacon no pagehide ou pelo botão Parar manual) consolida o que foi.
+  try {
+    const sniff = await list({ prefix: `ugc/lives/${target.id}/chunks/` });
+    const isBrowser = sniff.blobs.some((b) =>
+      b.pathname.endsWith(".webm.part"),
+    );
+    if (isBrowser) {
+      return NextResponse.json({
+        ok: true,
+        processed: 0,
+        action: "skipped_browser_recording",
+        sessionId: target.id,
+      });
+    }
+  } catch {
+    /* listagem falhou — prossegue pro fluxo normal */
+  }
 
   // Checa se ainda está live antes de gastar 240s gravando lixo.
   // Dupla confirmação (isLiveActive + espera 15s + isLiveActive) pra não

@@ -91,7 +91,7 @@ function RecBadge({ status }: { status: string }) {
 
 function LiveCard({ session, onRecord, onDelete, onDeleteRecording, onStop, progress, recording, startedAt, finalizing }: {
   session: LiveSession;
-  onRecord: (id: string) => void;
+  onRecord: (id: string, hostHandle: string) => void;
   onDelete: (id: string, handle: string) => void;
   onDeleteRecording: (id: string) => void;
   onStop: (id: string) => void;
@@ -244,7 +244,7 @@ function LiveCard({ session, onRecord, onDelete, onDeleteRecording, onStop, prog
           )}
           {canRecord && !recording && !isRecording && (
             <Button size="sm"
-              onClick={() => onRecord(session.id)}
+              onClick={() => onRecord(session.id, session.hostHandle)}
               className="flex-1 text-[10px] gap-1 bg-red-500 hover:bg-red-600 text-white">
               <Video className="w-3 h-3" />Gravar
             </Button>
@@ -395,11 +395,11 @@ export default function LivesPage() {
     } finally { setScraping(false); }
   }
 
-  function handleRecord(id: string) {
-    // Dispara o loop no provider global. Continua rodando mesmo se o
-    // usuário navegar pra outra seção do dashboard. Quando terminar,
-    // recarrega a lista pra mostrar status DONE.
-    rec.startRecording(id, () => {
+  function handleRecord(id: string, hostHandle: string) {
+    // Abre a live do TikTok numa nova aba e o provider mostra modal pra
+    // iniciar captura via getDisplayMedia. Gravação vive no provider global,
+    // sobrevive a navegação entre seções do dashboard.
+    rec.startRecording(id, hostHandle, () => {
       void loadSessions(filter, page);
     });
     // Update otimista: marca RECORDING na UI imediatamente
@@ -717,7 +717,7 @@ export default function LivesPage() {
                   progress={recState ? { chunks: recState.chunks, seconds: recState.seconds } : undefined}
                   recording={rec.isRecording(s.id)}
                   startedAt={recState?.startedAt}
-                  finalizing={recState?.finalizing} />
+                  finalizing={recState?.status === "finalizing"} />
               );
             })}
           </div>

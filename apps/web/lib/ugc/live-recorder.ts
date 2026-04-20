@@ -306,6 +306,16 @@ export async function finalizeRecording(id: string) {
     };
   }
 
+  // Detecção: se algum chunk é .webm.part, gravação foi feita no browser
+  // (getDisplayMedia + MediaRecorder). Concat binário puro — MediaRecorder
+  // com timeslice gera chunks que são pedaços contíguos do mesmo stream
+  // WebM. Não precisa ffmpeg.
+  const sniff = await list({ prefix: `ugc/lives/${id}/chunks/` });
+  const hasWebm = sniff.blobs.some((b) => b.pathname.endsWith(".webm.part"));
+  if (hasWebm) {
+    return finalizeBrowserRecording(id, existing ?? null);
+  }
+
   // Lock atômico: previne dois finalize rodando ao mesmo tempo (chain
   // após último chunk + cron no próximo tick). Compartilha o mesmo campo
   // recordingLockedUntil que o recordChunk — um segura o outro.
@@ -538,5 +548,136 @@ export async function finalizeRecording(id: string) {
     return { ok: false as const, error: "finalize_failed", message };
   } finally {
     await rm(workDir, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
+async function finalizeBrowserRecording(
+  id: string,
+  existing: { recordingStatus: string; recordingUrl: string | null } | null,
+) {
+  const lockAcquired = await prisma.liveSession.updateMany({
+    where: {
+      id,
+      recordingStatus: { notIn: ["DONE"] },
+      OR: [
+        { recordingLockedUntil: null },
+        { recordingLockedUntil: { lt: new Date() } },
+      ],
+    },
+    data: { recordingLockedUntil: new Date(Date.now() + 290_000) },
+  });
+  if (lockAcquired.count === 0) {
+    return { ok: false as const, error: "finalize_locked" };
+  }
+
+  const prefix = `ugc/lives/${id}/chunks/`;
+  const listing = await list({ prefix });
+  const webmChunks = listing.blobs
+    .filter((b) => b.pathname.endsWith(".webm.part"))
+    .sort((a, b) => a.pathname.localeCompare(b.pathname));
+
+  if (webmChunks.length === 0) {
+    if (existing?.recordingUrl) {
+      const updated = await prisma.liveSession.update({
+        where: { id },
+        data: {
+          recordingStatus: "DONE",
+          recordingEndedAt: new Date(),
+          recordingError: null,
+          recordingLockedUntil: null,
+        },
+      });
+      return {
+        ok: true as const,
+        finalUrl: existing.recordingUrl,
+        chunks: 0,
+        updated,
+        recovered: true,
+      };
+    }
+    await prisma.liveSession.update({
+      where: { id },
+      data: {
+        recordingStatus: "FAILED",
+        recordingError: "no_chunks",
+        recordingEndedAt: new Date(),
+        recordingLockedUntil: null,
+      },
+    });
+    return { ok: false as const, error: "no_chunks" };
+  }
+
+  // Stream end-to-end: concatena os .webm.part numa ReadableStream que o
+  // Vercel Blob consome direto (upload streaming). Nada toca /tmp — suporta
+  // gravações arbitrariamente longas sem estourar memória ou disco.
+  const finalKey = `ugc/lives/${id}/final.webm`;
+  try {
+    const stream = new ReadableStream<Uint8Array>({
+      async pull(controller) {
+        // Nunca usado — start faz tudo.
+        controller.close();
+      },
+      async start(controller) {
+        try {
+          for (const chunk of webmChunks) {
+            const resp = await fetch(chunk.url);
+            if (!resp.ok || !resp.body) {
+              throw new Error(`fetch chunk ${chunk.pathname} status=${resp.status}`);
+            }
+            const reader = resp.body.getReader();
+            while (true) {
+              const { done, value } = await reader.read();
+              if (done) break;
+              if (value) controller.enqueue(value);
+            }
+          }
+          controller.close();
+        } catch (err) {
+          controller.error(err);
+        }
+      },
+    });
+
+    const finalBlob = await put(finalKey, stream, {
+      access: "public",
+      contentType: "video/webm",
+      allowOverwrite: true,
+    });
+
+    const updated = await prisma.liveSession.update({
+      where: { id },
+      data: {
+        recordingStatus: "DONE",
+        recordingUrl: finalBlob.url,
+        recordingEndedAt: new Date(),
+        recordingError: null,
+        recordingLockedUntil: null,
+      },
+    });
+
+    // Limpa chunks após DONE no DB. Se deleção falhar, chunks órfãos não
+    // quebram nada (cron de limpeza pode pegar depois).
+    for (const c of webmChunks) {
+      await del(c.url).catch(() => null);
+    }
+
+    return {
+      ok: true as const,
+      finalUrl: finalBlob.url,
+      chunks: webmChunks.length,
+      updated,
+    };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    await prisma.liveSession.update({
+      where: { id },
+      data: {
+        recordingStatus: "FAILED",
+        recordingError: `finalize_browser: ${message.slice(0, 480)}`,
+        recordingEndedAt: new Date(),
+        recordingLockedUntil: null,
+      },
+    });
+    return { ok: false as const, error: "finalize_failed", message };
   }
 }
