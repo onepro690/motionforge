@@ -1,20 +1,17 @@
 "use client";
 
-// Browser-based live recording:
-// 1. Usuário clica Gravar → abrimos a live TikTok numa nova aba e exibimos
-//    um modal de captura.
-// 2. No modal, usuário clica "Iniciar Captura" → chamamos getDisplayMedia
-//    e ele escolhe a aba do TikTok (incluindo áudio).
-// 3. MediaRecorder grava em timeslice de 30s. Cada chunk é enviado pra
-//    /api/ugc/lives/{id}/upload-chunk com um index sequencial.
-// 4. Usuário clica Parar (ou fecha a aba da live → track termina) → paramos
-//    o recorder, esperamos uploads pendentes, e chamamos /record-now
-//    {finalize:true} que concatena binariamente os .webm.part.
+// Gravação 100% local via File System Access API:
+// 1. Usuário clica Gravar → abrimos a live numa nova aba.
+// 2. Modal pede "Iniciar Captura" → chamamos:
+//    a) showSaveFilePicker — user escolhe onde salvar o .webm
+//    b) getDisplayMedia — user escolhe a aba do TikTok (com áudio)
+// 3. MediaRecorder timeslice 30s → cada chunk é escrito DIRETO no arquivo
+//    local via FileSystemWritableFileStream. Zero memória acumulada, zero
+//    upload, suporta gravações de qualquer tamanho.
+// 4. Stop → fecha arquivo + marca DONE no DB (só metadata, sem bytes).
 //
-// Não depende mais de HLS/FLV do TikTok nem de nenhum status JSON — o que
-// for renderizado na aba é o que é gravado. Aba pode ficar em monitor
-// secundário; throttling do Chrome é por visibilidade (está visível),
-// não por foco.
+// Zero dependência de HLS/FLV/status do TikTok. Zero limite de Vercel.
+// Requer Chrome/Edge desktop (Firefox/Safari não têm File System Access).
 
 import {
   createContext,
@@ -24,9 +21,32 @@ import {
   useRef,
   useState,
 } from "react";
-import { upload } from "@vercel/blob/client";
 
 const CHUNK_MS = 30_000;
+
+// Ambient types — File System Access API ainda não está no lib.dom.d.ts
+// estável de todas as versões do TS.
+declare global {
+  interface Window {
+    showSaveFilePicker?: (options?: {
+      suggestedName?: string;
+      types?: Array<{
+        description?: string;
+        accept: Record<string, string[]>;
+      }>;
+    }) => Promise<FileSystemFileHandle>;
+  }
+  interface FileSystemFileHandle {
+    readonly name: string;
+    createWritable(options?: {
+      keepExistingData?: boolean;
+    }): Promise<FileSystemWritableFileStream>;
+  }
+  interface FileSystemWritableFileStream {
+    write(data: Blob | BufferSource | string): Promise<void>;
+    close(): Promise<void>;
+  }
+}
 
 interface ActiveRecording {
   sessionId: string;
@@ -36,8 +56,9 @@ interface ActiveRecording {
   chunks: number;
   seconds: number;
   startedAt: number;
-  pendingUploads: number;
   error: string | null;
+  fileName: string | null;
+  writePending: boolean;
 }
 
 interface ContextValue {
@@ -69,11 +90,13 @@ export function useLiveRecording(): ContextValue {
 interface Runtime {
   recorder: MediaRecorder | null;
   stream: MediaStream | null;
-  nextIndex: number;
-  pendingUploads: Set<Promise<void>>;
+  writable: FileSystemWritableFileStream | null;
+  fileHandle: FileSystemFileHandle | null;
+  writeQueue: Promise<void>;
   onFinish?: () => void;
   stopped: boolean;
-  tabWindow: Window | null;
+  secondsWritten: number;
+  lastProgressReportedAt: number;
 }
 
 function pickMimeType(): string | undefined {
@@ -91,39 +114,26 @@ function pickMimeType(): string | undefined {
   return undefined;
 }
 
-async function uploadChunk(
+function sanitizeFileName(handle: string): string {
+  const clean = handle.replace(/[^\w.-]/g, "_").slice(0, 60) || "live";
+  const ts = new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-");
+  return `${clean}-${ts}.webm`;
+}
+
+async function postMetadata(
   sessionId: string,
-  index: number,
-  blob: Blob,
-  durationMs: number,
-  startedAtMs: number,
+  event: "start" | "progress" | "stop" | "cancel",
+  extras: { fileName?: string; durationSeconds?: number } = {},
 ): Promise<void> {
-  // Upload DIRETO pro Vercel Blob via signed URL — bypassa o limite de 4.5MB
-  // de body de serverless functions. O endpoint /upload-chunk só emite o
-  // token. Atualização do DB (status + duration) rola em onUploadCompleted
-  // server-side.
-  const padded = String(index).padStart(6, "0");
-  const pathname = `ugc/lives/${sessionId}/chunks/${padded}.webm.part`;
-  let attempt = 0;
-  let lastErr: unknown = null;
-  while (attempt < 3) {
-    try {
-      await upload(pathname, blob, {
-        access: "public",
-        handleUploadUrl: `/api/ugc/lives/${sessionId}/upload-chunk`,
-        contentType: "video/webm",
-        clientPayload: JSON.stringify({ index, durationMs, startedAtMs }),
-      });
-      return;
-    } catch (err) {
-      lastErr = err;
-      const msg = err instanceof Error ? err.message : "";
-      if (msg.includes("already_finalized")) return;
-    }
-    attempt++;
-    await new Promise((r) => setTimeout(r, 1500 * attempt));
+  try {
+    await fetch(`/api/ugc/lives/${sessionId}/local-recording`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ event, ...extras }),
+    });
+  } catch {
+    /* metadata é best-effort; não impede gravação */
   }
-  throw lastErr ?? new Error("upload failed");
 }
 
 export function LiveRecordingProvider({
@@ -161,29 +171,6 @@ export function LiveRecordingProvider({
     [],
   );
 
-  const teardownRuntime = useCallback((sessionId: string) => {
-    const rt = runtimes.current.get(sessionId);
-    if (!rt) return;
-    rt.stopped = true;
-    try {
-      if (rt.recorder && rt.recorder.state !== "inactive") {
-        rt.recorder.stop();
-      }
-    } catch {
-      /* noop */
-    }
-    if (rt.stream) {
-      for (const track of rt.stream.getTracks()) {
-        try {
-          track.stop();
-        } catch {
-          /* noop */
-        }
-      }
-    }
-    runtimes.current.delete(sessionId);
-  }, []);
-
   const finalize = useCallback(
     async (sessionId: string) => {
       const rt = runtimes.current.get(sessionId);
@@ -197,11 +184,21 @@ export function LiveRecordingProvider({
           } catch {
             /* ignore */
           }
-          // Espera uploads pendentes (inclui o chunk final emitido no stop).
-          // Damos um pequeno delay para o evento ondataavailable final disparar.
-          await new Promise((r) => setTimeout(r, 400));
-          const pending = Array.from(rt.pendingUploads);
-          await Promise.allSettled(pending);
+          // Dá tempo pro último ondataavailable enfileirar a escrita final.
+          await new Promise((r) => setTimeout(r, 500));
+          // Espera toda a fila de escrita drenar.
+          try {
+            await rt.writeQueue;
+          } catch {
+            /* ignore */
+          }
+          if (rt.writable) {
+            try {
+              await rt.writable.close();
+            } catch {
+              /* ignore */
+            }
+          }
           if (rt.stream) {
             for (const track of rt.stream.getTracks()) {
               try {
@@ -211,12 +208,10 @@ export function LiveRecordingProvider({
               }
             }
           }
+          await postMetadata(sessionId, "stop", {
+            durationSeconds: rt.secondsWritten,
+          });
         }
-        await fetch(`/api/ugc/lives/${sessionId}/record-now`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ finalize: true }),
-        }).catch(() => null);
       } finally {
         const onFinish = rt?.onFinish;
         runtimes.current.delete(sessionId);
@@ -244,22 +239,23 @@ export function LiveRecordingProvider({
       const liveUrl = `https://www.tiktok.com/@${cleanHandle}/live`;
 
       // Abre a aba IMEDIATAMENTE, ainda no handler do clique original
-      // (senão o popup blocker do navegador bloqueia).
-      let tabWindow: Window | null = null;
+      // (senão o popup blocker bloqueia).
       try {
-        tabWindow = window.open(liveUrl, "_blank", "noopener,noreferrer");
+        window.open(liveUrl, "_blank", "noopener,noreferrer");
       } catch {
-        tabWindow = null;
+        /* ignore */
       }
 
       runtimes.current.set(sessionId, {
         recorder: null,
         stream: null,
-        nextIndex: 0,
-        pendingUploads: new Set(),
+        writable: null,
+        fileHandle: null,
+        writeQueue: Promise.resolve(),
         onFinish,
         stopped: false,
-        tabWindow,
+        secondsWritten: 0,
+        lastProgressReportedAt: 0,
       });
 
       setStates((s) => ({
@@ -272,8 +268,9 @@ export function LiveRecordingProvider({
           chunks: 0,
           seconds: 0,
           startedAt: Date.now(),
-          pendingUploads: 0,
           error: null,
+          fileName: null,
+          writePending: false,
         },
       }));
       ensureTicker();
@@ -298,8 +295,54 @@ export function LiveRecordingProvider({
   const beginCapture = useCallback(
     async (sessionId: string) => {
       const rt = runtimes.current.get(sessionId);
-      if (!rt) return;
+      const state = states[sessionId];
+      if (!rt || !state) return;
 
+      // 1. Checa suporte do File System Access API.
+      if (typeof window.showSaveFilePicker !== "function") {
+        updateState(sessionId, {
+          status: "error",
+          error:
+            "Seu navegador não suporta gravação local. Use Chrome, Edge ou Opera no desktop.",
+        });
+        runtimes.current.delete(sessionId);
+        return;
+      }
+
+      // 2. Pede onde salvar o arquivo .webm.
+      const suggestedName = sanitizeFileName(state.hostHandle);
+      let fileHandle: FileSystemFileHandle;
+      try {
+        fileHandle = await window.showSaveFilePicker({
+          suggestedName,
+          types: [
+            {
+              description: "Vídeo WebM",
+              accept: { "video/webm": [".webm"] },
+            },
+          ],
+        });
+      } catch (err) {
+        const aborted =
+          err instanceof Error && err.name === "AbortError";
+        if (aborted) {
+          runtimes.current.delete(sessionId);
+          setStates((s) => {
+            const n = { ...s };
+            delete n[sessionId];
+            return n;
+          });
+          return;
+        }
+        updateState(sessionId, {
+          status: "error",
+          error: err instanceof Error ? err.message : "save_picker_failed",
+        });
+        runtimes.current.delete(sessionId);
+        return;
+      }
+
+      // 3. Pede a aba/janela pra capturar.
       let stream: MediaStream;
       try {
         stream = await navigator.mediaDevices.getDisplayMedia({
@@ -310,10 +353,7 @@ export function LiveRecordingProvider({
         });
       } catch (err) {
         const message = err instanceof Error ? err.message : "capture_denied";
-        updateState(sessionId, {
-          status: "error",
-          error: message,
-        });
+        updateState(sessionId, { status: "error", error: message });
         runtimes.current.delete(sessionId);
         return;
       }
@@ -322,7 +362,22 @@ export function LiveRecordingProvider({
         updateState(sessionId, {
           status: "error",
           error:
-            'Sem áudio capturado. Ao selecionar a aba, marque "Compartilhar áudio da aba" no canto inferior do diálogo.',
+            'Sem áudio capturado. Ao escolher a aba, marque "Compartilhar áudio da aba".',
+        });
+        for (const t of stream.getTracks()) t.stop();
+        runtimes.current.delete(sessionId);
+        return;
+      }
+
+      // 4. Abre writable pro arquivo.
+      let writable: FileSystemWritableFileStream;
+      try {
+        writable = await fileHandle.createWritable();
+      } catch (err) {
+        updateState(sessionId, {
+          status: "error",
+          error:
+            err instanceof Error ? err.message : "writable_failed",
         });
         for (const t of stream.getTracks()) t.stop();
         runtimes.current.delete(sessionId);
@@ -330,7 +385,10 @@ export function LiveRecordingProvider({
       }
 
       rt.stream = stream;
+      rt.writable = writable;
+      rt.fileHandle = fileHandle;
 
+      // 5. MediaRecorder.
       const mimeType = pickMimeType();
       let recorder: MediaRecorder;
       try {
@@ -340,62 +398,30 @@ export function LiveRecordingProvider({
           audioBitsPerSecond: 128_000,
         });
       } catch (err) {
-        const message = err instanceof Error ? err.message : "recorder_failed";
-        updateState(sessionId, { status: "error", error: message });
+        updateState(sessionId, {
+          status: "error",
+          error: err instanceof Error ? err.message : "recorder_failed",
+        });
         for (const t of stream.getTracks()) t.stop();
+        void writable.close().catch(() => null);
         runtimes.current.delete(sessionId);
         return;
       }
       rt.recorder = recorder;
 
-      const captureStartedAt = Date.now();
+      const fileName = fileHandle.name;
+      await postMetadata(sessionId, "start", { fileName });
+      updateState(sessionId, {
+        status: "recording",
+        startedAt: Date.now(),
+        fileName,
+      });
+
       recorder.ondataavailable = (event) => {
         if (!event.data || event.data.size < 1_000) return;
-        const index = rt.nextIndex++;
-        const durationMs = CHUNK_MS;
-        const task = uploadChunk(
-          sessionId,
-          index,
-          event.data,
-          durationMs,
-          captureStartedAt,
-        )
-          .then(() => {
-            setStates((s) => {
-              const prev = s[sessionId];
-              if (!prev) return s;
-              return {
-                ...s,
-                [sessionId]: {
-                  ...prev,
-                  chunks: prev.chunks + 1,
-                  seconds: prev.seconds + Math.round(durationMs / 1000),
-                  pendingUploads: Math.max(0, prev.pendingUploads - 1),
-                },
-              };
-            });
-          })
-          .catch((err) => {
-            // Falha persistente num chunk: deixa estado marcado mas não
-            // interrompe gravação — os outros chunks podem salvar o que der.
-            console.error("chunk upload failed", err);
-            setStates((s) => {
-              const prev = s[sessionId];
-              if (!prev) return s;
-              return {
-                ...s,
-                [sessionId]: {
-                  ...prev,
-                  pendingUploads: Math.max(0, prev.pendingUploads - 1),
-                  error: `Falha ao enviar chunk ${index}`,
-                },
-              };
-            });
-          })
-          .finally(() => {
-            rt.pendingUploads.delete(task);
-          });
-        rt.pendingUploads.add(task);
+        // Enfileira a escrita — cada write aguarda a anterior.
+        // FileSystemWritableFileStream grava sequencialmente sem buffer
+        // intermediário, então escrever um chunk de ~10MB direto é OK.
         setStates((s) => {
           const prev = s[sessionId];
           if (!prev) return s;
@@ -403,57 +429,108 @@ export function LiveRecordingProvider({
             ...s,
             [sessionId]: {
               ...prev,
-              pendingUploads: prev.pendingUploads + 1,
+              chunks: prev.chunks + 1,
+              seconds: prev.seconds + Math.round(CHUNK_MS / 1000),
+              writePending: true,
             },
           };
         });
+        rt.writeQueue = rt.writeQueue
+          .then(() => writable.write(event.data))
+          .then(() => {
+            rt.secondsWritten += Math.round(CHUNK_MS / 1000);
+            setStates((s) => {
+              const prev = s[sessionId];
+              if (!prev) return s;
+              return {
+                ...s,
+                [sessionId]: { ...prev, writePending: false },
+              };
+            });
+            const nowMs = Date.now();
+            if (nowMs - rt.lastProgressReportedAt > 60_000) {
+              rt.lastProgressReportedAt = nowMs;
+              void postMetadata(sessionId, "progress", {
+                durationSeconds: rt.secondsWritten,
+              });
+            }
+          })
+          .catch((err) => {
+            console.error("write failed", err);
+            setStates((s) => {
+              const prev = s[sessionId];
+              if (!prev) return s;
+              return {
+                ...s,
+                [sessionId]: {
+                  ...prev,
+                  writePending: false,
+                  error: `Falha ao escrever no arquivo: ${err instanceof Error ? err.message : "unknown"}`,
+                },
+              };
+            });
+          });
       };
 
       recorder.onerror = (event) => {
         console.error("MediaRecorder error", event);
       };
 
-      // Quando o usuário fecha a aba da live ou clica em "Parar de compartilhar"
-      // no Chrome, o track emite ended → finaliza automaticamente.
+      // Track ended → usuário fechou a aba do TikTok ou clicou "Parar".
       const videoTrack = stream.getVideoTracks()[0];
       if (videoTrack) {
         videoTrack.onended = () => {
           if (!rt.stopped) {
+            rt.stopped = true;
             void finalize(sessionId);
           }
         };
       }
 
       recorder.start(CHUNK_MS);
-      updateState(sessionId, {
-        status: "recording",
-        startedAt: Date.now(),
-      });
     },
-    [finalize, updateState],
+    [finalize, states, updateState],
   );
 
   const stopRecording = useCallback(
     (sessionId: string) => {
       const rt = runtimes.current.get(sessionId);
-      if (!rt) return;
-      if (rt.stopped) return;
+      if (!rt || rt.stopped) return;
       rt.stopped = true;
       void finalize(sessionId);
     },
     [finalize],
   );
 
-  // Persist unload: se o usuário fechar a aba do dashboard enquanto grava,
-  // pelo menos tenta disparar o finalize pra consolidar o que já subiu.
+  // Se o user fechar a aba do dashboard enquanto grava: fecha o writable
+  // pra garantir que o arquivo local seja válido (não atualiza DB porque
+  // sendBeacon não segura). O usuário ainda fica com o .webm no disco.
   useEffect(() => {
     const handler = () => {
-      for (const sessionId of runtimes.current.keys()) {
+      for (const [sessionId, rt] of runtimes.current) {
+        try {
+          if (rt.recorder && rt.recorder.state !== "inactive") {
+            rt.recorder.stop();
+          }
+        } catch {
+          /* ignore */
+        }
+        if (rt.writable) {
+          // close() é async mas pagehide não espera. Browser tenta flush
+          // buffer pendente; arquivo no disco costuma sobreviver intacto.
+          void rt.writable.close().catch(() => null);
+        }
         navigator.sendBeacon?.(
-          `/api/ugc/lives/${sessionId}/record-now`,
-          new Blob([JSON.stringify({ finalize: true })], {
-            type: "application/json",
-          }),
+          `/api/ugc/lives/${sessionId}/local-recording`,
+          new Blob(
+            [
+              JSON.stringify({
+                event: "stop",
+                durationSeconds: rt.secondsWritten,
+              }),
+            ],
+            { type: "application/json" },
+          ),
         );
       }
     };
@@ -490,7 +567,14 @@ export function LiveRecordingProvider({
         beginCapture={beginCapture}
         cancelAwaitingCapture={cancelAwaitingCapture}
         stopRecording={stopRecording}
-        teardownRuntime={teardownRuntime}
+        teardownRuntime={(id) => {
+          runtimes.current.delete(id);
+          setStates((s) => {
+            const n = { ...s };
+            delete n[id];
+            return n;
+          });
+        }}
       />
     </Ctx.Provider>
   );
@@ -532,29 +616,27 @@ function RecordingOverlay({
         <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/70 p-4">
           <div className="w-full max-w-md rounded-xl border border-neutral-800 bg-neutral-950 p-6 shadow-xl">
             <h2 className="text-lg font-semibold text-white">
-              Iniciar captura da live
+              Iniciar gravação local
             </h2>
             <p className="mt-3 text-sm text-neutral-300">
               Abrimos a live de{" "}
               <span className="font-mono text-white">@{awaiting.hostHandle}</span>{" "}
-              numa nova aba. Clique em <strong>Iniciar Captura</strong> abaixo
-              e, no diálogo do navegador:
+              numa nova aba. Ao clicar em <strong>Iniciar</strong>, seu navegador
+              vai pedir:
             </p>
             <ol className="mt-3 list-decimal space-y-1 pl-5 text-sm text-neutral-400">
               <li>
-                Escolha <strong>Aba do Chrome</strong> (não a tela inteira)
-              </li>
-              <li>Selecione a aba da live do TikTok</li>
-              <li>
-                Marque <strong>Compartilhar áudio da aba</strong>
+                <strong>Onde salvar o arquivo .webm</strong> no seu computador
               </li>
               <li>
-                Clique em <strong>Compartilhar</strong>
+                <strong>Qual aba gravar</strong> — escolha a da live TikTok,
+                marque <em>Compartilhar áudio da aba</em>
               </li>
             </ol>
             <p className="mt-3 text-xs text-neutral-500">
-              A aba pode ficar num monitor secundário enquanto você usa o
-              computador — basta não minimizá-la nem trocar a aba ativa dela.
+              O vídeo é gravado direto no seu disco enquanto rola — sem upload,
+              sem limite de tamanho. A aba pode ficar num monitor secundário,
+              só não pode ser minimizada.
             </p>
             <div className="mt-5 flex items-center justify-end gap-2">
               <button
@@ -571,7 +653,7 @@ function RecordingOverlay({
                 }}
                 className="rounded-md bg-red-600 px-4 py-2 text-sm font-semibold text-white hover:bg-red-500"
               >
-                Iniciar Captura
+                Iniciar
               </button>
             </div>
           </div>
@@ -582,7 +664,7 @@ function RecordingOverlay({
         <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/70 p-4">
           <div className="w-full max-w-md rounded-xl border border-red-900 bg-neutral-950 p-6 shadow-xl">
             <h2 className="text-lg font-semibold text-red-400">
-              Captura não iniciada
+              Não foi possível iniciar
             </h2>
             <p className="mt-3 text-sm text-neutral-300">{errorState.error}</p>
             <div className="mt-5 flex items-center justify-end gap-2">
@@ -609,15 +691,15 @@ function RecordingOverlay({
                 className="rounded-lg border border-red-700 bg-neutral-950/95 p-3 shadow-lg backdrop-blur"
               >
                 <div className="flex items-center justify-between gap-2">
-                  <div className="flex items-center gap-2">
+                  <div className="flex items-center gap-2 overflow-hidden">
                     <span
-                      className={`h-2.5 w-2.5 rounded-full ${
+                      className={`h-2.5 w-2.5 shrink-0 rounded-full ${
                         isFinalizing
                           ? "bg-yellow-500"
                           : "animate-pulse bg-red-500"
                       }`}
                     />
-                    <span className="font-mono text-sm text-white">
+                    <span className="truncate font-mono text-sm text-white">
                       @{r.hostHandle}
                     </span>
                   </div>
@@ -627,16 +709,21 @@ function RecordingOverlay({
                     disabled={isFinalizing}
                     className="rounded-md bg-red-600 px-3 py-1 text-xs font-semibold text-white hover:bg-red-500 disabled:opacity-50"
                   >
-                    {isFinalizing ? "Finalizando…" : "Parar"}
+                    {isFinalizing ? "Salvando…" : "Parar"}
                   </button>
                 </div>
                 <div className="mt-2 flex items-center justify-between text-xs text-neutral-400">
                   <span>{formatDuration(elapsed)}</span>
                   <span>
-                    {r.chunks} chunks{" "}
-                    {r.pendingUploads > 0 && `(${r.pendingUploads} pendente${r.pendingUploads > 1 ? "s" : ""})`}
+                    {r.chunks} chunk{r.chunks === 1 ? "" : "s"}
+                    {r.writePending && " · escrevendo…"}
                   </span>
                 </div>
+                {r.fileName && (
+                  <p className="mt-1 truncate text-[10px] text-neutral-500">
+                    {r.fileName}
+                  </p>
+                )}
                 {r.error && (
                   <p className="mt-1 text-xs text-red-400">{r.error}</p>
                 )}

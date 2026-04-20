@@ -306,6 +306,48 @@ function RecordingCard({ session, onDeleteRecording }: {
   }
 
   if (!session.recordingUrl) return null;
+
+  const isLocal = session.recordingUrl.startsWith("local:");
+  const localFileName = isLocal ? session.recordingUrl.slice(6) : null;
+
+  if (isLocal) {
+    return (
+      <div className="bg-white/[0.03] border border-white/[0.06] rounded-xl overflow-hidden hover:border-violet-500/20 transition-all flex flex-col">
+        <div className="w-full bg-gradient-to-br from-violet-950/40 to-neutral-900 aspect-video flex flex-col items-center justify-center gap-2 p-4 text-center">
+          <Video className="w-8 h-8 text-violet-400/60" />
+          <p className="text-xs font-medium text-white/80">Salvo no seu computador</p>
+          {localFileName && (
+            <p className="text-[10px] font-mono text-white/40 break-all px-2">
+              {localFileName}
+            </p>
+          )}
+          {session.recordingDurationSeconds && (
+            <p className="text-[10px] text-white/40">
+              {fmtDuration(session.recordingDurationSeconds)}
+            </p>
+          )}
+        </div>
+        <div className="p-3 flex items-center justify-between gap-2">
+          <div className="flex items-center gap-2 min-w-0">
+            <div className="w-7 h-7 rounded-full bg-violet-500/20 flex items-center justify-center text-xs font-bold text-violet-300 flex-shrink-0">
+              {(session.hostNickname || session.hostHandle)[0]?.toUpperCase()}
+            </div>
+            <div className="min-w-0">
+              <p className="text-xs font-medium text-white truncate">{session.hostNickname || session.hostHandle}</p>
+              <p className="text-[10px] text-white/40 truncate">@{session.hostHandle}</p>
+            </div>
+          </div>
+          <Button size="sm" variant="outline"
+            onClick={() => onDeleteRecording(session.id)}
+            title="Remover do histórico"
+            className="text-[10px] border-red-500/20 text-red-400 hover:text-red-300 hover:bg-red-500/10 gap-1 px-2">
+            <Trash2 className="w-3 h-3" />
+          </Button>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="bg-white/[0.03] border border-white/[0.06] rounded-xl overflow-hidden hover:border-violet-500/20 transition-all flex flex-col">
       <video
@@ -466,7 +508,7 @@ export default function LivesPage() {
   }
 
   async function handleDeleteRecording(id: string) {
-    if (!confirm("Apagar gravação? O arquivo será removido do Blob.")) return;
+    if (!confirm("Remover o histórico desta gravação? O arquivo local no seu disco NÃO é apagado.")) return;
     setActioning((s) => new Set(s).add(id));
     try {
       await fetch(`/api/ugc/lives/${id}`, {
