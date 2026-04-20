@@ -140,7 +140,15 @@ interface Runtime {
 }
 
 function pickMimeType(): string | undefined {
+  // Prioriza MP4/H.264+AAC quando o Chrome suporta (desde ~Chrome 111
+  // no desktop). Isso usa o encoder nativo do Chrome (hardware quando
+  // disponível), evitando a etapa de conversão webm→mp4 depois.
+  // Se não suportar, cai pros webm/VPx tradicionais.
   const candidates = [
+    "video/mp4;codecs=avc1.42E01F,mp4a.40.2",
+    "video/mp4;codecs=avc1,mp4a.40.2",
+    "video/mp4;codecs=h264,aac",
+    "video/mp4",
     "video/webm;codecs=vp9,opus",
     "video/webm;codecs=vp8,opus",
     "video/webm;codecs=vp9",
@@ -154,10 +162,16 @@ function pickMimeType(): string | undefined {
   return undefined;
 }
 
-function sanitizeFileName(handle: string): string {
+function extensionForMimeType(mime: string | undefined): string {
+  if (!mime) return "webm";
+  if (mime.startsWith("video/mp4")) return "mp4";
+  return "webm";
+}
+
+function sanitizeFileName(handle: string, ext: string): string {
   const clean = handle.replace(/[^\w.-]/g, "_").slice(0, 60) || "live";
   const ts = new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-");
-  return `${clean}-${ts}.webm`;
+  return `${clean}-${ts}.${ext}`;
 }
 
 async function postMetadata(
@@ -437,17 +451,27 @@ export function LiveRecordingProvider({
         return;
       }
 
-      // 2. Pede onde salvar o arquivo .webm.
-      const suggestedName = sanitizeFileName(state.hostHandle);
+      // 2. Pede onde salvar o arquivo.
+      //    Escolhe extensão/container baseado no que o MediaRecorder vai
+      //    produzir — MP4 quando Chrome suporta (hardware H.264), senão WebM.
+      const chosenMime = pickMimeType();
+      const ext = extensionForMimeType(chosenMime);
+      const isMp4 = ext === "mp4";
+      const suggestedName = sanitizeFileName(state.hostHandle, ext);
       let fileHandle: FileSystemFileHandle;
       try {
         fileHandle = await window.showSaveFilePicker({
           suggestedName,
           types: [
-            {
-              description: "Vídeo WebM",
-              accept: { "video/webm": [".webm"] },
-            },
+            isMp4
+              ? {
+                  description: "Vídeo MP4",
+                  accept: { "video/mp4": [".mp4"] },
+                }
+              : {
+                  description: "Vídeo WebM",
+                  accept: { "video/webm": [".webm"] },
+                },
           ],
         });
       } catch (err) {
@@ -943,7 +967,8 @@ function RecordingOverlay({
             </p>
             <ol className="mt-3 list-decimal space-y-2 pl-5 text-sm text-neutral-400">
               <li>
-                <strong>Onde salvar o arquivo .webm</strong> no seu computador.
+                <strong>Onde salvar o arquivo</strong> (.mp4 se seu Chrome
+                suportar, senão .webm).
               </li>
               <li>
                 <strong>Qual aba capturar.</strong> Na janelinha do Chrome,

@@ -33,8 +33,16 @@ type Status =
 
 const PRESETS = [
   {
+    id: "remux",
+    label: "⚡ Remux rápido (sem re-encodar · poucos segundos)",
+    args: [
+      "-c", "copy",
+      "-movflags", "+faststart",
+    ],
+  },
+  {
     id: "balanced",
-    label: "Balanceado (MP4 · H.264 CRF 23 · AAC 192k)",
+    label: "Balanceado (H.264 CRF 23 · AAC 192k · demora bastante)",
     args: [
       "-c:v", "libx264",
       "-preset", "fast",
@@ -47,7 +55,7 @@ const PRESETS = [
   },
   {
     id: "high",
-    label: "Alta qualidade (MP4 · H.264 CRF 18 · AAC 256k)",
+    label: "Alta qualidade (H.264 CRF 18 · AAC 256k · demora MUITO)",
     args: [
       "-c:v", "libx264",
       "-preset", "medium",
@@ -60,7 +68,7 @@ const PRESETS = [
   },
   {
     id: "fast",
-    label: "Rápido (MP4 · H.264 CRF 28 · AAC 128k)",
+    label: "Rápido (H.264 CRF 28 · AAC 128k · demora menos)",
     args: [
       "-c:v", "libx264",
       "-preset", "veryfast",
@@ -97,7 +105,7 @@ export default function ConverterPage() {
   const [elapsed, setElapsed] = useState(0);
   const [fileInfo, setFileInfo] = useState<{ name: string; size: number } | null>(null);
   const [output, setOutput] = useState<{ url: string; name: string; size: number } | null>(null);
-  const [preset, setPreset] = useState<PresetId>("balanced");
+  const [preset, setPreset] = useState<PresetId>("remux");
   const [logTail, setLogTail] = useState<string>("");
   const ffmpegRef = useRef<FFmpeg | null>(null);
   const inputRef = useRef<HTMLInputElement | null>(null);
@@ -290,6 +298,21 @@ export default function ConverterPage() {
             </option>
           ))}
         </select>
+        {preset === "remux" ? (
+          <p className="mt-2 text-xs text-violet-300">
+            ⚡ Só troca o container .webm → .mp4 sem re-encodar. Termina em
+            segundos mesmo pra arquivos de GBs. Funciona em CapCut,
+            TikTok, Premiere, DaVinci. <strong>Não funciona</strong> em
+            reproduzir direto no iOS/Safari (VP9 não é suportado lá).
+          </p>
+        ) : (
+          <p className="mt-2 text-xs text-yellow-500">
+            ⚠️ Re-encodar em H.264 no ffmpeg.wasm é lento: pode levar
+            várias horas pra 1h de vídeo. Se seu editor aceita VP9 em
+            MP4 (CapCut, TikTok, Premiere, DaVinci aceitam),
+            use <strong>Remux rápido</strong>.
+          </p>
+        )}
 
         <div className="mt-5">
           <label className="block text-sm font-medium text-neutral-200">
