@@ -24,6 +24,11 @@ import {
 
 const CHUNK_MS = 30_000;
 
+// Output 9:16 — popup TikTok abre em 540x960; se usuário redimensionar,
+// canvas continua 540x960 e a gente center-crop do source.
+const OUT_W = 540;
+const OUT_H = 960;
+
 // Ambient types — File System Access API ainda não está no lib.dom.d.ts
 // estável de todas as versões do TS.
 declare global {
@@ -89,7 +94,11 @@ export function useLiveRecording(): ContextValue {
 
 interface Runtime {
   recorder: MediaRecorder | null;
-  stream: MediaStream | null;
+  stream: MediaStream | null; // stream COMBINADO (canvas vídeo + aba áudio) — vai pro recorder
+  rawStream: MediaStream | null; // getDisplayMedia cru — tracks originais da aba
+  canvasStream: MediaStream | null; // captureStream() do canvas
+  videoEl: HTMLVideoElement | null;
+  cropRaf: number | null;
   writable: FileSystemWritableFileStream | null;
   fileHandle: FileSystemFileHandle | null;
   writeQueue: Promise<void>;
@@ -97,6 +106,7 @@ interface Runtime {
   stopped: boolean;
   secondsWritten: number;
   lastProgressReportedAt: number;
+  popupWindow: Window | null;
 }
 
 function pickMimeType(): string | undefined {
@@ -199,13 +209,39 @@ export function LiveRecordingProvider({
               /* ignore */
             }
           }
-          if (rt.stream) {
-            for (const track of rt.stream.getTracks()) {
+          // Para a raf de crop antes de parar tracks — evita drawImage
+          // num video sem stream.
+          if (rt.cropRaf !== null) {
+            try {
+              cancelAnimationFrame(rt.cropRaf);
+            } catch {
+              /* noop */
+            }
+          }
+          for (const s of [rt.rawStream, rt.canvasStream]) {
+            if (!s) continue;
+            for (const track of s.getTracks()) {
               try {
                 track.stop();
               } catch {
                 /* noop */
               }
+            }
+          }
+          if (rt.videoEl) {
+            try {
+              rt.videoEl.pause();
+              rt.videoEl.srcObject = null;
+              rt.videoEl.remove();
+            } catch {
+              /* noop */
+            }
+          }
+          if (rt.popupWindow && !rt.popupWindow.closed) {
+            try {
+              rt.popupWindow.close();
+            } catch {
+              /* cross-origin: ignore */
             }
           }
           await postMetadata(sessionId, "stop", {
@@ -238,17 +274,25 @@ export function LiveRecordingProvider({
       const cleanHandle = hostHandle.replace(/^@/, "");
       const liveUrl = `https://www.tiktok.com/@${cleanHandle}/live`;
 
-      // Abre a aba IMEDIATAMENTE, ainda no handler do clique original
-      // (senão o popup blocker bloqueia).
+      // Popup 540x960 (9:16) — força layout mobile do TikTok onde o
+      // vídeo ocupa toda a janela (sem coluna de chat do desktop).
+      // popup=yes hint faz o Chrome abrir como janela separada (ao invés
+      // de tab), facilitando a seleção em getDisplayMedia.
+      const features = `popup=yes,width=${OUT_W},height=${OUT_H},noopener,noreferrer`;
+      let popupWindow: Window | null = null;
       try {
-        window.open(liveUrl, "_blank", "noopener,noreferrer");
+        popupWindow = window.open(liveUrl, "_blank", features);
       } catch {
-        /* ignore */
+        popupWindow = null;
       }
 
       runtimes.current.set(sessionId, {
         recorder: null,
         stream: null,
+        rawStream: null,
+        canvasStream: null,
+        videoEl: null,
+        cropRaf: null,
         writable: null,
         fileHandle: null,
         writeQueue: Promise.resolve(),
@@ -256,6 +300,7 @@ export function LiveRecordingProvider({
         stopped: false,
         secondsWritten: 0,
         lastProgressReportedAt: 0,
+        popupWindow,
       });
 
       setStates((s) => ({
@@ -282,6 +327,14 @@ export function LiveRecordingProvider({
     (sessionId: string) => {
       const state = states[sessionId];
       if (!state || state.status !== "awaiting_capture") return;
+      const rt = runtimes.current.get(sessionId);
+      if (rt?.popupWindow && !rt.popupWindow.closed) {
+        try {
+          rt.popupWindow.close();
+        } catch {
+          /* ignore */
+        }
+      }
       runtimes.current.delete(sessionId);
       setStates((s) => {
         const n = { ...s };
@@ -343,13 +396,26 @@ export function LiveRecordingProvider({
       }
 
       // 3. Pede a aba/janela pra capturar.
-      let stream: MediaStream;
+      //    - suppressLocalAudioPlayback: captura áudio da aba mas silencia
+      //      o playback local — você não precisa ouvir a live enquanto grava.
+      //    - systemAudio: 'exclude' garante que sons de outras abas/sistema
+      //      não entrem mesmo se user escolher "tela inteira" por engano.
+      let rawStream: MediaStream;
       try {
-        stream = await navigator.mediaDevices.getDisplayMedia({
+        rawStream = await navigator.mediaDevices.getDisplayMedia({
           video: {
             frameRate: { ideal: 30, max: 30 },
           } as MediaTrackConstraints,
-          audio: true,
+          audio: {
+            suppressLocalAudioPlayback: true,
+          } as MediaTrackConstraints & {
+            suppressLocalAudioPlayback?: boolean;
+          },
+          systemAudio: "exclude",
+          selfBrowserSurface: "exclude",
+        } as DisplayMediaStreamOptions & {
+          systemAudio?: "include" | "exclude";
+          selfBrowserSurface?: "include" | "exclude";
         });
       } catch (err) {
         const message = err instanceof Error ? err.message : "capture_denied";
@@ -358,13 +424,13 @@ export function LiveRecordingProvider({
         return;
       }
 
-      if (stream.getAudioTracks().length === 0) {
+      if (rawStream.getAudioTracks().length === 0) {
         updateState(sessionId, {
           status: "error",
           error:
             'Sem áudio capturado. Ao escolher a aba, marque "Compartilhar áudio da aba".',
         });
-        for (const t of stream.getTracks()) t.stop();
+        for (const t of rawStream.getTracks()) t.stop();
         runtimes.current.delete(sessionId);
         return;
       }
@@ -376,23 +442,110 @@ export function LiveRecordingProvider({
       } catch (err) {
         updateState(sessionId, {
           status: "error",
-          error:
-            err instanceof Error ? err.message : "writable_failed",
+          error: err instanceof Error ? err.message : "writable_failed",
         });
-        for (const t of stream.getTracks()) t.stop();
+        for (const t of rawStream.getTracks()) t.stop();
         runtimes.current.delete(sessionId);
         return;
       }
 
-      rt.stream = stream;
+      // 5. Pipeline de crop 9:16:
+      //    getDisplayMedia → <video> offscreen → canvas 540x960 com center-crop
+      //    → canvas.captureStream() → combinado com áudio original
+      //    → MediaRecorder
+      const videoEl = document.createElement("video");
+      videoEl.srcObject = new MediaStream(rawStream.getVideoTracks());
+      videoEl.muted = true;
+      videoEl.playsInline = true;
+      videoEl.style.position = "fixed";
+      videoEl.style.top = "-9999px";
+      videoEl.style.left = "-9999px";
+      videoEl.style.width = "1px";
+      videoEl.style.height = "1px";
+      videoEl.style.opacity = "0";
+      document.body.appendChild(videoEl);
+      try {
+        await videoEl.play();
+      } catch {
+        /* autoplay muted deve sempre passar; se falhar, drawImage só pula frames até ter data */
+      }
+
+      const canvas = document.createElement("canvas");
+      canvas.width = OUT_W;
+      canvas.height = OUT_H;
+      const ctx = canvas.getContext("2d", { alpha: false });
+      if (!ctx) {
+        updateState(sessionId, {
+          status: "error",
+          error: "canvas 2d context indisponível",
+        });
+        for (const t of rawStream.getTracks()) t.stop();
+        videoEl.remove();
+        void writable.close().catch(() => null);
+        runtimes.current.delete(sessionId);
+        return;
+      }
+      ctx.fillStyle = "#000";
+      ctx.fillRect(0, 0, OUT_W, OUT_H);
+
+      const targetAspect = OUT_W / OUT_H; // 0.5625
+      const hasRVFC =
+        typeof (videoEl as HTMLVideoElement & {
+          requestVideoFrameCallback?: unknown;
+        }).requestVideoFrameCallback === "function";
+      const drawFrame = () => {
+        if (rt.stopped) return;
+        const vw = videoEl.videoWidth;
+        const vh = videoEl.videoHeight;
+        if (vw > 0 && vh > 0) {
+          const srcAspect = vw / vh;
+          let sx = 0,
+            sy = 0,
+            sw = vw,
+            sh = vh;
+          if (srcAspect > targetAspect) {
+            // fonte mais larga → crop laterais, mantém altura toda
+            sw = vh * targetAspect;
+            sx = (vw - sw) / 2;
+          } else if (srcAspect < targetAspect) {
+            // fonte mais alta → crop topo/base, mantém largura toda
+            sh = vw / targetAspect;
+            sy = (vh - sh) / 2;
+          }
+          ctx.drawImage(videoEl, sx, sy, sw, sh, 0, 0, OUT_W, OUT_H);
+        }
+        // rVFC dispara por frame decodificado (não throttla em bg tab);
+        // cai pra rAF se navegador não suportar.
+        if (hasRVFC) {
+          videoEl.requestVideoFrameCallback(drawFrame);
+        } else {
+          rt.cropRaf = window.requestAnimationFrame(drawFrame);
+        }
+      };
+      if (hasRVFC) {
+        videoEl.requestVideoFrameCallback(drawFrame);
+      } else {
+        rt.cropRaf = window.requestAnimationFrame(drawFrame);
+      }
+
+      const canvasStream = canvas.captureStream(30);
+      const combined = new MediaStream([
+        ...canvasStream.getVideoTracks(),
+        ...rawStream.getAudioTracks(),
+      ]);
+
+      rt.rawStream = rawStream;
+      rt.canvasStream = canvasStream;
+      rt.videoEl = videoEl;
+      rt.stream = combined;
       rt.writable = writable;
       rt.fileHandle = fileHandle;
 
-      // 5. MediaRecorder.
+      // 6. MediaRecorder grava o stream COMBINADO (vídeo cropado + áudio).
       const mimeType = pickMimeType();
       let recorder: MediaRecorder;
       try {
-        recorder = new MediaRecorder(stream, {
+        recorder = new MediaRecorder(combined, {
           mimeType,
           videoBitsPerSecond: 2_500_000,
           audioBitsPerSecond: 128_000,
@@ -402,7 +555,9 @@ export function LiveRecordingProvider({
           status: "error",
           error: err instanceof Error ? err.message : "recorder_failed",
         });
-        for (const t of stream.getTracks()) t.stop();
+        for (const t of rawStream.getTracks()) t.stop();
+        for (const t of canvasStream.getTracks()) t.stop();
+        videoEl.remove();
         void writable.close().catch(() => null);
         runtimes.current.delete(sessionId);
         return;
@@ -476,10 +631,12 @@ export function LiveRecordingProvider({
         console.error("MediaRecorder error", event);
       };
 
-      // Track ended → usuário fechou a aba do TikTok ou clicou "Parar".
-      const videoTrack = stream.getVideoTracks()[0];
-      if (videoTrack) {
-        videoTrack.onended = () => {
+      // Track ended → usuário fechou a aba do TikTok ou clicou "Parar
+      // de compartilhar". Detectamos no track RAW (canvas stream não encerra
+      // por conta própria).
+      const rawVideoTrack = rawStream.getVideoTracks()[0];
+      if (rawVideoTrack) {
+        rawVideoTrack.onended = () => {
           if (!rt.stopped) {
             rt.stopped = true;
             void finalize(sessionId);
@@ -621,22 +778,24 @@ function RecordingOverlay({
             <p className="mt-3 text-sm text-neutral-300">
               Abrimos a live de{" "}
               <span className="font-mono text-white">@{awaiting.hostHandle}</span>{" "}
-              numa nova aba. Ao clicar em <strong>Iniciar</strong>, seu navegador
-              vai pedir:
+              numa janela 9:16 (layout mobile do TikTok, só o vídeo). Ao
+              clicar <strong>Iniciar</strong>, o navegador vai pedir:
             </p>
             <ol className="mt-3 list-decimal space-y-1 pl-5 text-sm text-neutral-400">
               <li>
                 <strong>Onde salvar o arquivo .webm</strong> no seu computador
               </li>
               <li>
-                <strong>Qual aba gravar</strong> — escolha a da live TikTok,
-                marque <em>Compartilhar áudio da aba</em>
+                <strong>Qual janela capturar</strong> — escolha{" "}
+                <em>Janela</em> → a janelinha da live TikTok que abrimos, e
+                marque <em>Compartilhar áudio</em>
               </li>
             </ol>
             <p className="mt-3 text-xs text-neutral-500">
-              O vídeo é gravado direto no seu disco enquanto rola — sem upload,
-              sem limite de tamanho. A aba pode ficar num monitor secundário,
-              só não pode ser minimizada.
+              O vídeo final sai em 9:16 (540×960), só o player da live. O
+              áudio continua sendo capturado mesmo se você silenciar a
+              janela. Sons de outras abas ficam de fora. A janela pode
+              ficar num monitor secundário — só não pode ser minimizada.
             </p>
             <div className="mt-5 flex items-center justify-end gap-2">
               <button
