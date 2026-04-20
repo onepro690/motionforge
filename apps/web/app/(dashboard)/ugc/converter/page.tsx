@@ -5,17 +5,21 @@
 // transcodificado com libx264+aac, e o .mp4 resultante é salvo direto
 // no disco do usuário.
 //
-// Limitação prática: toda a conversão roda em memória do wasm (~2GB
-// de teto). Arquivos de ~500MB convertem bem; acima disso o navegador
-// pode ficar sem memória. Gravações de lives longas (>30min em 1080p)
-// vão estourar — nesse caso, use ffmpeg desktop local.
+// Estratégia:
+//  - INPUT: montado via WORKERFS — ffmpeg lê o File direto do disco do
+//    navegador SEM copiar pra memória do wasm. Inputs de múltiplos GB
+//    funcionam.
+//  - OUTPUT: escrito no MEMFS do wasm (preciso ter o arquivo inteiro
+//    antes de expor como Blob). O teto prático é ~1.5GB de output por
+//    limite de heap do wasm32. Se o user pedir alta qualidade em
+//    vídeos muito longos, o exec pode estourar — nesse caso sugerimos
+//    trocar pro preset "Rápido" (CRF maior = arquivo menor).
 //
 // Os cores do ffmpeg (~30MB) são copiados pra /public/ffmpeg/ no build
 // (ver apps/web/package.json:scripts.build).
 
 import { useCallback, useRef, useState } from "react";
-import { FFmpeg } from "@ffmpeg/ffmpeg";
-import { fetchFile } from "@ffmpeg/util";
+import { FFmpeg, FFFSType } from "@ffmpeg/ffmpeg";
 import { FileVideo, Loader2, Download, AlertTriangle, Check } from "lucide-react";
 
 type Status =
@@ -129,11 +133,13 @@ export default function ConverterPage() {
       setProgress(0);
       setFileInfo({ name: file.name, size: file.size });
 
-      // Tamanho aproximado do maior file que roda estável: ~500MB. Acima
-      // disso o Chrome pode matar a tab por OOM.
-      if (file.size > 800 * 1024 * 1024) {
+      // Aviso soft: arquivos muito grandes podem estourar o heap do
+      // wasm32 (cap 4GB, output prático ~1.5GB). Deixamos passar — se
+      // estourar durante o exec, o erro é claro pro user tentar um
+      // preset menor.
+      if (file.size > 4 * 1024 * 1024 * 1024) {
         setError(
-          `Arquivo muito grande (${formatBytes(file.size)}). O limite prático do ffmpeg.wasm é ~500MB. Pra arquivos maiores, use ffmpeg no desktop.`,
+          `Arquivo maior que 4GB (${formatBytes(file.size)}). O wasm32 do ffmpeg não consegue alocar o output nesse tamanho. Use ffmpeg no desktop.`,
         );
         setStatus("error");
         return;
@@ -146,20 +152,30 @@ export default function ConverterPage() {
         setElapsed(Math.floor((Date.now() - startedAt) / 1000));
       }, 500);
 
+      const MOUNT_POINT = "/mnt";
+      const outputName = "output.mp4";
+      let mounted = false;
       try {
         const ff = await ensureFFmpeg();
 
         setStatus("reading_file");
-        const ext = file.name.match(/\.[^.]+$/)?.[0]?.toLowerCase() ?? ".webm";
-        const inputName = `input${ext}`;
-        const outputName = "output.mp4";
-        await ff.writeFile(inputName, await fetchFile(file));
+        // Cria o ponto de montagem (idempotente — ignora se já existe).
+        try {
+          await ff.createDir(MOUNT_POINT);
+        } catch {
+          /* ignore: pasta já pode existir */
+        }
+        // Monta o File direto do disco via WORKERFS. Zero cópia pra
+        // memória do wasm — o ffmpeg faz reads sob demanda.
+        await ff.mount(FFFSType.WORKERFS, { files: [file] }, MOUNT_POINT);
+        mounted = true;
+        const inputPath = `${MOUNT_POINT}/${file.name}`;
 
         setStatus("converting");
         const presetDef =
           PRESETS.find((p) => p.id === preset) ?? PRESETS[0];
         const code = await ff.exec([
-          "-i", inputName,
+          "-i", inputPath,
           ...presetDef.args,
           outputName,
         ]);
@@ -169,10 +185,9 @@ export default function ConverterPage() {
 
         setStatus("writing_output");
         const data = await ff.readFile(outputName);
-        // data vem como Uint8Array; convertemos via ArrayBuffer pra Blob.
         const bytes =
           data instanceof Uint8Array
-            ? new Uint8Array(data) // cópia pra destacar do FS wasm
+            ? new Uint8Array(data)
             : new TextEncoder().encode(String(data));
         const blob = new Blob([bytes.buffer as ArrayBuffer], {
           type: "video/mp4",
@@ -182,12 +197,6 @@ export default function ConverterPage() {
         setOutput({ url, name: outName, size: blob.size });
         setStatus("done");
 
-        // cleanup do FS interno pra liberar memória.
-        try {
-          await ff.deleteFile(inputName);
-        } catch {
-          /* ignore */
-        }
         try {
           await ff.deleteFile(outputName);
         } catch {
@@ -198,6 +207,13 @@ export default function ConverterPage() {
         setError(msg);
         setStatus("error");
       } finally {
+        if (mounted && ffmpegRef.current) {
+          try {
+            await ffmpegRef.current.unmount(MOUNT_POINT);
+          } catch {
+            /* ignore */
+          }
+        }
         if (elapsedTimer.current) {
           clearInterval(elapsedTimer.current);
           elapsedTimer.current = null;
@@ -288,8 +304,10 @@ export default function ConverterPage() {
             className="mt-2 block w-full text-sm text-neutral-300 file:mr-3 file:rounded-md file:border-0 file:bg-violet-600 file:px-4 file:py-2 file:text-sm file:font-semibold file:text-white hover:file:bg-violet-500 disabled:opacity-50"
           />
           <p className="mt-2 text-xs text-neutral-500">
-            Limite prático: ~500MB. Arquivos maiores podem travar o
-            navegador por falta de memória.
+            Input é lido direto do disco (suporta GBs). O MP4 final
+            precisa caber na memória do wasm (~1.5GB prático) — se
+            estourar em arquivos muito longos, use o preset{" "}
+            <strong>Rápido</strong> pra gerar um arquivo menor.
           </p>
         </div>
       </div>
