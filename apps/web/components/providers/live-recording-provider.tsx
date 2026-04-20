@@ -24,6 +24,7 @@ import {
   useRef,
   useState,
 } from "react";
+import { upload } from "@vercel/blob/client";
 
 const CHUNK_MS = 30_000;
 
@@ -95,24 +96,29 @@ async function uploadChunk(
   index: number,
   blob: Blob,
   durationMs: number,
+  startedAtMs: number,
 ): Promise<void> {
-  const form = new FormData();
-  form.append("chunk", blob);
-  form.append("index", String(index));
-  form.append("durationMs", String(durationMs));
+  // Upload DIRETO pro Vercel Blob via signed URL — bypassa o limite de 4.5MB
+  // de body de serverless functions. O endpoint /upload-chunk só emite o
+  // token. Atualização do DB (status + duration) rola em onUploadCompleted
+  // server-side.
+  const padded = String(index).padStart(6, "0");
+  const pathname = `ugc/lives/${sessionId}/chunks/${padded}.webm.part`;
   let attempt = 0;
   let lastErr: unknown = null;
   while (attempt < 3) {
     try {
-      const res = await fetch(`/api/ugc/lives/${sessionId}/upload-chunk`, {
-        method: "POST",
-        body: form,
+      await upload(pathname, blob, {
+        access: "public",
+        handleUploadUrl: `/api/ugc/lives/${sessionId}/upload-chunk`,
+        contentType: "video/webm",
+        clientPayload: JSON.stringify({ index, durationMs, startedAtMs }),
       });
-      if (res.ok) return;
-      if (res.status === 409) return; // already_finalized — ignora silenciosamente
-      lastErr = new Error(`upload status ${res.status}`);
+      return;
     } catch (err) {
       lastErr = err;
+      const msg = err instanceof Error ? err.message : "";
+      if (msg.includes("already_finalized")) return;
     }
     attempt++;
     await new Promise((r) => setTimeout(r, 1500 * attempt));
@@ -342,11 +348,18 @@ export function LiveRecordingProvider({
       }
       rt.recorder = recorder;
 
+      const captureStartedAt = Date.now();
       recorder.ondataavailable = (event) => {
         if (!event.data || event.data.size < 1_000) return;
         const index = rt.nextIndex++;
-        const durationMs = index === 0 ? CHUNK_MS : CHUNK_MS;
-        const task = uploadChunk(sessionId, index, event.data, durationMs)
+        const durationMs = CHUNK_MS;
+        const task = uploadChunk(
+          sessionId,
+          index,
+          event.data,
+          durationMs,
+          captureStartedAt,
+        )
           .then(() => {
             setStates((s) => {
               const prev = s[sessionId];

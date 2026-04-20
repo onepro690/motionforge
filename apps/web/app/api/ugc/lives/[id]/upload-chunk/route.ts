@@ -1,100 +1,106 @@
-// Browser-based recording: cliente grava a aba da live via getDisplayMedia +
-// MediaRecorder e faz upload de cada chunk webm aqui. Cada chunk vira
-// `ugc/lives/{id}/chunks/{index}.webm.part`. O finalize concatena binariamente
-// (WebM com timeslice produz chunks que são pedaços válidos do mesmo stream).
+// Client direct-upload pro Vercel Blob. O endpoint NÃO recebe o bytes do
+// chunk — apenas emite um signed URL via `handleUpload`. O browser faz
+// PUT direto pro Blob, contornando o limite de 4.5MB de body de serverless
+// functions (chunks webm de 30s podem passar de 9MB).
 //
-// maxDuration baixo — upload é rápido (< 30s por chunk de 30s).
+// `onBeforeGenerateToken` valida autenticação + dono + path antes de emitir
+// o token. `onUploadCompleted` é chamado pelo Vercel após o upload, e é
+// onde atualizamos o DB (status RECORDING + increment de duração).
+//
+// ⚠ `onUploadCompleted` requer URL pública (produção). Localhost não
+// recebe o callback — em dev só os chunks são salvos, sem metadata.
 
+import { handleUpload, type HandleUploadBody } from "@vercel/blob/client";
 import { NextResponse } from "next/server";
 import { auth } from "@/lib/auth";
 import { headers } from "next/headers";
 import { prisma } from "@motion/database";
-import { put } from "@vercel/blob";
 
-export const maxDuration = 60;
 export const runtime = "nodejs";
+export const maxDuration = 30;
+
+interface ClientPayload {
+  index: number;
+  durationMs: number;
+  startedAtMs: number;
+}
+
+interface TokenPayload extends ClientPayload {
+  sessionId: string;
+}
 
 export async function POST(
   req: Request,
   { params }: { params: Promise<{ id: string }> },
 ) {
-  const session = await auth.api.getSession({ headers: await headers() });
-  if (!session) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  }
-
   const { id } = await params;
-  const live = await prisma.liveSession.findUnique({ where: { id } });
-  if (!live) return NextResponse.json({ error: "Not found" }, { status: 404 });
-  if (live.userId !== session.user.id) {
-    return NextResponse.json({ error: "Not found" }, { status: 404 });
-  }
-  if (live.recordingStatus === "DONE" || live.recordingStatus === "FAILED") {
-    return NextResponse.json({ error: "already_finalized" }, { status: 409 });
-  }
+  const body = (await req.json()) as HandleUploadBody;
 
-  const form = await req.formData();
-  const file = form.get("chunk");
-  const indexRaw = form.get("index");
-  const durationMsRaw = form.get("durationMs");
-
-  if (!(file instanceof Blob) || typeof indexRaw !== "string") {
-    return NextResponse.json({ error: "bad_request" }, { status: 400 });
-  }
-  const index = Number(indexRaw);
-  if (!Number.isFinite(index) || index < 0 || index > 999_999) {
-    return NextResponse.json({ error: "bad_index" }, { status: 400 });
-  }
-  if (file.size < 1_000) {
-    return NextResponse.json({ error: "empty_chunk" }, { status: 400 });
-  }
-
-  const durationMs = typeof durationMsRaw === "string" ? Number(durationMsRaw) : 0;
-  const chunkSeconds = Math.max(0, Math.round((durationMs || 0) / 1000));
-
-  const padded = String(index).padStart(6, "0");
-  const key = `ugc/lives/${id}/chunks/${padded}.webm.part`;
-  const buf = Buffer.from(await file.arrayBuffer());
-
-  const blob = await put(key, buf, {
-    access: "public",
-    contentType: "video/webm",
-    allowOverwrite: true,
-  });
-
-  // Primeira chamada: marca RECORDING + startedAt. Chamadas subsequentes só
-  // incrementam duração. Usamos updateMany pra evitar sobrescrever DONE caso
-  // chegue um upload atrasado.
-  if (index === 0) {
-    await prisma.liveSession.updateMany({
-      where: {
-        id,
-        recordingStatus: { in: ["NONE", "QUEUED", "RECORDING"] },
+  try {
+    const jsonResponse = await handleUpload({
+      body,
+      request: req,
+      onBeforeGenerateToken: async (pathname, clientPayloadStr) => {
+        const session = await auth.api.getSession({ headers: await headers() });
+        if (!session) throw new Error("unauthorized");
+        const live = await prisma.liveSession.findUnique({ where: { id } });
+        if (!live || live.userId !== session.user.id) throw new Error("not_found");
+        if (live.recordingStatus === "DONE" || live.recordingStatus === "FAILED") {
+          throw new Error("already_finalized");
+        }
+        if (
+          !pathname.startsWith(`ugc/lives/${id}/chunks/`) ||
+          !pathname.endsWith(".webm.part")
+        ) {
+          throw new Error("bad_path");
+        }
+        const payload = clientPayloadStr
+          ? (JSON.parse(clientPayloadStr) as ClientPayload)
+          : { index: 0, durationMs: 0, startedAtMs: Date.now() };
+        const tokenPayload: TokenPayload = { sessionId: id, ...payload };
+        return {
+          allowedContentTypes: ["video/webm"],
+          addRandomSuffix: false,
+          allowOverwrite: true,
+          tokenPayload: JSON.stringify(tokenPayload),
+        };
       },
-      data: {
-        recordingStatus: "RECORDING",
-        recordingStartedAt: live.recordingStartedAt ?? new Date(),
-        recordingError: null,
+      onUploadCompleted: async ({ tokenPayload }) => {
+        if (!tokenPayload) return;
+        const data = JSON.parse(tokenPayload) as TokenPayload;
+        const chunkSeconds = Math.max(
+          0,
+          Math.round((data.durationMs || 0) / 1000),
+        );
+        if (data.index === 0) {
+          await prisma.liveSession.updateMany({
+            where: {
+              id: data.sessionId,
+              recordingStatus: { in: ["NONE", "QUEUED", "RECORDING"] },
+            },
+            data: {
+              recordingStatus: "RECORDING",
+              recordingStartedAt: new Date(data.startedAtMs),
+              recordingError: null,
+            },
+          });
+        }
+        if (chunkSeconds > 0) {
+          await prisma.liveSession.updateMany({
+            where: {
+              id: data.sessionId,
+              recordingStatus: { in: ["NONE", "QUEUED", "RECORDING"] },
+            },
+            data: {
+              recordingDurationSeconds: { increment: chunkSeconds },
+            },
+          });
+        }
       },
     });
+    return NextResponse.json(jsonResponse);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "unknown";
+    return NextResponse.json({ error: message }, { status: 400 });
   }
-
-  if (chunkSeconds > 0) {
-    await prisma.liveSession.updateMany({
-      where: {
-        id,
-        recordingStatus: { in: ["NONE", "QUEUED", "RECORDING"] },
-      },
-      data: {
-        recordingDurationSeconds: { increment: chunkSeconds },
-      },
-    });
-  }
-
-  return NextResponse.json({
-    success: true,
-    chunkUrl: blob.url,
-    index,
-    size: buf.length,
-  });
 }
