@@ -53,11 +53,13 @@ export async function POST(
   }
 
   if (body.finalize) {
-    // confirmFirst: chain dispara finalize via HTTP e pede verificação dupla.
+    // confirmFirst: re-verifica com gap 15s antes de finalizar.
     // Se TikTok volta pra status=2 (flap), retorna sem finalizar — deixa
-    // chain/cron continuarem gravando. User clicando Parar NÃO usa isso
-    // (finalize imediato).
-    if (body.confirmFirst && isChainCall && live.roomId) {
+    // chain/cron continuarem gravando. User clicando Parar NÃO passa
+    // confirmFirst (finalize imediato). Cliente passa confirmFirst quando
+    // detecção foi por stillLive=false (isLiveActive pode dar falso positivo
+    // em flap).
+    if (body.confirmFirst && live.roomId) {
       const ended = await confirmLiveEnded(live.roomId);
       if (!ended) {
         // Dispara novo chain pra voltar a gravar.

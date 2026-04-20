@@ -194,10 +194,17 @@ export function LiveRecordingProvider({
             if (!prev) return s;
             return { ...s, [sessionId]: { ...prev, finalizing: true } };
           });
+          // live_ended vem de UMA leitura isLiveActive (pode ser flap transiente
+          // do TikTok). Pede confirmFirst pra servidor re-verificar com gap 15s
+          // antes de concatenar — se flap, chain continua gravando.
+          // user_stop é explícito: finaliza direto.
           await fetch(`/api/ugc/lives/${sessionId}/record-now`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ finalize: true }),
+            body: JSON.stringify({
+              finalize: true,
+              confirmFirst: reasonToFinalize === "live_ended",
+            }),
           }).catch(() => null);
         }
         // Se reasonToFinalize === null (erros de rede no cliente), o loop
