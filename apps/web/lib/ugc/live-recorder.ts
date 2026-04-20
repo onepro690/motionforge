@@ -8,13 +8,38 @@ import { fetchHlsUrl, isLiveActive } from "@/lib/ugc/live-scraper";
 import { put, list, del } from "@vercel/blob";
 import { spawn } from "child_process";
 import { Readable } from "stream";
-import { mkdir, readFile, writeFile, unlink, rm } from "fs/promises";
+import { mkdir, writeFile, rm, readdir, stat } from "fs/promises";
 import { tmpdir } from "os";
 import { join } from "path";
 import { randomBytes } from "crypto";
 import ffmpegInstaller from "@ffmpeg-installer/ffmpeg";
 
 const FFMPEG = ffmpegInstaller.path;
+
+// Containers Fluid Compute reusam /tmp entre invocações. Se algum chunk
+// crashou no passado, deixou arquivo lá. Depois de horas, /tmp enche e
+// qualquer writeFile nova falha. Limpa órfãos > 5min toda vez que entra
+// no recordChunk/finalize.
+async function purgeTmpOrphans(): Promise<void> {
+  try {
+    const entries = await readdir(tmpdir());
+    const cutoff = Date.now() - 5 * 60 * 1000;
+    for (const name of entries) {
+      if (!name.startsWith("live-chunk-") && !name.startsWith("live-final-")) continue;
+      const full = join(tmpdir(), name);
+      try {
+        const s = await stat(full);
+        if (s.mtimeMs < cutoff) {
+          await rm(full, { recursive: true, force: true });
+        }
+      } catch {
+        /* ignore */
+      }
+    }
+  } catch {
+    /* ignore */
+  }
+}
 
 export function runFfmpeg(args: string[]): Promise<void> {
   return new Promise((resolve, reject) => {
@@ -50,6 +75,7 @@ export async function recordChunk(
   id: string,
   durationSeconds = 200,
 ): Promise<ChunkResult | ChunkError> {
+  await purgeTmpOrphans();
   const live = await prisma.liveSession.findUnique({ where: { id } });
   if (!live) return { ok: false, error: "not_found", message: "session", stillLive: false };
 
@@ -141,33 +167,58 @@ export async function recordChunk(
     };
   }
 
-  const workDir = join(tmpdir(), `live-chunk-${randomBytes(6).toString("hex")}`);
-  await mkdir(workDir, { recursive: true });
-  const outPath = join(workDir, "chunk.mp4");
-
+  // Gravação 100% em memória — ffmpeg pipe:1 direto pra Buffer, sem tocar
+  // /tmp. Vercel Fluid Compute compartilha /tmp entre invocações reusadas
+  // e enchia o disco com chunks órfãos, causando "No space left on device"
+  // após horas de gravação. fMP4 (fragmented) é necessário pra output pipe
+  // (não-seekable), e é compatível com concat demuxer do finalize.
   try {
-    await runFfmpeg([
-      "-y",
-      "-loglevel", "error",
-      // Timeouts pra não travar a função se HLS morrer no meio.
-      "-rw_timeout", "15000000", // 15s em microsegundos (read/write)
-      "-reconnect", "1",
-      "-reconnect_streamed", "1",
-      "-reconnect_delay_max", "3",
-      "-t", String(requested),
-      "-i", streamUrl,
-      "-c", "copy",
-      "-bsf:a", "aac_adtstoasc",
-      "-movflags", "+faststart",
-      // Tolerância a pacotes corrompidos durante stream instável.
-      "-fflags", "+genpts+discardcorrupt",
-      "-err_detect", "ignore_err",
-      outPath,
-    ]);
+    const proc = spawn(
+      FFMPEG,
+      [
+        "-y",
+        "-loglevel", "error",
+        // Timeouts pra não travar a função se HLS morrer no meio.
+        "-rw_timeout", "15000000", // 15s em microsegundos (read/write)
+        "-reconnect", "1",
+        "-reconnect_streamed", "1",
+        "-reconnect_delay_max", "3",
+        "-t", String(requested),
+        "-i", streamUrl,
+        "-c", "copy",
+        "-bsf:a", "aac_adtstoasc",
+        "-f", "mp4",
+        "-movflags", "frag_keyframe+empty_moov+default_base_moof",
+        // Tolerância a pacotes corrompidos durante stream instável.
+        "-fflags", "+genpts+discardcorrupt",
+        "-err_detect", "ignore_err",
+        "pipe:1",
+      ],
+      { stdio: ["ignore", "pipe", "pipe"] },
+    );
 
-    const buf = await readFile(outPath);
-    // Valida chunk antes de subir. Arquivo muito pequeno = stream morreu
-    // quase imediatamente, só header mp4 sem conteúdo útil.
+    const parts: Buffer[] = [];
+    let totalBytes = 0;
+    proc.stdout.on("data", (d: Buffer) => {
+      parts.push(d);
+      totalBytes += d.length;
+    });
+    let stderr = "";
+    proc.stderr.on("data", (d) => {
+      stderr += d.toString();
+    });
+
+    const exitCode = await new Promise<number | null>((resolve, reject) => {
+      proc.on("close", resolve);
+      proc.on("error", reject);
+    });
+
+    if (exitCode !== 0) {
+      throw new Error(`ffmpeg exit ${exitCode}: ${stderr.slice(0, 500)}`);
+    }
+
+    const buf = Buffer.concat(parts, totalBytes);
+    // Valida chunk antes de subir. Stream morrendo no começo gera só header.
     if (buf.length < 10_000) {
       throw new Error(`chunk vazio/corrompido (${buf.length} bytes)`);
     }
@@ -213,13 +264,11 @@ export async function recordChunk(
     });
     const stillLive = live.roomId ? await isLiveActive(live.roomId).catch(() => false) : false;
     return { ok: false, error: "chunk_failed", message, stillLive };
-  } finally {
-    await unlink(outPath).catch(() => {});
-    await rm(workDir, { recursive: true, force: true }).catch(() => {});
   }
 }
 
 export async function finalizeRecording(id: string) {
+  await purgeTmpOrphans();
   // Idempotência: se já foi finalizada com sucesso, retorna o existente.
   // Previne double-finalize de race (chain atrasado + cron rodando junto).
   const existing = await prisma.liveSession.findUnique({
