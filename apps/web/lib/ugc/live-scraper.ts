@@ -304,13 +304,16 @@ async function fetchTikwmFeedAll(): Promise<{
     const j = Math.floor(Math.random() * (i + 1));
     [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
   }
-  // Para variar o que volta entre runs: cursor aleatório (0, 30, 60, 90, 120)
-  // e sort_type aleatório (0=time, 1=hot). Hot cacheia forte, time rotaciona
-  // muito mais. Cada run pega uma "fatia" diferente do feed.
-  //   150 keywords × 1 call @ ~4 req/s ≈ 38s. Fits in 300s.
-  const cursorOptions = [0, 30, 60, 90, 120];
+  // Cada keyword faz 2 calls: cursor=0 sort=0 (vídeos mais recentes, mais
+  // prováveis de ter live acontecendo agora) + cursor random sort random
+  // (variação entre runs). Isso dobra a cobertura: ~150×2 = 300 calls.
+  //   300 calls @ ~4 req/s (concorrência 3 + gap 300ms) ≈ 75s. Fits em 300s.
+  const cursorOptions = [30, 60, 90, 120, 150];
   const tasks: Array<{ keyword: string; cursor: number; sort: number }> = [];
   for (const k of shuffled) {
+    // 1ª call: recentes (mais prováveis de estar ao vivo agora)
+    tasks.push({ keyword: k, cursor: 0, sort: 0 });
+    // 2ª call: variação aleatória pra pegar cauda do feed
     const cursor = cursorOptions[Math.floor(Math.random() * cursorOptions.length)];
     const sort = Math.random() < 0.5 ? 0 : 1;
     tasks.push({ keyword: k, cursor, sort });
@@ -1055,20 +1058,21 @@ export async function scrapeLiveSessions(
   // Ordem: hot (mais prováveis de live) → DB pool (LRU, rotaciona entre runs)
   //        → seed priority → resto do feed novo
   //  DB pool vem antes do feed pois o feed tende a cachear mesmos handles.
-  // Cap 400: com WAF rejeitando ~97%, volume alto só consome budget.
-  //   400 / 6 × 1.7s ≈ 113s. Feed + fallback ≈ 180s total, fits em 300s.
+  // Cap 800: aumentado de 400 — WAF ainda rejeita ~97% mas com pool maior
+  //   descobrimos mais lives por run. Concorrência 8 + gap 150ms:
+  //   800/8 × 1.65s ≈ 165s. Feed (~38s) + fallback ≈ 203s, fits em 300s.
   const fallbackHandles = [
     ...new Set([...hotShuffled, ...dbShuffled, ...seedShuffled, ...feedShuffled]),
-  ].slice(0, 400);
+  ].slice(0, 800);
   console.log(
     `[live-scraper] fallback: hot=${hotShuffled.length} seed=${seedShuffled.length} feed=${feedShuffled.length} db=${dbShuffled.length} -> ${fallbackHandles.length}`,
   );
   console.log(`[live-scraper] fallback api-live checks: ${fallbackHandles.length}`);
 
-  // Concorrência 6 + gap 200ms é suave o suficiente pra WAF deixar mais passar.
+  // Concorrência 8 + gap 150ms: com 800 handles, consome ~165s.
   const fallbackChecks = await mapConcurrent(
     fallbackHandles,
-    6,
+    8,
     async (handle) => {
       const check = await checkLiveStatus(handle);
       let info: FullRoomInfo | null = null;
@@ -1077,7 +1081,7 @@ export async function scrapeLiveSessions(
       }
       return { handle, check, info };
     },
-    200,
+    150,
   );
 
   // 5. Merge + filtro commerce estrito
@@ -1086,15 +1090,13 @@ export async function scrapeLiveSessions(
   let liveWithoutCommerce = 0;
   let checkErrors = 0;
 
+  // Commerce filter relaxado: TikTok frequentemente não sinaliza
+  // has_commerce_goods mesmo em lives de afiliado ativas. User quer ver
+  // TODAS as lives que encontrar. Flag hasCommerce ainda usada pra score.
   for (const { room, info } of roomInfos) {
     if (!info) continue;
     if (info.status !== 2) continue;
-    if (info.hasCommerce) {
-      liveWithCommerce++;
-    } else {
-      liveWithoutCommerce++;
-      continue;
-    }
+    if (info.hasCommerce) liveWithCommerce++; else liveWithoutCommerce++;
     const viewerCount = info.userCount ?? room.userCount ?? 0;
     const likeCount = info.likeCount ?? 0;
     finals.set(room.handle, {
@@ -1107,7 +1109,7 @@ export async function scrapeLiveSessions(
       totalViewers: viewerCount,
       likeCount,
       estimatedOrders: 0,
-      productCount: 1,
+      productCount: info.hasCommerce ? 1 : 0,
       products: [],
       isLive: true,
       startedAt: info.startedAt ? new Date(info.startedAt).toISOString() : undefined,
@@ -1115,8 +1117,9 @@ export async function scrapeLiveSessions(
       flvUrl: info.flvUrl,
       liveUrl: `https://www.tiktok.com/@${room.handle}/live`,
       thumbnailUrl: info.coverUrl ?? room.coverUrl ?? room.avatarUrl,
-      salesScore: calcSalesScore({ viewerCount, likeCount, isLive: true }),
-      __hasCommerce: true,
+      salesScore: calcSalesScore({ viewerCount, likeCount, isLive: true }) +
+        (info.hasCommerce ? 10 : 0),
+      __hasCommerce: info.hasCommerce,
     });
   }
 
@@ -1124,12 +1127,8 @@ export async function scrapeLiveSessions(
     if (check.error) checkErrors++;
     if (!check.isLive) continue;
     const hasCommerce = info?.hasCommerce ?? check.hasCommerce ?? false;
-    if (!hasCommerce) {
-      liveWithoutCommerce++;
-      continue;
-    }
+    if (hasCommerce) liveWithCommerce++; else liveWithoutCommerce++;
     if (finals.has(handle)) continue;
-    liveWithCommerce++;
     const viewerCount = info?.userCount ?? check.userCount ?? 0;
     const likeCount = info?.likeCount ?? check.enterCount ?? 0;
     finals.set(handle, {
@@ -1142,7 +1141,7 @@ export async function scrapeLiveSessions(
       totalViewers: viewerCount,
       likeCount,
       estimatedOrders: 0,
-      productCount: 1,
+      productCount: hasCommerce ? 1 : 0,
       products: [],
       isLive: true,
       startedAt: check.startedAt ? new Date(check.startedAt).toISOString() : undefined,
@@ -1150,8 +1149,9 @@ export async function scrapeLiveSessions(
       flvUrl: info?.flvUrl,
       liveUrl: `https://www.tiktok.com/@${handle}/live`,
       thumbnailUrl: info?.coverUrl ?? check.coverUrl ?? "",
-      salesScore: calcSalesScore({ viewerCount, likeCount, isLive: true }),
-      __hasCommerce: true,
+      salesScore: calcSalesScore({ viewerCount, likeCount, isLive: true }) +
+        (hasCommerce ? 10 : 0),
+      __hasCommerce: hasCommerce,
     });
   }
 
