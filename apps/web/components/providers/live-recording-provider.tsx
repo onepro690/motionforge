@@ -130,6 +130,7 @@ interface Runtime {
   videoEl: HTMLVideoElement | null; // offscreen, fonte do drawImage
   cropRaf: number | null;
   cropInterval: number | null; // setInterval backup pro drawImage (anti-throttle)
+  paintWorker: Worker | null; // timer 30fps num Worker — imune a tab throttling
   watchdog: number | null; // setInterval que detecta videoEl pausado
   alivePoll: number | null; // setInterval que pergunta /alive pro TikTok
   lastDrawAt: number; // timestamp do último drawImage — usado pelo watchdog
@@ -141,6 +142,31 @@ interface Runtime {
   secondsWritten: number;
   lastProgressReportedAt: number;
   popupWindow: Window | null;
+}
+
+// Worker inline que só dispara 'tick' 30x/s. Roda em thread separada, então
+// setInterval NÃO é throttled quando a aba principal vai pra background.
+// É o que garante que o paint() continue rodando consistente a 30fps mesmo
+// com o dashboard minimizado / fora de foco.
+const PAINT_WORKER_CODE = `
+  let timer = null;
+  self.onmessage = (e) => {
+    if (e.data === 'start') {
+      if (timer) clearInterval(timer);
+      timer = setInterval(() => self.postMessage('tick'), 33);
+    } else if (e.data === 'stop') {
+      if (timer) { clearInterval(timer); timer = null; }
+      self.close();
+    }
+  };
+`;
+function createPaintWorker(): Worker {
+  const blob = new Blob([PAINT_WORKER_CODE], { type: "application/javascript" });
+  const url = URL.createObjectURL(blob);
+  const w = new Worker(url);
+  // URL fica gc'ável assim que o worker carregou o código.
+  setTimeout(() => URL.revokeObjectURL(url), 5000);
+  return w;
 }
 
 function pickMimeType(): string | undefined {
@@ -247,6 +273,10 @@ export function LiveRecordingProvider({
       if (rt.cropInterval !== null) {
         try { clearInterval(rt.cropInterval); } catch { /* ignore */ }
       }
+      if (rt.paintWorker) {
+        try { rt.paintWorker.postMessage("stop"); } catch { /* ignore */ }
+        try { rt.paintWorker.terminate(); } catch { /* ignore */ }
+      }
       if (rt.watchdog !== null) {
         try { clearInterval(rt.watchdog); } catch { /* ignore */ }
       }
@@ -328,6 +358,11 @@ export function LiveRecordingProvider({
           if (rt.cropInterval !== null) {
             try { clearInterval(rt.cropInterval); } catch { /* noop */ }
             rt.cropInterval = null;
+          }
+          if (rt.paintWorker) {
+            try { rt.paintWorker.postMessage("stop"); } catch { /* noop */ }
+            try { rt.paintWorker.terminate(); } catch { /* noop */ }
+            rt.paintWorker = null;
           }
           if (rt.watchdog !== null) {
             try { clearInterval(rt.watchdog); } catch { /* noop */ }
@@ -414,6 +449,7 @@ export function LiveRecordingProvider({
         videoEl: null,
         cropRaf: null,
         cropInterval: null,
+        paintWorker: null,
         watchdog: null,
         alivePoll: null,
         lastDrawAt: 0,
@@ -750,13 +786,25 @@ export function LiveRecordingProvider({
       if (hasRVFC) videoEl.requestVideoFrameCallback(drawRVFC);
       else rt.cropRaf = window.requestAnimationFrame(drawRVFC);
 
-      // Fallback timer: setInterval é MUITO menos throttled que RAF quando
-      // a aba do dashboard fica em background. RVFC também pode parar se
-      // o videoEl entrar em idle. O interval a 100ms garante que o canvas
-      // continua atualizando mesmo se RVFC/RAF pararem de disparar.
-      rt.cropInterval = window.setInterval(() => {
-        if (!rt.stopped) paint();
-      }, 100);
+      // PRIMARY paint driver: Worker com setInterval 30fps. Worker threads
+      // NÃO são throttled quando a aba principal vai pra background, então
+      // o paint continua rodando consistente a 30fps mesmo minimizado.
+      // RVFC/RAF (acima) ainda disparam quando a aba está em foreground —
+      // paint() é idempotente, as duas fontes coexistem sem problema.
+      try {
+        const worker = createPaintWorker();
+        worker.onmessage = () => {
+          if (!rt.stopped) paint();
+        };
+        worker.postMessage("start");
+        rt.paintWorker = worker;
+      } catch (err) {
+        console.warn("paint worker failed, falling back to setInterval", err);
+        // Fallback pro setInterval se Worker for bloqueado (CSP, etc).
+        rt.cropInterval = window.setInterval(() => {
+          if (!rt.stopped) paint();
+        }, 33);
+      }
 
       // Watchdog: se o videoEl pausar (browser pode pausar media em
       // background), chama .play() de novo. Também detecta "frame stall"
@@ -775,7 +823,11 @@ export function LiveRecordingProvider({
         }
       }, 1000);
 
-      const canvasStream = canvas.captureStream(30);
+      // captureStream sem argumento = "capture on draw" (emite 1 frame por
+      // drawImage). Combinado com o Worker que dispara paint 30x/s, o
+      // stream sai a 30fps sustentados — e mesmo se por algum motivo o
+      // worker acelerar ou cair, o browser emite no ritmo real do canvas.
+      const canvasStream = canvas.captureStream();
       const combined = new MediaStream([
         ...canvasStream.getVideoTracks(),
         ...rawStream.getAudioTracks(),
