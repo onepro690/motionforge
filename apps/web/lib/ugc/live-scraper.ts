@@ -1166,6 +1166,16 @@ const LIVE_NOW_QUERIES = [
   "#aovivoagora", "#liveagora", "#estouaovivo", "#liveshopbrasil",
   "#aovivo", "#vempralive", "#entranalive", "#tiktokshopbrasil",
   "#liveshop", "#liveshopping",
+  // Shop-activity queries SEM "agora" — creators ativos postam daily
+  // durante/antes da live. Se postou nas últimas 2h com shop signal,
+  // ~60% está live agora.
+  "tiktok shop brasil", "achadinho tiktok shop", "liquidação tiktok",
+  "queima de estoque", "promoção relâmpago tiktok", "achadinhos shopee",
+  "achadinho da gringa", "oferta relâmpago", "vem comprar comigo",
+  "tiktokshopbrasil", "loja ao vivo", "bazar online ao vivo",
+  "perfume importado barato", "maquiagem barata tiktok",
+  "#achadinhos", "#promocao", "#ofertarelampago", "#tiktokshop",
+  "#achadinhostiktokshop", "#liquidacao", "#vendas",
 ];
 
 const LIVE_NOW_RE_STRONG =
@@ -1309,8 +1319,11 @@ async function fetchRecentLiveHintsScored(): Promise<RecentHintCandidate[]> {
   for (const v of flat) {
     const fullText = (v.title + " " + v.contentDesc).slice(0, 4000);
     const intentScore = scoreLiveIntent(fullText);
-    if (intentScore < 40) continue; // sem live intent, descarta
     const commerce = scoreCommerce(fullText);
+    // Aceita se: tem intent live OU tem sinal forte de commerce (hashtag/loja).
+    // Post de shop creator ativo nas últimas 2h, mesmo sem "agora" explícito,
+    // é candidato válido — a bio enrichment e score composite filtram depois.
+    if (intentScore < 40 && commerce < 40) continue;
     const age = now - (v.createTime || 0);
     const recency = v.createTime ? scoreRecency(age) : 0;
 
@@ -1371,13 +1384,13 @@ async function fetchRecentLiveHintsScored(): Promise<RecentHintCandidate[]> {
 async function enrichWithShopBio(
   candidates: RecentHintCandidate[],
 ): Promise<RecentHintCandidate[]> {
-  // Top 60 candidatos recebem lookup de bio no tikwm user/info (paralelo,
-  // concurrency=3 pra respeitar rate limit do tikwm). Se bio tem marcador
+  // Top 120 candidatos recebem lookup de bio no tikwm user/info (paralelo,
+  // concurrency=4 pra respeitar rate limit do tikwm). Se bio tem marcador
   // de shop, boosta commerceScore + totalScore e marca bioMatched.
-  const top = candidates.slice(0, 60);
+  const top = candidates.slice(0, 120);
   await mapConcurrent(
     top,
-    3,
+    4,
     async (c) => {
       const info = await fetchTikwmUserInfo(c.handle);
       if (!info) return;
@@ -1390,7 +1403,7 @@ async function enrichWithShopBio(
         c.totalScore += 15;
       }
     },
-    250,
+    200,
   );
   candidates.sort((a, b) => b.totalScore - a.totalScore);
   return candidates;
@@ -1731,17 +1744,20 @@ export async function scrapeLiveSessions(
   let inferredBioBoosted = 0;
 
   const hintsEnriched = await enrichWithShopBio(recentHintsRaw).catch(() => recentHintsRaw);
-  // Threshold: intent >= 60 E commerce >= 30 E totalScore >= 45.
-  // Último post com <4h garante recencyScore >= 25 na composição.
+  // Threshold v2: aceita 3 caminhos OR-gated pra alcançar ≥15 lives:
+  //  (a) intent forte (80) — posts "tô ao vivo agora" com qualquer commerce
+  //  (b) bio matched shop — creator tem bio de seller + intent/commerce minimo
+  //  (c) sinal combinado — intent+commerce somados >= 70
   const inferredCandidates = hintsEnriched
-    .filter(
-      (c) =>
-        !alreadyFinal.has(c.handle) &&
-        c.liveIntentScore >= 60 &&
-        c.commerceScore >= 30 &&
-        c.totalScore >= 45,
-    )
-    .slice(0, 40); // cap pra não poluir UI
+    .filter((c) => {
+      if (alreadyFinal.has(c.handle)) return false;
+      if (c.totalScore < 28) return false;
+      if (c.liveIntentScore >= 80 && c.commerceScore >= 20) return true;
+      if (c.bioMatched && c.liveIntentScore >= 40) return true;
+      if (c.liveIntentScore + c.commerceScore >= 70 && c.recencyScore >= 25) return true;
+      return false;
+    })
+    .slice(0, 50); // cap pra não poluir UI
 
   for (const c of inferredCandidates) {
     if (finals.has(c.handle)) continue;
