@@ -67,20 +67,28 @@ export async function GET(req: Request) {
   `;
   const replayCount = Number(replayRows[0]?.count ?? 0);
 
-  // Refresh ao vivo: dispara fetchFullRoomInfo em paralelo nas sessions live
-  // da página atual e atualiza viewerCount/likeCount na hora.
+  // Refresh ao vivo: dispara fetchFullRoomInfo em paralelo nas sessions
+  // da página atual e atualiza viewerCount/likeCount/isLive na hora.
   //
-  // Pula roomIds com prefixos `inferred_` e `manual_` — são placeholders
-  // criados sem confirmação webcast/room/info (scraper heurístico ou add
-  // manual offline). Chamar fetchFullRoomInfo neles falharia e marcaria
-  // isLive=false por engano.
-  const liveTargets = sessionsRaw.filter(
-    (s) =>
-      s.isLive === true &&
-      typeof s.roomId === "string" &&
-      s.roomId &&
-      /^\d{15,}$/.test(s.roomId as string),
-  );
+  // Inclui sessões JÁ encerradas desde que sejam RECENTES (endedAt ou
+  // scrapedAt nos últimos 2h) — creator pode ter voltado ao ar com o mesmo
+  // roomId. Sem isso, cards ficam presos em "Encerrada" até o próximo scrape
+  // global, mesmo se a live voltar em segundos.
+  //
+  // Pula roomIds com prefixos `inferred_` e `manual_` — placeholders sem
+  // verificação webcast real. fetchFullRoomInfo neles falha.
+  const REFRESH_WINDOW_MS = 2 * 60 * 60 * 1000; // 2h
+  const nowMs = Date.now();
+  const liveTargets = sessionsRaw.filter((s) => {
+    if (typeof s.roomId !== "string" || !s.roomId) return false;
+    if (!/^\d{15,}$/.test(s.roomId as string)) return false;
+    if (s.isLive === true) return true;
+    // Encerrada: refresh só se recente (creator pode ter voltado ao ar)
+    const ts = (s.endedAt ?? s.scrapedAt) as Date | string | null;
+    if (!ts) return false;
+    const ageMs = nowMs - new Date(ts as string).getTime();
+    return ageMs >= 0 && ageMs <= REFRESH_WINDOW_MS;
+  });
 
   const CONCURRENCY = 10;
   const refreshed = new Map<string, { viewerCount: number; likeCount: number; isLive: boolean }>();
@@ -90,6 +98,7 @@ export async function GET(req: Request) {
     await Promise.allSettled(
       batch.map(async (s) => {
         const roomId = s.roomId as string;
+        const wasLive = s.isLive === true;
         const info = await fetchFullRoomInfo(roomId);
         if (!info) return;
         const stillLive = info.status === 2;
@@ -106,6 +115,18 @@ export async function GET(req: Request) {
               isLive: stillLive,
               peakViewers: viewerCount > prevPeak ? viewerCount : prevPeak,
               scrapedAt: new Date(),
+              // Reativou: limpa endedAt e atualiza hlsUrl/flvUrl pra refletir
+              // a stream atual (URLs antigas podem ter expirado).
+              ...(stillLive && !wasLive
+                ? {
+                    endedAt: null,
+                    hlsUrl: info.hlsUrl ?? undefined,
+                    flvUrl: info.flvUrl ?? undefined,
+                    title: info.title ?? (s.title as string) ?? "",
+                  }
+                : {}),
+              // Acabou de encerrar: registra endedAt se ainda não tinha.
+              ...(!stillLive && wasLive ? { endedAt: new Date() } : {}),
             },
           });
         } catch {
