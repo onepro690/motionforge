@@ -406,14 +406,16 @@ export default function LivesPage() {
   // Gravação vive no provider do layout (sobrevive à navegação entre seções).
   const rec = useLiveRecording();
 
-  const loadSessions = useCallback(async (f: Filter = filter, p: number = page) => {
-    setLoading(true);
+  const loadSessions = useCallback(async (f: Filter = filter, p: number = page, opts: { background?: boolean } = {}) => {
+    // Só mostra skeleton na carga inicial ou quando o user troca de aba/página.
+    // Refresh em background NÃO mexe em `loading` — evita piscar o grid inteiro.
+    if (!opts.background) setLoading(true);
     try {
       const apiFilter = f === "recorded" ? "recorded" : f === "live" ? "live" : "all";
       const res  = await fetch(`/api/ugc/lives?filter=${apiFilter}&page=${p}`);
       const json = await res.json() as ApiResponse;
       setData(json);
-    } finally { setLoading(false); }
+    } finally { if (!opts.background) setLoading(false); }
   }, [filter, page]);
 
   useEffect(() => { loadSessions(filter, page); }, [filter, page, loadSessions]);
@@ -421,9 +423,9 @@ export default function LivesPage() {
   // Reset pra página 1 ao trocar filtro
   useEffect(() => { setPage(1); }, [filter]);
 
-  // Auto-refresh a cada 20s (status de gravação muda)
+  // Auto-refresh a cada 20s (status de gravação muda) — background, sem skeleton
   useEffect(() => {
-    const iv = setInterval(() => loadSessions(filter, page), 20_000);
+    const iv = setInterval(() => loadSessions(filter, page, { background: true }), 20_000);
     return () => clearInterval(iv);
   }, [filter, page, loadSessions]);
 
