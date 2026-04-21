@@ -34,6 +34,42 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({ count: all.length, settings: summary }, { status: 200 });
   }
 
+  if (view === "scraper7-ping") {
+    // Faz request direto no scraper7 pra ver resposta + rate limit headers
+    const handle = request.nextUrl.searchParams.get("handle") ?? "tiktokshop";
+    const settings = await prisma.ugcSystemSettings.findFirst({ select: { tiktokScraperApiKey: true } });
+    const key = settings?.tiktokScraperApiKey;
+    if (!key) return NextResponse.json({ error: "no key" }, { status: 400 });
+    const host = "tiktok-scraper7.p.rapidapi.com";
+    const paths = [
+      `/api/user/live?unique_id=${handle}`,
+      `/user/live?unique_id=${handle}`,
+      `/api/user/info?unique_id=${handle}`,
+      `/user/info?unique_id=${handle}`,
+      `/`,
+    ];
+    const out: Array<{ path: string; status: number; rateLimitHeaders: Record<string, string>; bodyPreview: string }> = [];
+    for (const p of paths) {
+      try {
+        const res = await fetch(`https://${host}${p}`, {
+          headers: { "x-rapidapi-key": key, "x-rapidapi-host": host, "Accept": "application/json" },
+          signal: AbortSignal.timeout(10_000),
+        });
+        const rateLimitHeaders: Record<string, string> = {};
+        res.headers.forEach((v, k) => {
+          if (k.toLowerCase().includes("rate") || k.toLowerCase().includes("quota") || k.toLowerCase().includes("limit") || k.toLowerCase() === "x-ratelimit-remaining" || k.toLowerCase() === "x-ratelimit-requests-remaining") {
+            rateLimitHeaders[k] = v;
+          }
+        });
+        const body = await res.text();
+        out.push({ path: p, status: res.status, rateLimitHeaders, bodyPreview: body.slice(0, 500) });
+      } catch (e) {
+        out.push({ path: p, status: -1, rateLimitHeaders: {}, bodyPreview: String(e).slice(0, 500) });
+      }
+    }
+    return NextResponse.json({ handle, host, results: out }, { status: 200 });
+  }
+
   if (view === "thumbs") {
     const products = await prisma.ugcTrendingProduct.findMany({
       orderBy: { createdAt: "desc" },
