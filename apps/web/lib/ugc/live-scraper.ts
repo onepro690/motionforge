@@ -921,7 +921,147 @@ async function checkLiveStatusViaWebcast(handle: string): Promise<LiveCheck> {
   }
 }
 
+// ── RapidAPI integration (tiktok-api23) ─────────────────────────────────────
+// Provider com proxies residenciais — contorna o WAF que bloqueia Vercel IPs.
+// Settings field: tiktokScraperApiKey (UI: /ugc/settings).
+// Host padrão: tiktok-api23.p.rapidapi.com. Pode trocar via env var.
+
+const RAPIDAPI_HOST = process.env.RAPIDAPI_TIKTOK_HOST ?? "tiktok-api23.p.rapidapi.com";
+
+export interface RapidApiLive {
+  roomId: string;
+  handle: string;
+  nickname: string;
+  avatarUrl: string;
+  title?: string;
+  coverUrl?: string;
+  userCount?: number;
+  likeCount?: number;
+  hasCommerce: boolean;
+  hlsUrl?: string;
+  startedAt?: number;
+}
+
+// Lista lives ativas por região. Bypass total do WAF — API paga acessa
+// endpoints internos do TikTok com proxies residenciais.
+async function fetchRapidApiLiveFeed(apiKey: string): Promise<RapidApiLive[]> {
+  const rooms: RapidApiLive[] = [];
+  const seen = new Set<string>();
+
+  // tiktok-api23 tem vários endpoints de live feed. Tentamos todos e
+  // mergeamos resultados. Cada um pode retornar rooms diferentes.
+  const endpoints = [
+    `https://${RAPIDAPI_HOST}/api/live/feed?region=BR&limit=50`,
+    `https://${RAPIDAPI_HOST}/api/live/feed?region=BR&limit=50&page=2`,
+    `https://${RAPIDAPI_HOST}/api/live/feed?region=BR&limit=50&page=3`,
+    `https://${RAPIDAPI_HOST}/api/live/feed?limit=50`,
+    `https://${RAPIDAPI_HOST}/api/live/feed?limit=50&page=2`,
+    // Variantes populares/ranking
+    `https://${RAPIDAPI_HOST}/api/live/popular?region=BR&limit=50`,
+    `https://${RAPIDAPI_HOST}/api/live/ranklist?region=BR`,
+  ];
+
+  for (const url of endpoints) {
+    try {
+      const res = await fetch(url, {
+        headers: {
+          "x-rapidapi-key": apiKey,
+          "x-rapidapi-host": RAPIDAPI_HOST,
+          "Accept": "application/json",
+        },
+        signal: AbortSignal.timeout(15_000),
+      });
+      if (!res.ok) continue;
+      const data = (await res.json()) as unknown;
+      // Walk recursive — RapidAPI providers variam no shape exato
+      const walk = (obj: unknown): void => {
+        if (!obj || typeof obj !== "object") return;
+        if (Array.isArray(obj)) { for (const it of obj) walk(it); return; }
+        const o = obj as Record<string, unknown>;
+        const rid = (o.room_id ?? o.roomId ?? o.id_str ?? o.id) as string | number | undefined;
+        const owner = (o.owner ?? o.ownerUser ?? o.user ?? o.author) as Record<string, unknown> | undefined;
+        const uniqueId = (owner?.unique_id ?? owner?.uniqueId ?? o.unique_id ?? o.uniqueId) as string | undefined;
+        const ridStr = typeof rid === "number" ? String(rid) : rid;
+        if (typeof ridStr === "string" && ridStr.length >= 12 && /^\d+$/.test(ridStr) && typeof uniqueId === "string" && !seen.has(ridStr)) {
+          seen.add(ridStr);
+          const blob = JSON.stringify(o);
+          const hasCommerce = /has_commerce_goods"?\s*:\s*true|goods_num"?\s*:\s*[1-9]|hasCommerce"?\s*:\s*true|is_commerce_live"?\s*:\s*true/.test(blob);
+          const streamUrl = o.stream_url as Record<string, unknown> | undefined;
+          const hlsRaw = streamUrl?.hls_pull_url;
+          const hls = typeof hlsRaw === "string" ? hlsRaw : (hlsRaw as Record<string, string> | undefined)?.FULL_HD1 ?? (hlsRaw as Record<string, string> | undefined)?.HD1;
+          rooms.push({
+            roomId: ridStr,
+            handle: uniqueId,
+            nickname: (owner?.nickname as string) ?? uniqueId,
+            avatarUrl: ((owner?.avatar_thumb as Record<string, unknown>)?.url_list as string[])?.[0] ?? (owner?.avatarThumb as string) ?? "",
+            title: o.title as string | undefined,
+            coverUrl: ((o.cover as Record<string, unknown>)?.url_list as string[])?.[0] ?? (o.cover_url as string | undefined),
+            userCount: (o.user_count ?? o.total_user) as number | undefined,
+            likeCount: (o.like_count ?? o.total_like) as number | undefined,
+            hasCommerce,
+            hlsUrl: hls,
+            startedAt: ((o.start_time ?? o.create_time) as number | undefined) ? ((o.start_time ?? o.create_time) as number) * 1000 : undefined,
+          });
+        }
+        for (const k in o) walk(o[k]);
+      };
+      walk(data);
+    } catch {
+      // silent
+    }
+  }
+
+  return rooms;
+}
+
+async function checkLiveViaRapidApi(apiKey: string, handle: string): Promise<LiveCheck> {
+  const url = `https://${RAPIDAPI_HOST}/api/live/check-alive?uniqueId=${encodeURIComponent(handle)}`;
+  try {
+    const res = await fetch(url, {
+      headers: {
+        "x-rapidapi-key": apiKey,
+        "x-rapidapi-host": RAPIDAPI_HOST,
+        "Accept": "application/json",
+      },
+      signal: AbortSignal.timeout(8_000),
+    });
+    if (!res.ok) return { isLive: false, error: true };
+    const text = await res.text();
+    let d: unknown;
+    try { d = JSON.parse(text); } catch { return { isLive: false, error: true }; }
+    const raw = d as { data?: { status?: number; room?: { id_str?: string; title?: string; user_count?: number; like_count?: number; has_commerce_goods?: boolean; goods_num?: number; create_time?: number } }; isLive?: boolean; roomId?: string };
+    // Normaliza shape variável entre providers
+    const isLive = raw.data?.status === 2 || raw.isLive === true;
+    if (!isLive) return { isLive: false };
+    const room = raw.data?.room;
+    const roomId = room?.id_str ?? raw.roomId;
+    if (!roomId) return { isLive: false, error: true };
+    return {
+      isLive: true,
+      roomId,
+      title: room?.title,
+      userCount: room?.user_count,
+      enterCount: room?.like_count,
+      startedAt: room?.create_time ? room.create_time * 1000 : undefined,
+      hasCommerce: room?.has_commerce_goods === true || (typeof room?.goods_num === "number" && room.goods_num > 0) || COMMERCE_REGEX.test(text),
+    };
+  } catch {
+    return { isLive: false, error: true };
+  }
+}
+
+// apiKey global do run — setado no início de scrapeLiveSessions
+let _runApiKey: string | undefined;
+
 async function checkLiveStatus(handle: string): Promise<LiveCheck> {
+  // 0. Se tiver RapidAPI key, tenta ela primeiro (proxy residencial, sem WAF).
+  if (_runApiKey) {
+    const r = await checkLiveViaRapidApi(_runApiKey, handle);
+    if (r.isLive) return r;
+    // Só short-circuit se confirmou offline sem erro (resposta definitiva)
+    if (!r.error) return r;
+  }
+
   // 1ª tentativa: webcast direto (pouco WAF-blocked quando funciona).
   //   Só aceita como resposta definitiva se VIU a live. Qualquer outra
   //   coisa cai pro fallback (pode ser endpoint retornando shape nova).
@@ -987,9 +1127,10 @@ async function mapConcurrent<T, R>(
 
 export async function scrapeLiveSessions(
   _keywords: string[],
-  _apiKey?: string,
+  apiKey?: string,
 ): Promise<LiveScrapeResult> {
   const t0 = Date.now();
+  _runApiKey = apiKey; // disponibiliza pra checkLiveStatus usar via RapidAPI
 
   // 0. Seed pool (idempotente)
   await prisma.ugcKnownCreator
@@ -1015,13 +1156,15 @@ export async function scrapeLiveSessions(
     take: 15,
   });
 
-  // Rodamos TUDO em paralelo: webcast feed (múltiplos cursors) + lobby
-  // rotado + tikwm feed search. Webcast em múltiplos cursors descobre
-  // muito mais lives em uma ida (cada endpoint paginado retorna rooms
-  // diferentes).
+  // Discovery em paralelo de TODAS as fontes:
+  //   - RapidAPI live feed (proxy residencial, bypassa WAF) — PRINCIPAL se key
+  //   - webcast/feed com múltiplos cursors (WAF-blocked em Vercel)
+  //   - lobby HTML rotado (idem)
+  //   - tikwm feed search (sempre funciona, candidatos secundários)
   const webcastCursors = [0, 30, 60, 90, 120];
   const webcastRoomsAcc: WebcastFeedRoom[] = [];
-  const [_webcastBatch, lobbyRooms, feedResult] = await Promise.all([
+  const [rapidApiRooms, _webcastBatch, lobbyRooms, feedResult] = await Promise.all([
+    apiKey ? fetchRapidApiLiveFeed(apiKey).catch(() => [] as RapidApiLive[]) : Promise.resolve([] as RapidApiLive[]),
     (async () => {
       for (const c of webcastCursors) {
         const batch = await fetchWebcastFeed(c).catch(() => [] as WebcastFeedRoom[]);
@@ -1031,6 +1174,9 @@ export async function scrapeLiveSessions(
     fetchLobbyRotated().catch(() => [] as DiscoveredRoom[]),
     fetchTikwmFeedAll(),
   ]);
+  console.log(
+    `[live-scraper] rapidapi feed: rooms=${rapidApiRooms.length} (apiKey=${apiKey ? "set" : "none"})`,
+  );
   // Dedupe por roomId
   const webcastSeen = new Set<string>();
   const webcastRooms: WebcastFeedRoom[] = [];
@@ -1063,9 +1209,26 @@ export async function scrapeLiveSessions(
     coverUrl: w.coverUrl,
   }));
 
-  // Combina todas as fontes de discovery
+  // Merge RapidAPI rooms também — rooms com roomId + commerce pré-verificado
+  const rapidApiAsLobby: DiscoveredRoom[] = rapidApiRooms.map((r) => ({
+    handle: r.handle,
+    nickname: r.nickname,
+    avatarUrl: r.avatarUrl,
+    roomId: r.roomId,
+    hasCommerce: r.hasCommerce,
+    userCount: r.userCount,
+    title: r.title,
+    coverUrl: r.coverUrl,
+  }));
+
+  // Combina todas as fontes de discovery (RapidAPI tem prioridade — vem com
+  // roomId + commerce verificados)
   const allDiscoveredMap = new Map<string, DiscoveredRoom>();
-  for (const r of webcastAsLobby) allDiscoveredMap.set(r.handle, r);
+  for (const r of rapidApiAsLobby) allDiscoveredMap.set(r.handle, r);
+  for (const r of webcastAsLobby) {
+    const ex = allDiscoveredMap.get(r.handle);
+    if (!ex || (!ex.roomId && r.roomId)) allDiscoveredMap.set(r.handle, r);
+  }
   for (const r of lobbyRooms) {
     const ex = allDiscoveredMap.get(r.handle);
     if (!ex || (!ex.roomId && r.roomId)) allDiscoveredMap.set(r.handle, r);
@@ -1332,6 +1495,7 @@ export async function scrapeLiveSessions(
     scrapedAt: new Date().toISOString(),
     debug: {
       keywordsSearched: [
+        `rapidApi=${rapidApiRooms.length}`,
         `webcast=${webcastRooms.length}`,
         `lobby=${lobbyRooms.length}`,
         `feed=${feedResult.all.length}`,

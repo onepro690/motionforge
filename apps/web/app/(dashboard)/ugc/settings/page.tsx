@@ -266,7 +266,7 @@ export default function UgcSettingsPage() {
                 {showApiKey ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
               </Button>
             </div>
-            <p className="text-xs text-white/30 mt-1">Obtenha em rapidapi.com — busque "tiktok-scraper7"</p>
+            <p className="text-xs text-white/30 mt-1">Obtenha em rapidapi.com — assine "tiktok-api23" (bypass WAF com proxies residenciais; sem chave o scraper só acha 0-4 lives porque TikTok bloqueia IPs do Vercel)</p>
           </div>
 
           <div>
