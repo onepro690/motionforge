@@ -897,7 +897,7 @@ interface LiveRoomShape {
 // Tenta webcast.tiktok.com direto. Endpoint pode não existir ou ter mudado;
 // QUALQUER ambiguidade (shape inesperada, dados ausentes) é tratada como
 // erro pra deixar o fallback api-live decidir.
-async function checkLiveStatusViaWebcast(handle: string): Promise<LiveCheck> {
+export async function checkLiveStatusViaWebcast(handle: string): Promise<LiveCheck> {
   const url = `https://webcast.tiktok.com/webcast/room/info_by_scope/?aid=1988&unique_id=${encodeURIComponent(handle)}&screen_name=${encodeURIComponent(handle)}`;
   try {
     const res = await fetch(url, {
