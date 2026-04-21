@@ -1149,8 +1149,10 @@ async function checkLiveViaRapidApi(apiKey: string, host: string, handle: string
 }
 
 async function checkLiveStatus(handle: string): Promise<LiveCheck> {
-  // 0. Se tiver RapidAPI key, tenta ela primeiro (proxy residencial, sem WAF).
-  if (_runApiKey) {
+  // 0. Se tiver RapidAPI key + provider tem endpoint de live check, tenta ela
+  // primeiro (proxy residencial, bypassa WAF). scraper7 NÃO tem live endpoint
+  // (só /user/info com dados de perfil), então skip pra não gastar cota.
+  if (_runApiKey && providerFromHost(_runApiHost) === "api23") {
     const r = await checkLiveViaRapidApi(_runApiKey, _runApiHost, handle);
     if (r.isLive) return r;
     // Só short-circuit se confirmou offline sem erro (resposta definitiva)
