@@ -1289,11 +1289,14 @@ async function fetchRecentLiveHintsScored(): Promise<RecentHintCandidate[]> {
     tasks.push({ keyword: q, cursor: 30 });
   }
 
-  // publish_time=1 (today only), sort_type=0 (most recent first)
+  // publish_time=0 (all time) + sort_type=0 (recent first). Tikwm com
+  // publish_time=1 restringe demais e alguns endpoints retornam vazio.
+  // Recency fica no scoring (scoreRecency em ageSeconds) ao invés do filtro
+  // upstream — casting wider net, rankear depois.
   const pages = await mapConcurrent(
     tasks,
     3,
-    (t) => fetchTikwmFeedPageRich(t.keyword, t.cursor, 0, 1),
+    (t) => fetchTikwmFeedPageRich(t.keyword, t.cursor, 0, 0),
     300,
   );
   const flat = pages.flat();
@@ -1320,12 +1323,11 @@ async function fetchRecentLiveHintsScored(): Promise<RecentHintCandidate[]> {
     const fullText = (v.title + " " + v.contentDesc).slice(0, 4000);
     const intentScore = scoreLiveIntent(fullText);
     const commerce = scoreCommerce(fullText);
-    // Aceita se: tem intent live OU tem sinal forte de commerce (hashtag/loja).
-    // Post de shop creator ativo nas últimas 2h, mesmo sem "agora" explícito,
-    // é candidato válido — a bio enrichment e score composite filtram depois.
-    if (intentScore < 40 && commerce < 40) continue;
     const age = now - (v.createTime || 0);
     const recency = v.createTime ? scoreRecency(age) : 0;
+    // Aceita se: intent OR commerce OR post ≤4h. Descarta só se nenhum sinal
+    // de shop/live E post antigo (>4h). Bio enrichment filtra depois.
+    if (intentScore < 40 && commerce < 30 && recency < 25) continue;
 
     const ex = byHandle.get(v.handle);
     if (!ex) {
@@ -1384,13 +1386,13 @@ async function fetchRecentLiveHintsScored(): Promise<RecentHintCandidate[]> {
 async function enrichWithShopBio(
   candidates: RecentHintCandidate[],
 ): Promise<RecentHintCandidate[]> {
-  // Top 120 candidatos recebem lookup de bio no tikwm user/info (paralelo,
-  // concurrency=4 pra respeitar rate limit do tikwm). Se bio tem marcador
-  // de shop, boosta commerceScore + totalScore e marca bioMatched.
-  const top = candidates.slice(0, 120);
+  // Top 250 candidatos recebem lookup de bio no tikwm user/info. Pool
+  // mesclado (recent-hints + feedResult.all) chega a 300+ candidatos.
+  // concurrency=5 p/ respeitar rate limit do tikwm (~4 req/s).
+  const top = candidates.slice(0, 250);
   await mapConcurrent(
     top,
-    4,
+    5,
     async (c) => {
       const info = await fetchTikwmUserInfo(c.handle);
       if (!info) return;
@@ -1403,7 +1405,7 @@ async function enrichWithShopBio(
         c.totalScore += 15;
       }
     },
-    200,
+    180,
   );
   candidates.sort((a, b) => b.totalScore - a.totalScore);
   return candidates;
@@ -1735,29 +1737,65 @@ export async function scrapeLiveSessions(
     });
   }
 
-  // 4b. INFERRED STAGE — top candidatos do recent-hints que NÃO passaram
-  //     no check webcast (WAF) mas têm sinal forte de live-shop-agora.
-  //     Entram com roomId=inferred_<handle> + isLive=true. UI distingue por
-  //     roomId prefix. Filtra os que já estão em finals (verificados).
+  // 4b. INFERRED STAGE — top candidatos que NÃO passaram no check webcast
+  //     (WAF bloqueia do Vercel) mas têm sinal de shop creator posting
+  //     today. Entram com roomId=inferred_<handle> + isLive=true. UI
+  //     distingue por roomId prefix. Filtra os que já estão em finals.
   const alreadyFinal = new Set(finals.keys());
   let inferredAdded = 0;
   let inferredBioBoosted = 0;
 
-  const hintsEnriched = await enrichWithShopBio(recentHintsRaw).catch(() => recentHintsRaw);
-  // Threshold v2: aceita 3 caminhos OR-gated pra alcançar ≥15 lives:
-  //  (a) intent forte (80) — posts "tô ao vivo agora" com qualquer commerce
-  //  (b) bio matched shop — creator tem bio de seller + intent/commerce minimo
-  //  (c) sinal combinado — intent+commerce somados >= 70
+  // Merge feedResult.all (232 creators de queries shop-focused no pipeline
+  // existente) no pool de inferência. Esses não têm createTime/contentDesc
+  // (Candidate simples), então entram com intent=0 e commerce=20 baseline.
+  // Bio enrichment é quem promove pra inferred — se o creator é shop seller.
+  const hintsByHandle = new Map(recentHintsRaw.map((c) => [c.handle, c]));
+  for (const c of feedResult.all) {
+    if (hintsByHandle.has(c.handle)) continue;
+    hintsByHandle.set(c.handle, {
+      handle: c.handle,
+      nickname: c.nickname,
+      avatarUrl: c.avatarUrl,
+      latestPostTs: 0,
+      liveIntentScore: LIVE_HINT_RE.test(c.postTitle) ? 40 : 0,
+      commerceScore: 20, // baseline — foi retornado por query shop-focused
+      recencyScore: 25, // assumido <4h (posts do feed hoje)
+      hintCount: 1,
+      totalScore:
+        (LIVE_HINT_RE.test(c.postTitle) ? 40 : 0) * 0.4 +
+        25 * 0.3 +
+        20 * 0.2 +
+        5 * 0.1,
+      sampleTitle: c.postTitle.slice(0, 200),
+      postId: "",
+    });
+  }
+  const mergedCandidates = [...hintsByHandle.values()].sort(
+    (a, b) => b.totalScore - a.totalScore,
+  );
+  console.log(
+    `[live-scraper] inference pool: recentHints=${recentHintsRaw.length} + feedAll=${feedResult.all.length} → merged=${mergedCandidates.length}`,
+  );
+
+  const hintsEnriched = await enrichWithShopBio(mergedCandidates).catch(
+    () => mergedCandidates,
+  );
+
+  // Threshold v3: prioriza bioMatched (sinal mais confiável de shop creator),
+  // e aceita intent forte ou sinal combinado. Meta ≥15 inferred.
   const inferredCandidates = hintsEnriched
     .filter((c) => {
       if (alreadyFinal.has(c.handle)) return false;
-      if (c.totalScore < 28) return false;
+      // (a) Bio matched é o sinal primário — creator é seller confirmado.
+      //     Mesmo sem intent explícito no post, está ativo hoje.
+      if (c.bioMatched) return true;
+      // (b) Intent forte (80) + qualquer commerce
       if (c.liveIntentScore >= 80 && c.commerceScore >= 20) return true;
-      if (c.bioMatched && c.liveIntentScore >= 40) return true;
+      // (c) Sinal combinado strong
       if (c.liveIntentScore + c.commerceScore >= 70 && c.recencyScore >= 25) return true;
       return false;
     })
-    .slice(0, 50); // cap pra não poluir UI
+    .slice(0, 60); // cap pra não poluir UI
 
   for (const c of inferredCandidates) {
     if (finals.has(c.handle)) continue;
@@ -1875,6 +1913,8 @@ export async function scrapeLiveSessions(
         `feed=${feedResult.all.length}`,
         `hot=${feedResult.hot.length}`,
         `hints=${recentHintsRaw.length}`,
+        `pool=${mergedCandidates.length}`,
+        `bioMatched=${inferredBioBoosted}`,
         `inferred=${inferredAdded}`,
       ],
       candidatesFound: lobbyRoomsAll.length + recentHintsRaw.length,
