@@ -34,7 +34,17 @@ interface ApiResponse {
 interface ScrapeResponse {
   total: number; liveNow: number; usedMock: boolean; hasApiKey: boolean;
   source: "mock" | "tikwm"; newSessions: number; newCreators: number; updatedSessions: number;
-  debug?: { keywordsSearched: string[]; rawVideoCount: number; usedMock: boolean };
+  debug?: {
+    keywordsSearched?: string[];
+    rawVideoCount?: number;
+    usedMock?: boolean;
+    liveWithCommerce?: number;
+    liveWithoutCommerce?: number;
+    checkErrors?: number;
+    fallbackChecked?: number;
+    lobbyRoomsFound?: number;
+    lobbyRoomsWithId?: number;
+  };
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -648,14 +658,25 @@ export default function LivesPage() {
 
       {/* Real data banner */}
       {lastScrape && !lastScrape.usedMock && (
-        <div className="flex items-center gap-2 text-xs text-emerald-400/80">
-          <CheckCircle className="w-4 h-4" />
-          {lastScrape.total} creator{lastScrape.total !== 1 ? "s" : ""} de TikTok Shop detectado{lastScrape.total !== 1 ? "s" : ""} —{" "}
-          <strong className="text-emerald-300">{lastScrape.liveNow}</strong> ao vivo agora
-          {lastScrape.newCreators > 0 ? (
-            <span className="text-emerald-300 font-semibold">· +{lastScrape.newCreators} creator{lastScrape.newCreators !== 1 ? "s" : ""} novo{lastScrape.newCreators !== 1 ? "s" : ""}</span>
-          ) : (
-            <span className="text-white/40">· sem creators novos nessa rodada</span>
+        <div className="flex flex-col gap-1">
+          <div className="flex items-center gap-2 text-xs text-emerald-400/80">
+            <CheckCircle className="w-4 h-4" />
+            {lastScrape.total} creator{lastScrape.total !== 1 ? "s" : ""} de TikTok Shop detectado{lastScrape.total !== 1 ? "s" : ""} —{" "}
+            <strong className="text-emerald-300">{lastScrape.liveNow}</strong> ao vivo agora
+            {lastScrape.newCreators > 0 ? (
+              <span className="text-emerald-300 font-semibold">· +{lastScrape.newCreators} creator{lastScrape.newCreators !== 1 ? "s" : ""} novo{lastScrape.newCreators !== 1 ? "s" : ""}</span>
+            ) : (
+              <span className="text-white/40">· sem creators novos nessa rodada</span>
+            )}
+          </div>
+          {lastScrape.debug && (
+            <div className="text-[10px] text-white/40 font-mono pl-6">
+              discovery: {(lastScrape.debug.keywordsSearched ?? []).join(" · ")}
+              {" · fallback="}{lastScrape.debug?.fallbackChecked ?? "?"}
+              {" · commerce="}{lastScrape.debug?.liveWithCommerce ?? "?"}
+              {" · no-commerce="}{lastScrape.debug?.liveWithoutCommerce ?? "?"}
+              {" · errors="}{lastScrape.debug?.checkErrors ?? "?"}
+            </div>
           )}
         </div>
       )}

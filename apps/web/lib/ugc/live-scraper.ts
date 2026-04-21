@@ -447,6 +447,13 @@ async function fetchWebcastFeed(cursor = 0): Promise<WebcastFeedRoom[]> {
     `https://webcast.tiktok.com/webcast/feed/?aid=1988&count=30&cursor=${cursor}&device_platform=web`,
     `https://webcast.tiktok.com/webcast/region/live_room/?aid=1988&region=BR&count=30`,
     `https://webcast.tiktok.com/webcast/ranklist/room_rank/?aid=1988&region=BR`,
+    // Variantes adicionais: endpoints que listam lives por região/categoria
+    `https://webcast.tiktok.com/webcast/feed/?aid=1988&count=50&region=BR&cursor=${cursor}`,
+    `https://webcast.tiktok.com/webcast/feed/?aid=1988&count=50&language=pt-BR&cursor=${cursor}`,
+    `https://webcast.tiktok.com/webcast/ranklist/live/?aid=1988&region=BR&count=50`,
+    `https://webcast.tiktok.com/webcast/popular_room_list/?aid=1988&region=BR&count=50`,
+    `https://webcast.tiktok.com/webcast/live/region/?aid=1988&region=BR&count=50`,
+    `https://webcast.tiktok.com/webcast/recommend/live_list/?aid=1988&region=BR&count=50`,
   ];
   const rooms: WebcastFeedRoom[] = [];
   for (const url of endpoints) {
@@ -1008,14 +1015,31 @@ export async function scrapeLiveSessions(
     take: 15,
   });
 
-  // Rodamos TUDO em paralelo: webcast feed + lobby rotado + tikwm feed search.
-  // Webcast/lobby eram WAF-blocked antes; vale re-tentar periodicamente
-  // (WAFs mudam e retornam room_ids direto, pulando o check per-handle).
-  const [webcastRooms, lobbyRooms, feedResult] = await Promise.all([
-    fetchWebcastFeed(0).catch(() => [] as WebcastFeedRoom[]),
+  // Rodamos TUDO em paralelo: webcast feed (múltiplos cursors) + lobby
+  // rotado + tikwm feed search. Webcast em múltiplos cursors descobre
+  // muito mais lives em uma ida (cada endpoint paginado retorna rooms
+  // diferentes).
+  const webcastCursors = [0, 30, 60, 90, 120];
+  const webcastRoomsAcc: WebcastFeedRoom[] = [];
+  const [_webcastBatch, lobbyRooms, feedResult] = await Promise.all([
+    (async () => {
+      for (const c of webcastCursors) {
+        const batch = await fetchWebcastFeed(c).catch(() => [] as WebcastFeedRoom[]);
+        webcastRoomsAcc.push(...batch);
+      }
+    })(),
     fetchLobbyRotated().catch(() => [] as DiscoveredRoom[]),
     fetchTikwmFeedAll(),
   ]);
+  // Dedupe por roomId
+  const webcastSeen = new Set<string>();
+  const webcastRooms: WebcastFeedRoom[] = [];
+  for (const r of webcastRoomsAcc) {
+    if (!webcastSeen.has(r.roomId)) {
+      webcastSeen.add(r.roomId);
+      webcastRooms.push(r);
+    }
+  }
   // Graph followings ficou desativado (API tikwm não suporta)
   const graphCandidates: DiscoveredRoom[] = feedResult.all.map((c) => ({
     handle: c.handle,
