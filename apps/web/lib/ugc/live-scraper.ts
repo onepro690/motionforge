@@ -95,11 +95,43 @@ function randomDeviceId(): string {
   return (base + rand).toString();
 }
 
+// Pool seed massivamente expandido: inclui top affiliates BR conhecidos do
+// TikTok Shop (beleza, moda, tech, casa, fitness). Cresce ao longo de runs
+// conforme creators detectados viram parte do pool LRU.
 const SEED_SHOP_CREATORS = [
+  // Mega influencers BR
   "liseleooliveira", "virginia", "gkay", "bocarosa", "rafakalimann",
   "juliette", "camilaloures", "luanasantana", "mileidemihaile", "gessicakayane",
   "lorrana", "any.awuada", "rafaelrochatv", "belochatto", "tatisantos",
   "carolbuffara", "ju_ferraz", "biancaandrade", "mariamaud", "naiaraazevedo",
+  // Beleza & maquiagem
+  "boca_rosa", "mariliamendonca", "blogueirinhaoficial", "pabllovittar",
+  "lexarocha", "gisele.bundchen", "mariahcarey", "lariferreira",
+  "babidiamond", "karolconka", "tatawerneck", "deolane_bezerra",
+  "nataliabarulio", "leticiapolyak", "alicehirose", "mirelabianchi",
+  // Moda
+  "camilacoelho", "thassianaves", "nahfloresta", "jessicavelozo",
+  "evelinreginatto", "monicamarcondes", "juliana_passos", "marysearch",
+  "biancacolepicolo", "marinaruybarbosa", "paolaoliveira", "raitornado",
+  // Casa, cozinha, achados
+  "bettinarudolph", "blogueirinhadecor", "casadasmaes", "cozinhabr",
+  "ricaparadatal", "achadinhosbr", "achadostiktok", "achadinhosmagalu",
+  "achadosmami", "lojaibyte", "solucoespraticas", "dicasdemaepratica",
+  // Tech / eletrônicos
+  "moacycoelho", "celularreviews", "techreviewbr", "gadgetsbrasil",
+  "eletronicoscombr", "celulardica", "techzinhooficial",
+  // Moda masculina
+  "carlinhosmaia", "mcdaniel", "malvimoises", "eduguedes",
+  "fabioporchat", "caiocastro", "rodrigosantoro",
+  // Fitness / suplementos
+  "gabrielamarques", "juliaperezfit", "juliamello", "felipefranco",
+  "saudebrasilfit", "fitnessdia", "suplementotop",
+  // Pet
+  "petlovesbr", "cachorrinhostiktok", "mundopet",
+  // Cabelo
+  "marcospaulo.cabelos", "cabelocombr", "oneverhair",
+  // Lojistas TikTok Shop BR conhecidos
+  "shoptiktokbr", "lojavirtualbr", "ofertabrasil", "achadoseconomias",
 ];
 
 // ── Tikwm user info (pra manual add + verificação alt) ──────────────────────
@@ -840,7 +872,52 @@ interface LiveRoomShape {
   roomId?: string;
 }
 
+// Tenta webcast.tiktok.com direto (menos WAF-sensível que api-live).
+// Endpoint retorna roomId + status pelo handle em UMA call.
+async function checkLiveStatusViaWebcast(handle: string): Promise<LiveCheck> {
+  // webcast.tiktok.com/webcast/room/info_by_scope/?unique_id=X — mobile app endpoint
+  const url = `https://webcast.tiktok.com/webcast/room/info_by_scope/?aid=1988&unique_id=${encodeURIComponent(handle)}&screen_name=${encodeURIComponent(handle)}`;
+  try {
+    const res = await fetch(url, {
+      headers: {
+        "User-Agent": randomUA(),
+        "Accept": "application/json",
+        "Accept-Language": "pt-BR,pt;q=0.9",
+      },
+      signal: AbortSignal.timeout(5_000),
+    });
+    if (!res.ok) return { isLive: false, error: true };
+    const text = await res.text();
+    if (!text || text.length < 50) return { isLive: false };
+    let d: unknown;
+    try { d = JSON.parse(text); } catch { return { isLive: false, error: true }; }
+    const raw = d as { data?: { status?: number; id_str?: string; room_id?: string; title?: string; user_count?: number; like_count?: number; has_commerce_goods?: boolean; goods_num?: number; create_time?: number } };
+    const rd = raw.data;
+    if (!rd || rd.status !== 2) return { isLive: false };
+    const roomId = rd.id_str ?? rd.room_id;
+    if (!roomId) return { isLive: false };
+    const blob = text;
+    return {
+      isLive: true,
+      roomId,
+      title: rd.title,
+      userCount: rd.user_count,
+      enterCount: rd.like_count,
+      startedAt: rd.create_time ? rd.create_time * 1000 : undefined,
+      hasCommerce: rd.has_commerce_goods === true || (typeof rd.goods_num === "number" && rd.goods_num > 0) || COMMERCE_REGEX.test(blob),
+    };
+  } catch {
+    return { isLive: false, error: true };
+  }
+}
+
 async function checkLiveStatus(handle: string): Promise<LiveCheck> {
+  // 1ª tentativa: webcast direto (muito menos WAF-blocked que api-live)
+  const webcastResult = await checkLiveStatusViaWebcast(handle);
+  if (webcastResult.isLive) return webcastResult;
+  if (!webcastResult.error) return webcastResult; // confirmou offline, não tenta fallback
+
+  // 2ª tentativa (fallback): api-live via tiktok-live-connector (WAF-sensível)
   const client = getWebClient();
   // Timeout hard em 5s: request pendurado pelo WAF não pode travar o worker
   const withTimeout = <T>(p: Promise<T>, ms: number): Promise<T> =>
@@ -927,11 +1004,14 @@ export async function scrapeLiveSessions(
     take: 15,
   });
 
-  // Pula webcast+lobby (WAF-bloqueados na Vercel IP, confirmado via debug).
-  // Só tikwm feed/search funciona como fonte de discovery.
-  const webcastRooms: WebcastFeedRoom[] = [];
-  const lobbyRooms: DiscoveredRoom[] = [];
-  const feedResult = await fetchTikwmFeedAll();
+  // Rodamos TUDO em paralelo: webcast feed + lobby rotado + tikwm feed search.
+  // Webcast/lobby eram WAF-blocked antes; vale re-tentar periodicamente
+  // (WAFs mudam e retornam room_ids direto, pulando o check per-handle).
+  const [webcastRooms, lobbyRooms, feedResult] = await Promise.all([
+    fetchWebcastFeed(0).catch(() => [] as WebcastFeedRoom[]),
+    fetchLobbyRotated().catch(() => [] as DiscoveredRoom[]),
+    fetchTikwmFeedAll(),
+  ]);
   // Graph followings ficou desativado (API tikwm não suporta)
   const graphCandidates: DiscoveredRoom[] = feedResult.all.map((c) => ({
     handle: c.handle,
@@ -1058,21 +1138,21 @@ export async function scrapeLiveSessions(
   // Ordem: hot (mais prováveis de live) → DB pool (LRU, rotaciona entre runs)
   //        → seed priority → resto do feed novo
   //  DB pool vem antes do feed pois o feed tende a cachear mesmos handles.
-  // Cap 800: aumentado de 400 — WAF ainda rejeita ~97% mas com pool maior
-  //   descobrimos mais lives por run. Concorrência 8 + gap 150ms:
-  //   800/8 × 1.65s ≈ 165s. Feed (~38s) + fallback ≈ 203s, fits em 300s.
+  // Cap 1200: com checkLiveStatus agora tentando webcast PRIMEIRO (muito
+  //   menos WAF-blocked), cada check custa ~0.5-1s. Pool grande faz
+  //   diferença. Concorrência 10 + gap 100ms: 1200/10 × 1.1s ≈ 132s.
   const fallbackHandles = [
     ...new Set([...hotShuffled, ...dbShuffled, ...seedShuffled, ...feedShuffled]),
-  ].slice(0, 800);
+  ].slice(0, 1200);
   console.log(
     `[live-scraper] fallback: hot=${hotShuffled.length} seed=${seedShuffled.length} feed=${feedShuffled.length} db=${dbShuffled.length} -> ${fallbackHandles.length}`,
   );
   console.log(`[live-scraper] fallback api-live checks: ${fallbackHandles.length}`);
 
-  // Concorrência 8 + gap 150ms: com 800 handles, consome ~165s.
+  // Concorrência 10 + gap 100ms: com 1200 handles, consome ~132s.
   const fallbackChecks = await mapConcurrent(
     fallbackHandles,
-    8,
+    10,
     async (handle) => {
       const check = await checkLiveStatus(handle);
       let info: FullRoomInfo | null = null;
@@ -1081,7 +1161,7 @@ export async function scrapeLiveSessions(
       }
       return { handle, check, info };
     },
-    150,
+    100,
   );
 
   // 5. Merge + filtro commerce estrito
