@@ -34,6 +34,51 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({ count: all.length, settings: summary }, { status: 200 });
   }
 
+  if (view === "api23-probe") {
+    const handle = request.nextUrl.searchParams.get("handle") ?? "shoptiktokbr";
+    const settings = await prisma.ugcSystemSettings.findFirst({ select: { tiktokScraperApiKey: true } });
+    const key = settings?.tiktokScraperApiKey;
+    if (!key) return NextResponse.json({ error: "no key" }, { status: 400 });
+    const host = "tiktok-api23.p.rapidapi.com";
+    // Testa múltiplas variantes de path + query param pra Check Alive,
+    // Search Live, Get Live Info, Get Live Stream
+    const paths = [
+      // Check Alive variants
+      `/api/live/check-alive?uniqueId=${handle}`,
+      `/api/live/check-alive?username=${handle}`,
+      `/api/live/check-alive?unique_id=${handle}`,
+      `/api/check-alive?uniqueId=${handle}`,
+      `/api/live/check_alive?uniqueId=${handle}`,
+      `/api/live/alive?uniqueId=${handle}`,
+      // Search Live variants
+      `/api/search/live?keyword=live`,
+      `/api/search/live?keywords=live`,
+      `/api/live/search?keyword=live`,
+      // Get Live Info
+      `/api/live/info?uniqueId=${handle}`,
+      `/api/live/info?username=${handle}`,
+      // Get Live Stream
+      `/api/live/stream?uniqueId=${handle}`,
+      // Category
+      `/api/live/category`,
+      `/api/live/categories`,
+    ];
+    const out: Array<{ path: string; status: number; bodyPreview: string }> = [];
+    for (const p of paths) {
+      try {
+        const res = await fetch(`https://${host}${p}`, {
+          headers: { "x-rapidapi-key": key, "x-rapidapi-host": host, "Accept": "application/json" },
+          signal: AbortSignal.timeout(10_000),
+        });
+        const body = await res.text();
+        out.push({ path: p, status: res.status, bodyPreview: body.slice(0, 800) });
+      } catch (e) {
+        out.push({ path: p, status: -1, bodyPreview: String(e).slice(0, 200) });
+      }
+    }
+    return NextResponse.json({ handle, host, results: out }, { status: 200 });
+  }
+
   if (view === "tikwm-probe") {
     // Testa se tikwm.com tem endpoint de live detection (sem precisar de key)
     const handle = request.nextUrl.searchParams.get("handle") ?? "shoptiktokbr";

@@ -139,7 +139,7 @@ const SEED_SHOP_CREATORS = [
 // WAF via proxy residencial. tikwm.com calls ficam diretos (tikwm não é blocked).
 
 let _runApiKey: string | undefined;
-let _runApiHost = "tiktok-scraper7.p.rapidapi.com";
+let _runApiHost = "tiktok-api23.p.rapidapi.com";
 
 function providerFromHost(host: string): "scraper7" | "api23" | "other" {
   if (host.includes("scraper7") || host.includes("tikwm")) return "scraper7";
@@ -941,7 +941,7 @@ async function checkLiveStatusViaWebcast(handle: string): Promise<LiveCheck> {
 // Host padrão: tiktok-scraper7.p.rapidapi.com. Pode trocar via env RAPIDAPI_TIKTOK_HOST.
 // Suporta tiktok-scraper7 (wraps tikwm) e tiktok-api23 (endpoints /api/live/*).
 
-const RAPIDAPI_HOST_DEFAULT = process.env.RAPIDAPI_TIKTOK_HOST ?? "tiktok-scraper7.p.rapidapi.com";
+const RAPIDAPI_HOST_DEFAULT = process.env.RAPIDAPI_TIKTOK_HOST ?? "tiktok-api23.p.rapidapi.com";
 
 export interface RapidApiLive {
   roomId: string;
