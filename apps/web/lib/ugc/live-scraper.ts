@@ -638,8 +638,8 @@ async function fetchLobbyOnce(url: string): Promise<DiscoveredRoom[]> {
   }
 }
 
-// 30 rotations × 4 URLs × device_id fresh = ~120 calls, cada uma traz
-// ~5-15 rooms personalizados diferentes. Pool esperado: 300-800 handles.
+// Rotations × 4 URLs × device_id fresh. Se WAF estiver bloqueando tudo,
+// queremos falhar rápido (não consumir minutos esperando timeouts).
 async function fetchLobbyRotated(): Promise<DiscoveredRoom[]> {
   const LOBBY_URLS = [
     "https://www.tiktok.com/live",
@@ -647,7 +647,7 @@ async function fetchLobbyRotated(): Promise<DiscoveredRoom[]> {
     "https://www.tiktok.com/live?lang=pt-BR&region=BR",
     "https://www.tiktok.com/discover/live",
   ];
-  const rounds = 30;
+  const rounds = 8;
   const tasks: string[] = [];
   for (let r = 0; r < rounds; r++) {
     for (const u of LOBBY_URLS) tasks.push(u);
@@ -872,10 +872,10 @@ interface LiveRoomShape {
   roomId?: string;
 }
 
-// Tenta webcast.tiktok.com direto (menos WAF-sensível que api-live).
-// Endpoint retorna roomId + status pelo handle em UMA call.
+// Tenta webcast.tiktok.com direto. Endpoint pode não existir ou ter mudado;
+// QUALQUER ambiguidade (shape inesperada, dados ausentes) é tratada como
+// erro pra deixar o fallback api-live decidir.
 async function checkLiveStatusViaWebcast(handle: string): Promise<LiveCheck> {
-  // webcast.tiktok.com/webcast/room/info_by_scope/?unique_id=X — mobile app endpoint
   const url = `https://webcast.tiktok.com/webcast/room/info_by_scope/?aid=1988&unique_id=${encodeURIComponent(handle)}&screen_name=${encodeURIComponent(handle)}`;
   try {
     const res = await fetch(url, {
@@ -888,14 +888,17 @@ async function checkLiveStatusViaWebcast(handle: string): Promise<LiveCheck> {
     });
     if (!res.ok) return { isLive: false, error: true };
     const text = await res.text();
-    if (!text || text.length < 50) return { isLive: false };
+    if (!text || text.length < 50) return { isLive: false, error: true };
     let d: unknown;
     try { d = JSON.parse(text); } catch { return { isLive: false, error: true }; }
     const raw = d as { data?: { status?: number; id_str?: string; room_id?: string; title?: string; user_count?: number; like_count?: number; has_commerce_goods?: boolean; goods_num?: number; create_time?: number } };
     const rd = raw.data;
-    if (!rd || rd.status !== 2) return { isLive: false };
+    // Se não tem `data` ou não tem `status` sinalizado, endpoint não
+    // respondeu como esperado — vai pra fallback.
+    if (!rd || typeof rd.status !== "number") return { isLive: false, error: true };
+    if (rd.status !== 2) return { isLive: false };
     const roomId = rd.id_str ?? rd.room_id;
-    if (!roomId) return { isLive: false };
+    if (!roomId) return { isLive: false, error: true };
     const blob = text;
     return {
       isLive: true,
@@ -912,10 +915,11 @@ async function checkLiveStatusViaWebcast(handle: string): Promise<LiveCheck> {
 }
 
 async function checkLiveStatus(handle: string): Promise<LiveCheck> {
-  // 1ª tentativa: webcast direto (muito menos WAF-blocked que api-live)
+  // 1ª tentativa: webcast direto (pouco WAF-blocked quando funciona).
+  //   Só aceita como resposta definitiva se VIU a live. Qualquer outra
+  //   coisa cai pro fallback (pode ser endpoint retornando shape nova).
   const webcastResult = await checkLiveStatusViaWebcast(handle);
   if (webcastResult.isLive) return webcastResult;
-  if (!webcastResult.error) return webcastResult; // confirmou offline, não tenta fallback
 
   // 2ª tentativa (fallback): api-live via tiktok-live-connector (WAF-sensível)
   const client = getWebClient();
@@ -1162,6 +1166,17 @@ export async function scrapeLiveSessions(
       return { handle, check, info };
     },
     100,
+  );
+
+  // Debug: quantos dos 1200 foram identificados como live, quantos erro, etc.
+  const fallbackLive = fallbackChecks.filter((c) => c.check.isLive).length;
+  const fallbackErr = fallbackChecks.filter((c) => c.check.error).length;
+  const fallbackCommerce = fallbackChecks.filter((c) => {
+    const hc = c.info?.hasCommerce ?? c.check.hasCommerce ?? false;
+    return c.check.isLive && hc;
+  }).length;
+  console.log(
+    `[live-scraper] fallback result: live=${fallbackLive} commerce=${fallbackCommerce} errors=${fallbackErr} / ${fallbackChecks.length}`,
   );
 
   // 5. Merge + filtro commerce estrito
