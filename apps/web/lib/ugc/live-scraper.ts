@@ -1090,13 +1090,18 @@ export async function scrapeLiveSessions(
   let liveWithoutCommerce = 0;
   let checkErrors = 0;
 
-  // Commerce filter relaxado: TikTok frequentemente não sinaliza
-  // has_commerce_goods mesmo em lives de afiliado ativas. User quer ver
-  // TODAS as lives que encontrar. Flag hasCommerce ainda usada pra score.
+  // Filtro commerce ESTRITO: só entra live com botão de compra (TikTok Shop).
+  // Expansão de pool vem do cap 800 + feed 2x — aumenta discovery sem
+  // relaxar o filtro de qualidade.
   for (const { room, info } of roomInfos) {
     if (!info) continue;
     if (info.status !== 2) continue;
-    if (info.hasCommerce) liveWithCommerce++; else liveWithoutCommerce++;
+    if (info.hasCommerce) {
+      liveWithCommerce++;
+    } else {
+      liveWithoutCommerce++;
+      continue;
+    }
     const viewerCount = info.userCount ?? room.userCount ?? 0;
     const likeCount = info.likeCount ?? 0;
     finals.set(room.handle, {
@@ -1109,7 +1114,7 @@ export async function scrapeLiveSessions(
       totalViewers: viewerCount,
       likeCount,
       estimatedOrders: 0,
-      productCount: info.hasCommerce ? 1 : 0,
+      productCount: 1,
       products: [],
       isLive: true,
       startedAt: info.startedAt ? new Date(info.startedAt).toISOString() : undefined,
@@ -1117,9 +1122,8 @@ export async function scrapeLiveSessions(
       flvUrl: info.flvUrl,
       liveUrl: `https://www.tiktok.com/@${room.handle}/live`,
       thumbnailUrl: info.coverUrl ?? room.coverUrl ?? room.avatarUrl,
-      salesScore: calcSalesScore({ viewerCount, likeCount, isLive: true }) +
-        (info.hasCommerce ? 10 : 0),
-      __hasCommerce: info.hasCommerce,
+      salesScore: calcSalesScore({ viewerCount, likeCount, isLive: true }),
+      __hasCommerce: true,
     });
   }
 
@@ -1127,8 +1131,12 @@ export async function scrapeLiveSessions(
     if (check.error) checkErrors++;
     if (!check.isLive) continue;
     const hasCommerce = info?.hasCommerce ?? check.hasCommerce ?? false;
-    if (hasCommerce) liveWithCommerce++; else liveWithoutCommerce++;
+    if (!hasCommerce) {
+      liveWithoutCommerce++;
+      continue;
+    }
     if (finals.has(handle)) continue;
+    liveWithCommerce++;
     const viewerCount = info?.userCount ?? check.userCount ?? 0;
     const likeCount = info?.likeCount ?? check.enterCount ?? 0;
     finals.set(handle, {
@@ -1141,7 +1149,7 @@ export async function scrapeLiveSessions(
       totalViewers: viewerCount,
       likeCount,
       estimatedOrders: 0,
-      productCount: hasCommerce ? 1 : 0,
+      productCount: 1,
       products: [],
       isLive: true,
       startedAt: check.startedAt ? new Date(check.startedAt).toISOString() : undefined,
@@ -1149,9 +1157,8 @@ export async function scrapeLiveSessions(
       flvUrl: info?.flvUrl,
       liveUrl: `https://www.tiktok.com/@${handle}/live`,
       thumbnailUrl: info?.coverUrl ?? check.coverUrl ?? "",
-      salesScore: calcSalesScore({ viewerCount, likeCount, isLive: true }) +
-        (hasCommerce ? 10 : 0),
-      __hasCommerce: hasCommerce,
+      salesScore: calcSalesScore({ viewerCount, likeCount, isLive: true }),
+      __hasCommerce: true,
     });
   }
 
