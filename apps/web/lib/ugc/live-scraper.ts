@@ -1141,6 +1141,261 @@ async function mapConcurrent<T, R>(
   return results;
 }
 
+// ── Recent "going live NOW" inference stage ──────────────────────────────────
+// Tikwm feed com publish_time=1 + sort_type=0 devolve posts mais recentes.
+// Cada post traz create_time + content_desc → podemos inferir quem
+// ESTÁ em live AGORA sem conseguir chamar webcast/room/info (WAF-blocked
+// em Vercel). Creators que postaram "tô ao vivo agora" nos últimos
+// 0-240min têm probabilidade ~80% de estar live no momento da busca.
+// Esses entram no resultado como "inferred" (roomId=inferred_<handle>).
+
+const LIVE_NOW_QUERIES = [
+  // Strong "happening now" intent
+  "tô ao vivo agora", "estou ao vivo agora", "entra na live agora",
+  "live começou agora", "AO VIVO AGORA", "ao vivo TIKTOK SHOP",
+  "live shop agora", "tô vendendo ao vivo", "live de vendas agora",
+  "promoção ao vivo agora", "entra na minha live", "acabei de entrar ao vivo",
+  "live shopping agora", "liveshop vendendo", "ao vivo vendendo agora",
+  // Category + agora
+  "beleza ao vivo agora", "moda ao vivo agora", "achadinhos ao vivo",
+  "perfume ao vivo agora", "maquiagem ao vivo agora", "skincare ao vivo agora",
+  "cabelo ao vivo agora", "casa ao vivo agora", "cozinha ao vivo agora",
+  "fitness ao vivo agora", "eletrônicos ao vivo", "celular ao vivo agora",
+  "roupa ao vivo agora", "calçados ao vivo agora",
+  // Hashtag focus (tikwm indexes hashtags as keywords)
+  "#aovivoagora", "#liveagora", "#estouaovivo", "#liveshopbrasil",
+  "#aovivo", "#vempralive", "#entranalive", "#tiktokshopbrasil",
+  "#liveshop", "#liveshopping",
+];
+
+const LIVE_NOW_RE_STRONG =
+  /ao\s*vivo\s*agora|aovivo\s*agora|live\s*agora|live\s*come.ou|entra\s*na\s*live|estou\s*(em\s*)?live|t[ôo]\s*(em\s*|na\s*)?(ao\s*)?live|t[ôo]\s*ao\s*vivo|acabei\s*de\s*(entrar|iniciar)\s*(a\s*)?live|vem\s*(pra|na)\s*live|#aovivoagora|#liveagora|#estouaovivo/i;
+const LIVE_NOW_RE_WEAK =
+  /ao\s*vivo|aovivo|\blive\s*(shop|shopping|promo|oferta|venda|vendendo|bazar)/i;
+const SHOP_RE =
+  /shop|tiktokshop|promo.?[ãa]o|oferta|desconto|achadinho|liquida.?[ãa]o|queima\s*estoque|vend(a|endo|as)|cupom|frete\s*gr.tis|pre[çc]o|R\$\s?\d/i;
+const SHOP_HASHTAG_RE =
+  /#(tiktokshop|tiktokshopbrasil|liveshop|liveshopping|achadinho|achadostiktok|promocao|ofertarelampago|desconto|vendas|modatiktokshop|beleztiktokshop|cozinhatiktokshop)/i;
+const BIO_SHOP_RE =
+  /tiktok\s*shop|live\s*seller|vendas\s*todos?\s*os?\s*dias?|affiliate|afiliad[oa]|seller|achadinho|loja\s*on\s*line|loja\s*virtual|vendas\s*ao\s*vivo|creator\s*shop/i;
+
+function scoreLiveIntent(text: string): number {
+  if (LIVE_NOW_RE_STRONG.test(text)) return 80;
+  if (LIVE_NOW_RE_WEAK.test(text)) return 40;
+  return 0;
+}
+
+function scoreCommerce(text: string): number {
+  let score = 0;
+  if (SHOP_HASHTAG_RE.test(text)) score += 40;
+  if (SHOP_RE.test(text)) score += 30;
+  return Math.min(score, 70);
+}
+
+function scoreRecency(ageSeconds: number): number {
+  if (ageSeconds < 30 * 60) return 80;
+  if (ageSeconds < 60 * 60) return 60;
+  if (ageSeconds < 2 * 60 * 60) return 45;
+  if (ageSeconds < 4 * 60 * 60) return 25;
+  if (ageSeconds < 12 * 60 * 60) return 10;
+  return 0;
+}
+
+export interface RecentHintCandidate {
+  handle: string;
+  nickname: string;
+  avatarUrl: string;
+  latestPostTs: number;
+  liveIntentScore: number;
+  commerceScore: number;
+  recencyScore: number;
+  hintCount: number;
+  totalScore: number;
+  sampleTitle: string;
+  postId: string;
+  bioMatched?: boolean;
+}
+
+async function fetchTikwmFeedPageRich(
+  keyword: string,
+  cursor: number,
+  sortType: number,
+  publishTime: number,
+): Promise<Array<{
+  handle: string;
+  nickname: string;
+  avatarUrl: string;
+  title: string;
+  contentDesc: string;
+  createTime: number;
+  videoId: string;
+}>> {
+  const url = `https://www.tikwm.com/api/feed/search?keywords=${encodeURIComponent(
+    keyword,
+  )}&count=30&cursor=${cursor}&region=br&publish_time=${publishTime}&sort_type=${sortType}`;
+  try {
+    const res = await fetch(url, {
+      headers: { "User-Agent": randomUA() },
+      signal: AbortSignal.timeout(12_000),
+    });
+    if (!res.ok) return [];
+    const data = (await res.json()) as {
+      code?: number;
+      data?: {
+        videos?: Array<{
+          video_id?: string;
+          title?: string;
+          content_desc?: string | string[];
+          region?: string;
+          create_time?: number;
+          author?: { unique_id?: string; nickname?: string; avatar?: string };
+        }>;
+      };
+    };
+    if (data.code !== 0) return [];
+    return (data.data?.videos ?? [])
+      .filter((v) => v.author?.unique_id && (v.region === "BR" || !v.region))
+      .map((v) => ({
+        handle: v.author!.unique_id!,
+        nickname: v.author?.nickname ?? v.author!.unique_id!,
+        avatarUrl: v.author?.avatar ?? "",
+        title: v.title ?? "",
+        contentDesc: Array.isArray(v.content_desc)
+          ? v.content_desc.join(" ")
+          : v.content_desc ?? "",
+        createTime: v.create_time ?? 0,
+        videoId: v.video_id ?? "",
+      }));
+  } catch {
+    return [];
+  }
+}
+
+async function fetchRecentLiveHintsScored(): Promise<RecentHintCandidate[]> {
+  const now = Math.floor(Date.now() / 1000);
+  const tasks: Array<{ keyword: string; cursor: number }> = [];
+  for (const q of LIVE_NOW_QUERIES) {
+    tasks.push({ keyword: q, cursor: 0 });
+    tasks.push({ keyword: q, cursor: 30 });
+  }
+
+  // publish_time=1 (today only), sort_type=0 (most recent first)
+  const pages = await mapConcurrent(
+    tasks,
+    3,
+    (t) => fetchTikwmFeedPageRich(t.keyword, t.cursor, 0, 1),
+    300,
+  );
+  const flat = pages.flat();
+  console.log(`[live-scraper] recent-hints raw videos=${flat.length}`);
+
+  // Agrega signals por handle
+  const byHandle = new Map<
+    string,
+    {
+      handle: string;
+      nickname: string;
+      avatarUrl: string;
+      latestPostTs: number;
+      bestIntent: number;
+      bestCommerce: number;
+      bestRecency: number;
+      sampleTitle: string;
+      postId: string;
+      hintCount: number;
+    }
+  >();
+
+  for (const v of flat) {
+    const fullText = (v.title + " " + v.contentDesc).slice(0, 4000);
+    const intentScore = scoreLiveIntent(fullText);
+    if (intentScore < 40) continue; // sem live intent, descarta
+    const commerce = scoreCommerce(fullText);
+    const age = now - (v.createTime || 0);
+    const recency = v.createTime ? scoreRecency(age) : 0;
+
+    const ex = byHandle.get(v.handle);
+    if (!ex) {
+      byHandle.set(v.handle, {
+        handle: v.handle,
+        nickname: v.nickname,
+        avatarUrl: v.avatarUrl,
+        latestPostTs: v.createTime || 0,
+        bestIntent: intentScore,
+        bestCommerce: commerce,
+        bestRecency: recency,
+        sampleTitle: v.title.slice(0, 200),
+        postId: v.videoId,
+        hintCount: 1,
+      });
+    } else {
+      if (v.createTime && v.createTime > ex.latestPostTs) {
+        ex.latestPostTs = v.createTime;
+        ex.sampleTitle = v.title.slice(0, 200);
+        ex.postId = v.videoId;
+      }
+      ex.bestIntent = Math.max(ex.bestIntent, intentScore);
+      ex.bestCommerce = Math.max(ex.bestCommerce, commerce);
+      ex.bestRecency = Math.max(ex.bestRecency, recency);
+      ex.hintCount++;
+    }
+  }
+
+  const candidates: RecentHintCandidate[] = [];
+  for (const ex of byHandle.values()) {
+    // Composite: intent dominates, recency sharpens, commerce filters later,
+    // multiple hints boost confidence modestly.
+    const total =
+      ex.bestIntent * 0.4 +
+      ex.bestRecency * 0.3 +
+      ex.bestCommerce * 0.2 +
+      Math.min(ex.hintCount * 5, 20) * 0.1;
+    candidates.push({
+      handle: ex.handle,
+      nickname: ex.nickname,
+      avatarUrl: ex.avatarUrl,
+      latestPostTs: ex.latestPostTs,
+      liveIntentScore: ex.bestIntent,
+      commerceScore: ex.bestCommerce,
+      recencyScore: ex.bestRecency,
+      hintCount: ex.hintCount,
+      totalScore: total,
+      sampleTitle: ex.sampleTitle,
+      postId: ex.postId,
+    });
+  }
+  candidates.sort((a, b) => b.totalScore - a.totalScore);
+  return candidates;
+}
+
+async function enrichWithShopBio(
+  candidates: RecentHintCandidate[],
+): Promise<RecentHintCandidate[]> {
+  // Top 60 candidatos recebem lookup de bio no tikwm user/info (paralelo,
+  // concurrency=3 pra respeitar rate limit do tikwm). Se bio tem marcador
+  // de shop, boosta commerceScore + totalScore e marca bioMatched.
+  const top = candidates.slice(0, 60);
+  await mapConcurrent(
+    top,
+    3,
+    async (c) => {
+      const info = await fetchTikwmUserInfo(c.handle);
+      if (!info) return;
+      if (info.avatarUrl && !c.avatarUrl) c.avatarUrl = info.avatarUrl;
+      if (info.nickname) c.nickname = info.nickname;
+      const bio = info.bio ?? "";
+      if (bio && (BIO_SHOP_RE.test(bio) || SHOP_RE.test(bio) || SHOP_HASHTAG_RE.test(bio))) {
+        c.bioMatched = true;
+        c.commerceScore = Math.min(100, c.commerceScore + 30);
+        c.totalScore += 15;
+      }
+    },
+    250,
+  );
+  candidates.sort((a, b) => b.totalScore - a.totalScore);
+  return candidates;
+}
+
 // ── Main ─────────────────────────────────────────────────────────────────────
 
 export async function scrapeLiveSessions(
@@ -1182,7 +1437,7 @@ export async function scrapeLiveSessions(
   //   - tikwm feed search (sempre funciona, candidatos secundários)
   const webcastCursors = [0, 30, 60, 90, 120];
   const webcastRoomsAcc: WebcastFeedRoom[] = [];
-  const [rapidApiRooms, _webcastBatch, lobbyRooms, feedResult] = await Promise.all([
+  const [rapidApiRooms, _webcastBatch, lobbyRooms, feedResult, recentHintsRaw] = await Promise.all([
     apiKey ? fetchRapidApiLiveFeed(apiKey, _runApiHost).catch(() => [] as RapidApiLive[]) : Promise.resolve([] as RapidApiLive[]),
     (async () => {
       for (const c of webcastCursors) {
@@ -1192,7 +1447,11 @@ export async function scrapeLiveSessions(
     })(),
     fetchLobbyRotated().catch(() => [] as DiscoveredRoom[]),
     fetchTikwmFeedAll(),
+    // Paralelo: stage recent-hints — posts de hoje com intent de live NOW.
+    // Roda em paralelo pra não adicionar latência.
+    fetchRecentLiveHintsScored().catch(() => [] as RecentHintCandidate[]),
   ]);
+  console.log(`[live-scraper] recent-hints scored=${recentHintsRaw.length}`);
   console.log(
     `[live-scraper] rapidapi feed: rooms=${rapidApiRooms.length} (apiKey=${apiKey ? "set" : "none"})`,
   );
@@ -1463,15 +1722,78 @@ export async function scrapeLiveSessions(
     });
   }
 
+  // 4b. INFERRED STAGE — top candidatos do recent-hints que NÃO passaram
+  //     no check webcast (WAF) mas têm sinal forte de live-shop-agora.
+  //     Entram com roomId=inferred_<handle> + isLive=true. UI distingue por
+  //     roomId prefix. Filtra os que já estão em finals (verificados).
+  const alreadyFinal = new Set(finals.keys());
+  let inferredAdded = 0;
+  let inferredBioBoosted = 0;
+
+  const hintsEnriched = await enrichWithShopBio(recentHintsRaw).catch(() => recentHintsRaw);
+  // Threshold: intent >= 60 E commerce >= 30 E totalScore >= 45.
+  // Último post com <4h garante recencyScore >= 25 na composição.
+  const inferredCandidates = hintsEnriched
+    .filter(
+      (c) =>
+        !alreadyFinal.has(c.handle) &&
+        c.liveIntentScore >= 60 &&
+        c.commerceScore >= 30 &&
+        c.totalScore >= 45,
+    )
+    .slice(0, 40); // cap pra não poluir UI
+
+  for (const c of inferredCandidates) {
+    if (finals.has(c.handle)) continue;
+    if (c.bioMatched) inferredBioBoosted++;
+    const startedAtMs = c.latestPostTs ? c.latestPostTs * 1000 : Date.now();
+    finals.set(c.handle, {
+      roomId: `inferred_${c.handle}`,
+      title: c.sampleTitle,
+      hostHandle: c.handle,
+      hostNickname: c.nickname,
+      hostAvatarUrl: c.avatarUrl,
+      viewerCount: 0,
+      totalViewers: 0,
+      likeCount: 0,
+      estimatedOrders: 0,
+      productCount: 0,
+      products: [],
+      isLive: true,
+      startedAt: new Date(startedAtMs).toISOString(),
+      hlsUrl: undefined,
+      flvUrl: undefined,
+      liveUrl: `https://www.tiktok.com/@${c.handle}/live`,
+      thumbnailUrl: c.avatarUrl,
+      salesScore: Math.round(c.totalScore), // score = confidence, usado como sort
+      __hasCommerce: true,
+    });
+    inferredAdded++;
+  }
+  console.log(
+    `[live-scraper] inferred added=${inferredAdded} (bioBoosted=${inferredBioBoosted}, totalCandidates=${hintsEnriched.length})`,
+  );
+
   const finalLives = [...finals.values()]
     .map(({ __hasCommerce: _, ...rest }) => rest)
-    .sort((a, b) => b.viewerCount - a.viewerCount);
+    .sort((a, b) => {
+      // Verificados (roomId numérico) vêm primeiro; depois sort por viewers/score.
+      const aVerified = !a.roomId.startsWith("inferred_");
+      const bVerified = !b.roomId.startsWith("inferred_");
+      if (aVerified !== bVerified) return aVerified ? -1 : 1;
+      // Dentro do mesmo grupo: verified por viewers, inferred por score.
+      if (aVerified) return b.viewerCount - a.viewerCount;
+      return b.salesScore - a.salesScore;
+    });
 
-  // 6. Update pool: lastChecked para tudo, lastSeenLive para os live
+  // 6. Update pool: lastChecked para tudo, lastSeenLive só para verified.
+  //    Inferred entries (sem confirmação de status=2) NÃO updatam
+  //    lastSeenLive/liveCount pra não poluir ranking histórico.
   const now = new Date();
   const allChecked = [
     ...lobbyWithRoomId.map((r) => r.handle),
     ...fallbackHandles,
+    ...inferredCandidates.map((c) => c.handle),
   ];
   if (allChecked.length > 0) {
     await prisma.ugcKnownCreator
@@ -1481,9 +1803,26 @@ export async function scrapeLiveSessions(
       })
       .catch(() => null);
   }
+  // Upsert inferred handles pra pool (descobertos via hints recentes).
+  if (inferredCandidates.length > 0) {
+    await prisma.ugcKnownCreator
+      .createMany({
+        data: inferredCandidates.map((c) => ({
+          handle: c.handle,
+          nickname: c.nickname,
+          avatarUrl: c.avatarUrl,
+          region: "BR",
+          source: "recent_hints",
+        })),
+        skipDuplicates: true,
+      })
+      .catch(() => null);
+  }
   // Atualiza o histórico do creator (peak, último início, título, etc).
   // updateMany não faz per-row, então fazemos um por live (N pequeno).
   for (const l of finalLives) {
+    const isInferred = l.roomId.startsWith("inferred_");
+    if (isInferred) continue; // só verified entra no histórico
     await prisma.ugcKnownCreator
       .update({
         where: { handle: l.hostHandle },
@@ -1505,7 +1844,7 @@ export async function scrapeLiveSessions(
   }
 
   console.log(
-    `[live-scraper] DONE in ${Date.now() - t0}ms: total=${lobbyRoomsAll.length}, withId=${lobbyWithRoomId.length}, withCommerce=${liveWithCommerce}, final=${finalLives.length}`,
+    `[live-scraper] DONE in ${Date.now() - t0}ms: total=${lobbyRoomsAll.length}, withId=${lobbyWithRoomId.length}, withCommerce=${liveWithCommerce}, inferred=${inferredAdded}, final=${finalLives.length}`,
   );
 
   return {
@@ -1519,8 +1858,10 @@ export async function scrapeLiveSessions(
         `lobby=${lobbyRooms.length}`,
         `feed=${feedResult.all.length}`,
         `hot=${feedResult.hot.length}`,
+        `hints=${recentHintsRaw.length}`,
+        `inferred=${inferredAdded}`,
       ],
-      candidatesFound: lobbyRoomsAll.length,
+      candidatesFound: lobbyRoomsAll.length + recentHintsRaw.length,
       verifiedLive: finalLives.length + liveWithoutCommerce,
       checkErrors,
       liveWithCommerce,

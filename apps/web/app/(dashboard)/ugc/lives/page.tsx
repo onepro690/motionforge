@@ -44,6 +44,8 @@ interface ScrapeResponse {
     fallbackChecked?: number;
     lobbyRoomsFound?: number;
     lobbyRoomsWithId?: number;
+    candidatesFound?: number;
+    verifiedLive?: number;
   };
 }
 
@@ -114,6 +116,7 @@ function LiveCard({ session, onRecord, onDelete, onDeleteRecording, onStop, prog
   const products   = session.products ?? [];
   const canRecord  = session.isLive && session.recordingStatus !== "RECORDING" && session.recordingStatus !== "QUEUED";
   const isRecording = session.recordingStatus === "RECORDING" || session.recordingStatus === "QUEUED";
+  const isInferred = typeof session.roomId === "string" && session.roomId.startsWith("inferred_");
 
   return (
     <div className="bg-white/[0.03] border border-white/[0.06] rounded-xl overflow-hidden hover:border-violet-500/20 transition-all group flex flex-col">
@@ -129,10 +132,14 @@ function LiveCard({ session, onRecord, onDelete, onDeleteRecording, onStop, prog
           </div>
         )}
         {/* Live badge */}
-        <div className="absolute top-2 left-2">
+        <div className="absolute top-2 left-2 flex items-center gap-1">
           {session.isLive ? (
-            <span className="flex items-center gap-1 bg-red-500 text-white text-[10px] font-bold px-2 py-0.5 rounded-full">
-              <span className="w-1.5 h-1.5 rounded-full bg-white animate-pulse" />AO VIVO
+            <span className={cn(
+              "flex items-center gap-1 text-white text-[10px] font-bold px-2 py-0.5 rounded-full",
+              isInferred ? "bg-amber-500/90" : "bg-red-500",
+            )}>
+              <span className="w-1.5 h-1.5 rounded-full bg-white animate-pulse" />
+              {isInferred ? "PROVÁVEL" : "AO VIVO"}
             </span>
           ) : (
             <span className="flex items-center gap-1 bg-black/60 text-white/70 text-[10px] px-2 py-0.5 rounded-full">
@@ -670,7 +677,7 @@ export default function LivesPage() {
             )}
           </div>
           {lastScrape.debug && (
-            <div className="text-[10px] text-white/40 font-mono pl-6">
+            <div className="text-[10px] text-white/40 font-mono pl-6 leading-relaxed">
               discovery: {(lastScrape.debug.keywordsSearched ?? []).join(" · ")}
               {" · fallback="}{lastScrape.debug?.fallbackChecked ?? "?"}
               {" · commerce="}{lastScrape.debug?.liveWithCommerce ?? "?"}

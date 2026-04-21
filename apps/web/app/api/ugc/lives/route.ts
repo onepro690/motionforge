@@ -69,8 +69,17 @@ export async function GET(req: Request) {
 
   // Refresh ao vivo: dispara fetchFullRoomInfo em paralelo nas sessions live
   // da página atual e atualiza viewerCount/likeCount na hora.
+  //
+  // Pula roomIds com prefixos `inferred_` e `manual_` — são placeholders
+  // criados sem confirmação webcast/room/info (scraper heurístico ou add
+  // manual offline). Chamar fetchFullRoomInfo neles falharia e marcaria
+  // isLive=false por engano.
   const liveTargets = sessionsRaw.filter(
-    (s) => s.isLive === true && typeof s.roomId === "string" && s.roomId,
+    (s) =>
+      s.isLive === true &&
+      typeof s.roomId === "string" &&
+      s.roomId &&
+      /^\d{15,}$/.test(s.roomId as string),
   );
 
   const CONCURRENCY = 10;

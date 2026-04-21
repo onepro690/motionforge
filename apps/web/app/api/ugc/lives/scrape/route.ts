@@ -90,6 +90,9 @@ export async function POST() {
   // Verifica EXPLICITAMENTE todas as lives ativas do user via webcast/room/info
   // (endpoint autoritativo, não é WAF-bloqueado). Se status != 2, marca ended.
   // Pula as que já foram confirmadas pelo scrape atual.
+  // Pula também roomIds `inferred_` e `manual_` — placeholders sem roomId real.
+  // Pra esses, se NÃO aparecerem no scrape atual, assumimos que saíram do
+  // ar e marcamos ended diretamente (sem tentar webcast).
   const freshRoomIds = new Set(result.lives.map((l) => l.roomId));
   const currentLive = await prisma.liveSession.findMany({
     where: { userId, isLive: true, roomId: { notIn: [...freshRoomIds] } },
@@ -98,6 +101,12 @@ export async function POST() {
   const endedIds: string[] = [];
   await Promise.all(
     currentLive.map(async (s) => {
+      // Placeholder roomIds: não consegue verificar via webcast. Se sumiu
+      // do scrape atual, marca ended.
+      if (!/^\d{15,}$/.test(s.roomId)) {
+        endedIds.push(s.id);
+        return;
+      }
       const active = await isLiveActive(s.roomId).catch(() => false);
       if (!active) endedIds.push(s.id);
     }),
