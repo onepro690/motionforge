@@ -873,6 +873,7 @@ interface LiveCheck {
   enterCount?: number;
   startedAt?: number;
   hasCommerce?: boolean;
+  hlsUrl?: string;
 }
 
 let _webClient: TikTokWebClient | null = null;
@@ -957,195 +958,195 @@ export interface RapidApiLive {
   startedAt?: number;
 }
 
-// Lista lives ativas por região. Bypass total do WAF — API paga acessa
-// endpoints internos do TikTok com proxies residenciais.
-// api23 tem endpoint dedicado; scraper7 NÃO expõe live discovery — nesse caso
-// retorna vazio e confia no fetchTikwmFeedAll + checkLiveViaRapidApi per-user.
+// Descoberta de lives via /api/search/live (api23). Response shape:
+//   { data: [ { live_info: { raw_data: "<JSON string>" } } ] }
+// O raw_data é JSON escapado com o room completo (id_str, status, title,
+// owner, user_count, cover, has_commerce_goods, etc).
+const SEARCH_LIVE_KEYWORDS = [
+  "live shop brasil", "tiktok shop brasil", "aovivo brasil",
+  "live ofertas", "live promoção", "live achados",
+  "live maquiagem", "live moda", "live acessórios",
+  "live casa", "live eletrônicos", "live pet",
+  "liveshop", "ao vivo shop", "estou ao vivo",
+  "entra na live", "live vendendo", "live desconto",
+  "shop live", "brazil live shop", "oferta relâmpago",
+  "live bazar", "liquida live", "brechó",
+];
+
 async function fetchRapidApiLiveFeed(apiKey: string, host: string): Promise<RapidApiLive[]> {
   const rooms: RapidApiLive[] = [];
   const seen = new Set<string>();
   const provider = providerFromHost(host);
 
-  // scraper7 não tem "lista todas as lives" — skip pra evitar falsos positivos
-  // (/feed/list devolve vídeos, não rooms; walk confundia os dois)
   if (provider !== "api23") return [];
 
-  const endpoints = [
-        `https://${host}/api/live/feed?region=BR&limit=50`,
-        `https://${host}/api/live/feed?region=BR&limit=50&page=2`,
-        `https://${host}/api/live/feed?region=BR&limit=50&page=3`,
-        `https://${host}/api/live/feed?limit=50`,
-        `https://${host}/api/live/feed?limit=50&page=2`,
-        `https://${host}/api/live/popular?region=BR&limit=50`,
-        `https://${host}/api/live/ranklist?region=BR`,
-      ];
+  // Monta URLs de search/live com cada keyword. Região opcional.
+  const urls = SEARCH_LIVE_KEYWORDS.map(
+    (k) => `https://${host}/api/search/live?keyword=${encodeURIComponent(k)}`,
+  );
 
-  for (const url of endpoints) {
-    try {
-      const res = await fetch(url, {
-        headers: {
-          "x-rapidapi-key": apiKey,
-          "x-rapidapi-host": host,
-          "Accept": "application/json",
-        },
-        signal: AbortSignal.timeout(15_000),
-      });
-      if (!res.ok) continue;
-      const data = (await res.json()) as unknown;
-      // Walk recursive — RapidAPI providers variam no shape exato
-      const walk = (obj: unknown): void => {
-        if (!obj || typeof obj !== "object") return;
-        if (Array.isArray(obj)) { for (const it of obj) walk(it); return; }
-        const o = obj as Record<string, unknown>;
-        const rid = (o.room_id ?? o.roomId ?? o.id_str ?? o.id) as string | number | undefined;
-        const owner = (o.owner ?? o.ownerUser ?? o.user ?? o.author) as Record<string, unknown> | undefined;
-        const uniqueId = (owner?.unique_id ?? owner?.uniqueId ?? o.unique_id ?? o.uniqueId) as string | undefined;
-        const ridStr = typeof rid === "number" ? String(rid) : rid;
-        if (typeof ridStr === "string" && ridStr.length >= 12 && /^\d+$/.test(ridStr) && typeof uniqueId === "string" && !seen.has(ridStr)) {
-          seen.add(ridStr);
-          const blob = JSON.stringify(o);
-          const hasCommerce = /has_commerce_goods"?\s*:\s*true|goods_num"?\s*:\s*[1-9]|hasCommerce"?\s*:\s*true|is_commerce_live"?\s*:\s*true/.test(blob);
-          const streamUrl = o.stream_url as Record<string, unknown> | undefined;
-          const hlsRaw = streamUrl?.hls_pull_url;
-          const hls = typeof hlsRaw === "string" ? hlsRaw : (hlsRaw as Record<string, string> | undefined)?.FULL_HD1 ?? (hlsRaw as Record<string, string> | undefined)?.HD1;
-          rooms.push({
-            roomId: ridStr,
-            handle: uniqueId,
-            nickname: (owner?.nickname as string) ?? uniqueId,
-            avatarUrl: ((owner?.avatar_thumb as Record<string, unknown>)?.url_list as string[])?.[0] ?? (owner?.avatarThumb as string) ?? "",
-            title: o.title as string | undefined,
-            coverUrl: ((o.cover as Record<string, unknown>)?.url_list as string[])?.[0] ?? (o.cover_url as string | undefined),
-            userCount: (o.user_count ?? o.total_user) as number | undefined,
-            likeCount: (o.like_count ?? o.total_like) as number | undefined,
-            hasCommerce,
-            hlsUrl: hls,
-            startedAt: ((o.start_time ?? o.create_time) as number | undefined) ? ((o.start_time ?? o.create_time) as number) * 1000 : undefined,
-          });
-        }
-        for (const k in o) walk(o[k]);
+  const extractFromRaw = (rawText: string): void => {
+    let parsed: unknown;
+    try { parsed = JSON.parse(rawText); } catch { return; }
+    const p = parsed as {
+      id?: number | string;
+      id_str?: string;
+      status?: number;
+      title?: string;
+      owner_user_id?: number | string;
+      user_count?: number;
+      like_count?: number;
+      create_time?: number;
+      has_commerce_goods?: boolean;
+      goods_num?: number;
+      owner?: {
+        unique_id?: string;
+        nickname?: string;
+        avatar_thumb?: { url_list?: string[] };
+        sec_uid?: string;
       };
-      walk(data);
-    } catch {
-      // silent
+      cover?: { url_list?: string[] };
+      stream_url?: { hls_pull_url?: string | Record<string, string> };
+    };
+    const rid = p.id_str ?? (typeof p.id === "number" ? String(p.id) : p.id);
+    if (!rid || !/^\d{10,}$/.test(rid)) return;
+    if (p.status !== 2) return; // só ativas
+    const handle = p.owner?.unique_id;
+    if (!handle) return;
+    if (seen.has(rid)) return;
+    seen.add(rid);
+    const hasCommerce = p.has_commerce_goods === true || (typeof p.goods_num === "number" && p.goods_num > 0) || COMMERCE_REGEX.test(rawText);
+    const hlsRaw = p.stream_url?.hls_pull_url;
+    const hls = typeof hlsRaw === "string" ? hlsRaw : (hlsRaw as Record<string, string> | undefined)?.FULL_HD1 ?? (hlsRaw as Record<string, string> | undefined)?.HD1;
+    rooms.push({
+      roomId: rid,
+      handle,
+      nickname: p.owner?.nickname ?? handle,
+      avatarUrl: p.owner?.avatar_thumb?.url_list?.[0] ?? "",
+      title: p.title,
+      coverUrl: p.cover?.url_list?.[0],
+      userCount: p.user_count,
+      likeCount: p.like_count,
+      hasCommerce,
+      hlsUrl: hls,
+      startedAt: p.create_time ? p.create_time * 1000 : undefined,
+    });
+  };
+
+  const walkForRaw = (obj: unknown): void => {
+    if (!obj || typeof obj !== "object") return;
+    if (Array.isArray(obj)) { for (const it of obj) walkForRaw(it); return; }
+    const o = obj as Record<string, unknown>;
+    if (typeof o.raw_data === "string") extractFromRaw(o.raw_data);
+    for (const k in o) walkForRaw(o[k]);
+  };
+
+  // Chamadas em paralelo com cap de concorrência pra não estourar rate limit
+  const concurrency = 4;
+  let idx = 0;
+  const workers = Array.from({ length: concurrency }, async () => {
+    while (idx < urls.length) {
+      const myIdx = idx++;
+      const url = urls[myIdx];
+      try {
+        const res = await fetch(url, {
+          headers: { "x-rapidapi-key": apiKey, "x-rapidapi-host": host, "Accept": "application/json" },
+          signal: AbortSignal.timeout(15_000),
+        });
+        if (!res.ok) continue;
+        const data = (await res.json()) as unknown;
+        walkForRaw(data);
+      } catch {
+        // silent
+      }
     }
-  }
+  });
+  await Promise.all(workers);
 
   return rooms;
 }
 
 async function checkLiveViaRapidApi(apiKey: string, host: string, handle: string): Promise<LiveCheck> {
   const provider = providerFromHost(host);
-  // Lista de URLs a tentar. api23 tem endpoint dedicado; scraper7 não tem
-  // check-alive oficial, então testamos variantes de /live/* e /user/info
-  // (tikwm às vezes devolve liveRoomId embedded).
-  const urls = provider === "api23"
-    ? [`https://${host}/api/live/check-alive?uniqueId=${encodeURIComponent(handle)}`]
-    : [
-        // scraper7 wraps tikwm — endpoint oficial tikwm pra live check
-        `https://${host}/api/user/live?unique_id=${encodeURIComponent(handle)}`,
-        `https://${host}/user/live?unique_id=${encodeURIComponent(handle)}`,
-      ];
+  if (provider !== "api23") return { isLive: false, error: true };
 
-  for (const url of urls) {
-    try {
-      const res = await fetch(url, {
-        headers: {
-          "x-rapidapi-key": apiKey,
-          "x-rapidapi-host": host,
-          "Accept": "application/json",
-        },
-        signal: AbortSignal.timeout(8_000),
-      });
-      if (!res.ok) continue;
+  const headers = {
+    "x-rapidapi-key": apiKey,
+    "x-rapidapi-host": host,
+    "Accept": "application/json",
+  };
+
+  // Passo 1: check-alive → { data: [{ alive, room_id, room_id_str }], status_code: 0 }
+  let roomId: string | undefined;
+  try {
+    const res = await fetch(
+      `https://${host}/api/live/check-alive?uniqueId=${encodeURIComponent(handle)}`,
+      { headers, signal: AbortSignal.timeout(8_000) },
+    );
+    if (!res.ok) return { isLive: false, error: true };
+    const text = await res.text();
+    let d: unknown;
+    try { d = JSON.parse(text); } catch { return { isLive: false, error: true }; }
+    const raw = d as {
+      data?: Array<{ alive?: boolean; room_id?: number | string; room_id_str?: string }>;
+      status_code?: number;
+    };
+    const first = raw.data?.[0];
+    if (!first?.alive) return { isLive: false };
+    const rid = first.room_id_str ?? (first.room_id != null ? String(first.room_id) : undefined);
+    if (!rid || !/^\d{10,}$/.test(rid)) return { isLive: false };
+    roomId = rid;
+  } catch {
+    return { isLive: false, error: true };
+  }
+
+  // Passo 2: /api/live/info?roomId=X pra ter title/user_count/commerce.
+  // Se falhar, ainda retorna isLive:true com roomId (commerce desconhecido).
+  try {
+    const res = await fetch(
+      `https://${host}/api/live/info?roomId=${encodeURIComponent(roomId)}`,
+      { headers, signal: AbortSignal.timeout(8_000) },
+    );
+    if (res.ok) {
       const text = await res.text();
       let d: unknown;
-      try { d = JSON.parse(text); } catch { continue; }
+      try { d = JSON.parse(text); } catch { d = null; }
       const raw = d as {
-        code?: number;
-        msg?: string;
         data?: {
-          status?: number;
-          room_id?: string | number;
           title?: string;
-          cover_url?: string;
           user_count?: number;
           like_count?: number;
           create_time?: number;
           has_commerce_goods?: boolean;
           goods_num?: number;
-          room?: { id_str?: string; title?: string; user_count?: number; like_count?: number; has_commerce_goods?: boolean; goods_num?: number; create_time?: number };
-          user?: { roomId?: string; liveRoomId?: string; room_id?: string | number };
-          liveRoom?: { status?: number; roomId?: string; title?: string };
+          cover?: { url_list?: string[] };
+          stream_url?: { hls_pull_url?: string | Record<string, string> };
         };
-        isLive?: boolean;
-        roomId?: string;
       };
-
-      // api23 shape
-      if (raw.data?.status === 2 && raw.data?.room?.id_str) {
-        const room = raw.data.room;
-        return {
-          isLive: true,
-          roomId: room.id_str!,
-          title: room.title,
-          userCount: room.user_count,
-          enterCount: room.like_count,
-          startedAt: room.create_time ? room.create_time * 1000 : undefined,
-          hasCommerce: room.has_commerce_goods === true || (typeof room.goods_num === "number" && room.goods_num > 0) || COMMERCE_REGEX.test(text),
-        };
-      }
-
-      // tikwm/scraper7 /api/user/live shape — code:0 data com room_id direto
-      if (raw.code === 0 && raw.data?.room_id) {
-        const rid = String(raw.data.room_id);
-        if (/^\d{10,}$/.test(rid)) {
-          return {
-            isLive: true,
-            roomId: rid,
-            title: raw.data.title,
-            coverUrl: raw.data.cover_url,
-            userCount: raw.data.user_count,
-            enterCount: raw.data.like_count,
-            startedAt: raw.data.create_time ? raw.data.create_time * 1000 : undefined,
-            hasCommerce: raw.data.has_commerce_goods === true || (typeof raw.data.goods_num === "number" && raw.data.goods_num > 0) || COMMERCE_REGEX.test(text),
-          };
-        }
-      }
-
-      // tikwm retorna code !== 0 quando user não tá live (definitivo)
-      if (typeof raw.code === "number" && raw.code !== 0) {
-        return { isLive: false };
-      }
-
-      // user/info shape — pode vir liveRoomId ou room_id embedded
-      const userRoom = raw.data?.user?.roomId ?? raw.data?.user?.liveRoomId ?? raw.data?.user?.room_id;
-      if (userRoom && /^\d{10,}$/.test(String(userRoom))) {
-        return {
-          isLive: true,
-          roomId: String(userRoom),
-          hasCommerce: COMMERCE_REGEX.test(text),
-        };
-      }
-
-      // liveRoom shape (api-live.tiktok.com wrapped)
-      if (raw.data?.liveRoom?.status === 2 && raw.data?.liveRoom?.roomId) {
-        return {
-          isLive: true,
-          roomId: raw.data.liveRoom.roomId,
-          title: raw.data.liveRoom.title,
-          hasCommerce: COMMERCE_REGEX.test(text),
-        };
-      }
-
-      // Resposta válida mas user offline → definitivo
-      if (raw.data && !raw.data.status && !raw.data.liveRoom && !raw.data.user?.roomId && !raw.data.room_id) {
-        return { isLive: false };
-      }
-    } catch {
-      // tenta próximo
+      const info = raw?.data;
+      const hls = typeof info?.stream_url?.hls_pull_url === "string"
+        ? (info.stream_url.hls_pull_url as string)
+        : (info?.stream_url?.hls_pull_url as Record<string, string> | undefined)?.FULL_HD1
+          ?? (info?.stream_url?.hls_pull_url as Record<string, string> | undefined)?.HD1;
+      return {
+        isLive: true,
+        roomId,
+        title: info?.title,
+        coverUrl: info?.cover?.url_list?.[0],
+        userCount: info?.user_count,
+        enterCount: info?.like_count,
+        startedAt: info?.create_time ? info.create_time * 1000 : undefined,
+        hasCommerce: info?.has_commerce_goods === true
+          || (typeof info?.goods_num === "number" && info.goods_num > 0)
+          || COMMERCE_REGEX.test(text),
+        hlsUrl: hls,
+      };
     }
+  } catch {
+    // cai pro fallback sem info
   }
-  return { isLive: false, error: true };
+
+  return { isLive: true, roomId };
 }
 
 async function checkLiveStatus(handle: string): Promise<LiveCheck> {

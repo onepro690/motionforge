@@ -266,7 +266,7 @@ export default function UgcSettingsPage() {
                 {showApiKey ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
               </Button>
             </div>
-            <p className="text-xs text-white/30 mt-1">Assine "tiktok-api23" em rapidapi.com/Sonjik/api/tiktok-api23 — esse tem o endpoint /live/check-alive. NÃO use "tiktok-scraper7" (não tem endpoint de live detection, só perfil). Sem chave o scraper acha 0-4 lives porque TikTok bloqueia IPs do Vercel.</p>
+            <p className="text-xs text-white/30 mt-1">Assine "tiktok-api23" em rapidapi.com/Lundehund/api/tiktok-api23 — esse tem o endpoint /live/check-alive. NÃO use "tiktok-scraper7" (não tem endpoint de live detection, só perfil). Sem chave o scraper acha 0-4 lives porque TikTok bloqueia IPs do Vercel.</p>
           </div>
 
           <div>
