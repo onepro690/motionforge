@@ -34,6 +34,35 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({ count: all.length, settings: summary }, { status: 200 });
   }
 
+  if (view === "tikwm-probe") {
+    // Testa se tikwm.com tem endpoint de live detection (sem precisar de key)
+    const handle = request.nextUrl.searchParams.get("handle") ?? "shoptiktokbr";
+    const paths = [
+      `https://www.tikwm.com/api/user/live?unique_id=${handle}`,
+      `https://www.tikwm.com/api/live/check?unique_id=${handle}`,
+      `https://www.tikwm.com/api/live/info?unique_id=${handle}`,
+      `https://www.tikwm.com/api/live/search?keywords=live&region=br`,
+      `https://www.tikwm.com/api/live/list?region=br`,
+      `https://www.tikwm.com/api/live/recommend?region=br`,
+      `https://www.tikwm.com/api/live/popular?region=br`,
+      `https://www.tikwm.com/api/user/info?unique_id=${handle}`,
+    ];
+    const out: Array<{ path: string; status: number; bodyPreview: string }> = [];
+    for (const p of paths) {
+      try {
+        const res = await fetch(p, {
+          headers: { "User-Agent": "Mozilla/5.0" },
+          signal: AbortSignal.timeout(10_000),
+        });
+        const body = await res.text();
+        out.push({ path: p, status: res.status, bodyPreview: body.slice(0, 1500) });
+      } catch (e) {
+        out.push({ path: p, status: -1, bodyPreview: String(e).slice(0, 200) });
+      }
+    }
+    return NextResponse.json({ handle, results: out }, { status: 200 });
+  }
+
   if (view === "scraper7-ping") {
     // Faz request direto no scraper7 pra ver resposta + rate limit headers
     const handle = request.nextUrl.searchParams.get("handle") ?? "tiktokshop";
