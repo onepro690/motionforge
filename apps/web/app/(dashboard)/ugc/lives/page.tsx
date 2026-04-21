@@ -33,7 +33,7 @@ interface ApiResponse {
 
 interface ScrapeResponse {
   total: number; liveNow: number; usedMock: boolean; hasApiKey: boolean;
-  source: "mock" | "tikwm" | "worker"; newSessions: number; newCreators: number; updatedSessions: number;
+  source: "mock" | "tikwm"; newSessions: number; newCreators: number; updatedSessions: number;
   debug?: {
     keywordsSearched?: string[];
     rawVideoCount?: number;
@@ -46,48 +46,6 @@ interface ScrapeResponse {
     lobbyRoomsWithId?: number;
     candidatesFound?: number;
     verifiedLive?: number;
-    workerStats?: { total: number; live: number; offline: number; noCommerce: number; error: number; elapsedMs: number };
-    workerUsed?: boolean;
-  };
-}
-
-const WORKER_URL = "http://localhost:3333";
-
-interface WorkerCandidate {
-  handle: string;
-  nickname?: string;
-  avatarUrl?: string;
-  roomId?: string;
-  source: string;
-}
-
-interface WorkerVerifyResponse {
-  lives: Array<{
-    roomId: string;
-    hostHandle: string;
-    hostNickname?: string;
-    hostAvatarUrl?: string;
-    title?: string;
-    viewerCount?: number;
-    likeCount?: number;
-    hlsUrl?: string;
-    flvUrl?: string;
-    thumbnailUrl?: string;
-    startedAt?: string | null;
-    hasCommerce?: boolean;
-  }>;
-  roomIdHints?: Array<{ handle: string; roomId: string }>;
-  stats: {
-    total: number;
-    live: number;
-    offline: number;
-    noCommerce: number;
-    error: number;
-    elapsedMs: number;
-    blocked?: number;
-    deferred?: number;
-    skipped?: number;
-    staleCache?: number;
   };
 }
 
@@ -456,32 +414,9 @@ export default function LivesPage() {
   const [addingManual, setAddingManual] = useState(false);
   const [backfilling, setBackfilling] = useState(false);
   const [backfillResult, setBackfillResult] = useState<{ fixed: number; failed: number; total: number } | null>(null);
-  const [workerStatus, setWorkerStatus] = useState<"unknown" | "online" | "offline">("unknown");
-  const [scrapePhase, setScrapePhase] = useState<"" | "candidates" | "verify" | "ingest">("");
 
   // Gravação vive no provider do layout (sobrevive à navegação entre seções).
   const rec = useLiveRecording();
-
-  // Worker detection: tenta HEAD/GET no daemon local a cada 15s. Quando
-  // online, "Buscar Lives" usa o caminho: candidates → worker verify →
-  // ingest (IP residencial bypassa WAF). Offline cai no /scrape antigo.
-  useEffect(() => {
-    let mounted = true;
-    const check = async () => {
-      try {
-        const res = await fetch(`${WORKER_URL}/health`, {
-          signal: AbortSignal.timeout(1500),
-        });
-        if (!mounted) return;
-        setWorkerStatus(res.ok ? "online" : "offline");
-      } catch {
-        if (mounted) setWorkerStatus("offline");
-      }
-    };
-    check();
-    const iv = setInterval(check, 15_000);
-    return () => { mounted = false; clearInterval(iv); };
-  }, []);
 
   const loadSessions = useCallback(async (f: Filter = filter, p: number = page, opts: { background?: boolean } = {}) => {
     // Só mostra skeleton na carga inicial ou quando o user troca de aba/página.
@@ -508,93 +443,12 @@ export default function LivesPage() {
 
   async function handleScrape() {
     setScraping(true);
-    setScrapePhase("");
     try {
-      // Worker online? Roda o fluxo de 3 etapas — discovery no Vercel,
-      // verificação no PC do user (IP residencial bypassa WAF), ingest no DB.
-      if (workerStatus === "online") {
-        setScrapePhase("candidates");
-        const candRes = await fetch("/api/ugc/lives/candidates");
-        if (!candRes.ok) throw new Error("candidates failed");
-        const candJson = (await candRes.json()) as {
-          candidates: WorkerCandidate[];
-          debug: { feedAll: number; feedHot: number; total: number; elapsedMs: number };
-        };
-
-        setScrapePhase("verify");
-        const verifyRes = await fetch(`${WORKER_URL}/verify`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          // Worker v2 tem seu próprio throttling — concurrency/gap aqui
-          // viraram no-op. Payload inclui candidatos com roomId pré-cacheado.
-          body: JSON.stringify({ candidates: candJson.candidates }),
-        });
-        if (!verifyRes.ok) throw new Error("worker verify failed");
-        const verifyJson = (await verifyRes.json()) as WorkerVerifyResponse;
-
-        setScrapePhase("ingest");
-        const ingestRes = await fetch("/api/ugc/lives/ingest", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            lives: verifyJson.lives,
-            roomIdHints: verifyJson.roomIdHints ?? [],
-          }),
-        });
-        const ingestJson = (await ingestRes.json()) as {
-          success: boolean;
-          total: number;
-          newSessions: number;
-          newCreators: number;
-          updatedSessions: number;
-          hintsCached?: number;
-        };
-
-        const liveNow = verifyJson.lives.length;
-        setLastScrape({
-          total: liveNow,
-          liveNow,
-          usedMock: false,
-          hasApiKey: false,
-          source: "worker",
-          newSessions: ingestJson.newSessions ?? 0,
-          newCreators: ingestJson.newCreators ?? 0,
-          updatedSessions: ingestJson.updatedSessions ?? 0,
-          debug: {
-            keywordsSearched: [
-              `candidates=${candJson.debug.total}`,
-              `cached-roomId=${(candJson.debug as { withRoomId?: number }).withRoomId ?? 0}`,
-              `live=${verifyJson.stats.live}`,
-              `offline=${verifyJson.stats.offline}`,
-              `no-commerce=${verifyJson.stats.noCommerce}`,
-              `error=${verifyJson.stats.error}`,
-              `blocked=${verifyJson.stats.blocked ?? 0}`,
-              `deferred=${verifyJson.stats.deferred ?? 0}`,
-              `hints-cached=${ingestJson.hintsCached ?? 0}`,
-            ],
-            workerUsed: true,
-            workerStats: verifyJson.stats,
-            liveWithCommerce: verifyJson.stats.live,
-            liveWithoutCommerce: verifyJson.stats.noCommerce,
-            checkErrors: verifyJson.stats.error,
-            fallbackChecked: verifyJson.stats.total,
-          },
-        });
-        await loadSessions(filter, page);
-      } else {
-        // Fallback: caminho antigo do /scrape (WAF bloqueia 98% — poucos lives)
-        const res = await fetch("/api/ugc/lives/scrape", { method: "POST" });
-        const json = (await res.json()) as ScrapeResponse;
-        setLastScrape(json);
-        await loadSessions(filter, page);
-      }
-    } catch (err) {
-      console.error("[handleScrape]", err);
-      alert("Erro ao buscar lives. Veja o console.");
-    } finally {
-      setScraping(false);
-      setScrapePhase("");
-    }
+      const res  = await fetch("/api/ugc/lives/scrape", { method: "POST" });
+      const json = await res.json() as ScrapeResponse;
+      setLastScrape(json);
+      await loadSessions(filter, page);
+    } finally { setScraping(false); }
   }
 
   function handleRecord(id: string, hostHandle: string) {
@@ -747,67 +601,8 @@ export default function LivesPage() {
           <Button onClick={handleScrape} disabled={scraping}
             className="gap-2 bg-red-500 hover:bg-red-600 text-white">
             <RefreshCw className={cn("w-4 h-4", scraping && "animate-spin")} />
-            {scraping
-              ? scrapePhase === "candidates" ? "Coletando candidatos…"
-              : scrapePhase === "verify"     ? "Verificando no seu PC…"
-              : scrapePhase === "ingest"     ? "Salvando resultados…"
-              : "Buscando lives…"
-              : "Buscar Lives ao Vivo"}
+            {scraping ? "Buscando lives…" : "Buscar Lives ao Vivo"}
           </Button>
-        </div>
-      </div>
-
-      {/* Worker status + instruções */}
-      <div className={cn(
-        "flex items-start gap-3 rounded-xl border p-3",
-        workerStatus === "online"
-          ? "bg-emerald-500/5 border-emerald-500/20"
-          : workerStatus === "offline"
-            ? "bg-yellow-500/5 border-yellow-500/20"
-            : "bg-white/[0.02] border-white/[0.06]"
-      )}>
-        <span className={cn(
-          "w-2 h-2 rounded-full flex-shrink-0 mt-1.5",
-          workerStatus === "online"
-            ? "bg-emerald-400 animate-pulse"
-            : workerStatus === "offline"
-              ? "bg-yellow-400"
-              : "bg-white/20"
-        )} />
-        <div className="flex-1 min-w-0">
-          {workerStatus === "online" ? (
-            <>
-              <p className="text-xs font-semibold text-emerald-300">Worker local: conectado ✓</p>
-              <p className="text-[11px] text-emerald-400/60 mt-0.5">
-                &ldquo;Buscar Lives&rdquo; vai rodar no seu PC (bypassa o bloqueio do TikTok).
-              </p>
-            </>
-          ) : workerStatus === "offline" ? (
-            <>
-              <p className="text-xs font-semibold text-yellow-300">Worker local: desconectado</p>
-              <p className="text-[11px] text-yellow-400/70 mt-0.5 leading-relaxed">
-                Pra encontrar muito mais lives (IP residencial bypassa o bloqueio do TikTok):
-              </p>
-              <ol className="text-[11px] text-yellow-400/70 mt-1.5 leading-relaxed list-decimal ml-4 space-y-0.5">
-                <li>Clique em <strong>Baixar worker</strong> abaixo.</li>
-                <li>Abra o arquivo <code className="font-mono bg-black/30 px-1 rounded">motionforge-worker.bat</code> que o Chrome baixou.</li>
-                <li>Vai abrir uma janela preta — deixe aberta. O site detecta em 15s.</li>
-              </ol>
-              <div className="mt-2 flex items-center gap-2">
-                <a
-                  href="/api/worker/download"
-                  download="motionforge-worker.bat"
-                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md bg-yellow-500/15 border border-yellow-500/30 text-yellow-200 hover:bg-yellow-500/25 text-[11px] font-semibold transition-colors"
-                >
-                  <Download className="w-3 h-3" />
-                  Baixar worker
-                </a>
-                <span className="text-[10px] text-yellow-400/50">Requer Node.js 18+ · <a href="https://nodejs.org" target="_blank" rel="noopener" className="underline hover:text-yellow-300">nodejs.org</a></span>
-              </div>
-            </>
-          ) : (
-            <p className="text-xs text-white/40">Detectando worker local…</p>
-          )}
         </div>
       </div>
 
