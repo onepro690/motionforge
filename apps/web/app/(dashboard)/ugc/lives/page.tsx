@@ -770,8 +770,24 @@ export default function LivesPage() {
             <>
               <p className="text-xs font-semibold text-yellow-300">Worker local: desconectado</p>
               <p className="text-[11px] text-yellow-400/70 mt-0.5 leading-relaxed">
-                Pra encontrar mais lives, abra <code className="font-mono bg-black/30 px-1 rounded">worker/start.bat</code> (na pasta do projeto) e deixe a janela aberta. Precisa de Node.js 18+.
+                Pra encontrar muito mais lives (IP residencial bypassa o bloqueio do TikTok):
               </p>
+              <ol className="text-[11px] text-yellow-400/70 mt-1.5 leading-relaxed list-decimal ml-4 space-y-0.5">
+                <li>Clique em <strong>Baixar worker</strong> abaixo.</li>
+                <li>Abra o arquivo <code className="font-mono bg-black/30 px-1 rounded">motionforge-worker.bat</code> que o Chrome baixou.</li>
+                <li>Vai abrir uma janela preta — deixe aberta. O site detecta em 15s.</li>
+              </ol>
+              <div className="mt-2 flex items-center gap-2">
+                <a
+                  href="/api/worker/download"
+                  download="motionforge-worker.bat"
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md bg-yellow-500/15 border border-yellow-500/30 text-yellow-200 hover:bg-yellow-500/25 text-[11px] font-semibold transition-colors"
+                >
+                  <Download className="w-3 h-3" />
+                  Baixar worker
+                </a>
+                <span className="text-[10px] text-yellow-400/50">Requer Node.js 18+ · <a href="https://nodejs.org" target="_blank" rel="noopener" className="underline hover:text-yellow-300">nodejs.org</a></span>
+              </div>
             </>
           ) : (
             <p className="text-xs text-white/40">Detectando worker local…</p>
