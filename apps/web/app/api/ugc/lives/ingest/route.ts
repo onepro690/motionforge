@@ -24,6 +24,11 @@ interface VerifiedLive {
   hasCommerce?: boolean;
 }
 
+interface RoomIdHint {
+  handle: string;
+  roomId: string;
+}
+
 function calcSalesScore(v: { viewerCount: number; likeCount: number; isLive: boolean }): number {
   return Math.round(
     Math.min(v.viewerCount / 500_000, 1) * 50 +
@@ -37,7 +42,7 @@ export async function POST(req: Request) {
   if (!session) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   const userId = session.user.id;
 
-  let body: { lives?: VerifiedLive[] };
+  let body: { lives?: VerifiedLive[]; roomIdHints?: RoomIdHint[] };
   try {
     body = await req.json();
   } catch {
@@ -45,6 +50,7 @@ export async function POST(req: Request) {
   }
 
   const rawLives = Array.isArray(body.lives) ? body.lives : [];
+  const rawHints = Array.isArray(body.roomIdHints) ? body.roomIdHints : [];
   // Filtro duro: só entra no DB quem está confirmadamente com commerce e
   // roomId numérico real (worker pode devolver outras shapes, paranoia).
   const lives = rawLives.filter(
@@ -128,7 +134,7 @@ export async function POST(req: Request) {
       newHandles.add(live.hostHandle);
     }
 
-    // Atualiza histórico do creator (peak, last seen, title)
+    // Atualiza histórico do creator (peak, last seen, title, roomId cache)
     await prisma.ugcKnownCreator
       .update({
         where: { handle: live.hostHandle },
@@ -138,6 +144,8 @@ export async function POST(req: Request) {
           lastLiveStartedAt: live.startedAt ? new Date(live.startedAt) : now,
           lastLiveTitle: live.title?.slice(0, 200) ?? null,
           hasCommerce: true,
+          lastKnownRoomId: live.roomId,
+          lastKnownRoomIdAt: now,
         },
       })
       .catch(() => null);
@@ -166,12 +174,35 @@ export async function POST(req: Request) {
     }
   }
 
+  // Persiste roomIds descobertos mesmo quando a verificação NÃO virou live
+  // (ex: no-commerce). Cache evita reescanear /live no próximo run.
+  const validHints = rawHints.filter(
+    (h) =>
+      h &&
+      typeof h.handle === "string" &&
+      h.handle.length > 0 &&
+      typeof h.roomId === "string" &&
+      /^\d{15,}$/.test(h.roomId),
+  );
+  let hintsCached = 0;
+  for (const h of validHints) {
+    const ok = await prisma.ugcKnownCreator
+      .update({
+        where: { handle: h.handle },
+        data: { lastKnownRoomId: h.roomId, lastKnownRoomIdAt: now },
+      })
+      .then(() => true)
+      .catch(() => false);
+    if (ok) hintsCached++;
+  }
+
   return NextResponse.json({
     success: true,
     total: lives.length,
     newSessions: newCount,
     newCreators: newHandles.size,
     updatedSessions: updatedCount,
+    hintsCached,
     source: "worker",
   });
 }

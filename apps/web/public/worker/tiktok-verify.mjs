@@ -1,13 +1,18 @@
 #!/usr/bin/env node
 // TikTok Live Verification Daemon — roda na máquina do usuário com IP
-// residencial pra verificar lives sem WAF bloquear (o que acontece nos IPs
-// Vercel). Expõe HTTP em 127.0.0.1:3333 pra o front chamar via CORS.
+// residencial. Expõe HTTP em 127.0.0.1:3333 pra o front chamar via CORS.
+//
+// Duas vias de verificação:
+//   FAST — candidate já tem roomId cacheado → só chama webcast/room/info/
+//          (endpoint que o Akamai NÃO rate-limita).
+//   SLOW — candidate sem roomId → HTML-scrape /@handle/live pra extrair
+//          roomId. É a fonte do rate limit; throttled pesado.
 
 import http from "node:http";
 
 const PORT = 3333;
 const HOST = "127.0.0.1";
-const VERSION = "1.0.0";
+const VERSION = "2.0.0";
 
 const ALLOWED_ORIGINS = new Set([
   "https://motion-transfer-saas.vercel.app",
@@ -20,11 +25,21 @@ const UA_POOL = [
   "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:128.0) Gecko/20100101 Firefox/128.0",
   "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:128.0) Gecko/20100101 Firefox/128.0",
+  "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36",
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36 Edg/128.0.0.0",
 ];
 const randomUA = () => UA_POOL[Math.floor(Math.random() * UA_POOL.length)];
 
-// Escape do handle pra uso em RegExp — handles podem ter ".", "_", "-"
-// (caracteres que em regex são literais, mas por segurança escapa tudo).
+// Cap de quantos handles desconhecidos vamos resolver por run. O /live HTML
+// é o único endpoint Akamai-protegido: mais que isso → IP ban temporário.
+const MAX_UNKNOWN_RESOLVE = 25;
+
+// Jitter humano no gap, pra randomizar o padrão temporal.
+const jitter = (baseMs, spread = 0.4) => {
+  const delta = baseMs * spread;
+  return baseMs - delta + Math.random() * 2 * delta;
+};
+
 function candidateHandleToRegex(h) {
   return String(h).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
@@ -38,33 +53,39 @@ const pickUrl = (v) => {
   return undefined;
 };
 
-// Resolve handle → roomId via HTML scraping da página /@handle/live.
-// O endpoint webcast/room/info_by_scope/ está morto (retorna 10013 "Url does
-// not match" pra qualquer handle). A página pública /live tem JSON inline
-// com roomId + status embutido. Só detecta SE está live; commerce vem do
-// segundo call (webcast/room/info/).
+// Detecta resposta-bloqueio Akamai mesmo com status 200/403/etc.
+function isBlocked(status, html) {
+  if (status === 403) return true;
+  if (!html) return false;
+  if (html.length < 5000) return true; // página real tem >100KB; challenge tem 400-2000B
+  if (/Access Denied|errors\.edgesuite\.net|_wafchallengeid|waf-aiso/i.test(html)) return true;
+  if (/captcha|tiktok-verify-page|ip restriction/i.test(html)) return true;
+  return false;
+}
+
 async function fetchRoomByHandle(handle) {
   const url = `https://www.tiktok.com/@${encodeURIComponent(handle)}/live`;
   try {
     const res = await fetch(url, {
       headers: {
         "User-Agent": randomUA(),
-        "Accept": "text/html,application/xhtml+xml",
-        "Accept-Language": "pt-BR,pt;q=0.9",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        "Accept-Language": "pt-BR,pt;q=0.9,en-US;q=0.7,en;q=0.6",
+        "Accept-Encoding": "gzip, deflate, br",
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "none",
+        "Sec-Fetch-User": "?1",
+        "Upgrade-Insecure-Requests": "1",
+        "Cache-Control": "max-age=0",
       },
       redirect: "follow",
-      signal: AbortSignal.timeout(12_000),
+      signal: AbortSignal.timeout(15_000),
     });
-    if (!res.ok) return { error: true };
     const html = await res.text();
-    if (!html || html.length < 10_000) return { error: true };
+    if (isBlocked(res.status, html)) return { blocked: true };
+    if (!res.ok) return { error: true };
 
-    // Procura o bloco inline do DONO da página: "uniqueId":"<handle>" seguido
-    // de "roomId":"<id>" na janela próxima. Evita pegar roomId de creators
-    // recomendados que podem aparecer no HTML. Quando offline, roomId = "".
-    //
-    // Regex: procura uniqueId do handle específico (case-insensitive pq
-    // às vezes o TikTok normaliza) e captura roomId até 400 chars depois.
     const handleEsc = candidateHandleToRegex(handle);
     const anchorRe = new RegExp(
       `"uniqueId"\\s*:\\s*"${handleEsc}"[\\s\\S]{0,400}?"roomId"\\s*:\\s*"(\\d{15,}|)"`,
@@ -73,10 +94,8 @@ async function fetchRoomByHandle(handle) {
     const anchorMatch = html.match(anchorRe);
     let roomId = null;
     if (anchorMatch) {
-      roomId = anchorMatch[1] || null; // pode ser "" → null → offline
+      roomId = anchorMatch[1] || null;
     } else {
-      // Fallback: primeira ocorrência de roomId não-vazio. Menos preciso
-      // mas cobre quando o ordering dos campos inverte.
       const firstNonEmpty = html.match(/"roomId"\s*:\s*"(\d{15,})"/);
       if (firstNonEmpty) roomId = firstNonEmpty[1];
       else if (/"roomId"\s*:\s*""/.test(html)) roomId = null;
@@ -85,8 +104,6 @@ async function fetchRoomByHandle(handle) {
 
     if (!roomId) return { isLive: false };
 
-    // Status embutido (2 = live). Fallback: se achou roomId numérico,
-    // assume live (TikTok só popula roomId quando stream ativa).
     const statusMatch = html.match(new RegExp(`"roomId"\\s*:\\s*"${roomId}"[\\s\\S]{0,300}?"status"\\s*:\\s*(\\d+)`));
     const status = statusMatch ? Number(statusMatch[1]) : 2;
     if (status !== 2) return { isLive: false };
@@ -131,56 +148,107 @@ async function fetchFullRoomInfo(roomId) {
   }
 }
 
-async function verifyCandidate(candidate) {
-  // Se veio com roomId já conhecido, pula a resolução e vai direto pro info.
-  let roomId = candidate.roomId && /^\d{15,}$/.test(candidate.roomId) ? candidate.roomId : null;
-
-  if (!roomId) {
-    const byHandle = await fetchRoomByHandle(candidate.handle);
-    if (byHandle.error) return { handle: candidate.handle, outcome: "error" };
-    if (!byHandle.isLive) return { handle: candidate.handle, outcome: "offline" };
-    roomId = byHandle.roomId;
-  }
-
-  const full = await fetchFullRoomInfo(roomId);
-  if (!full) return { handle: candidate.handle, outcome: "error" };
-  if (full.status !== 2) return { handle: candidate.handle, outcome: "offline" };
-  if (!full.hasCommerce) return { handle: candidate.handle, outcome: "no-commerce" };
-
+function buildLive(candidate, roomId, full) {
   return {
-    handle: candidate.handle,
-    outcome: "live",
-    live: {
-      roomId,
-      hostHandle: candidate.handle,
-      hostNickname: candidate.nickname || candidate.handle,
-      hostAvatarUrl: candidate.avatarUrl || "",
-      title: full.title || "",
-      viewerCount: full.userCount ?? 0,
-      likeCount: full.likeCount ?? 0,
-      hlsUrl: full.hlsUrl,
-      flvUrl: full.flvUrl,
-      thumbnailUrl: full.coverUrl || candidate.avatarUrl || "",
-      startedAt: full.startedAt ? new Date(full.startedAt).toISOString() : null,
-      hasCommerce: true,
-    },
+    roomId,
+    hostHandle: candidate.handle,
+    hostNickname: candidate.nickname || candidate.handle,
+    hostAvatarUrl: candidate.avatarUrl || "",
+    title: full.title || "",
+    viewerCount: full.userCount ?? 0,
+    likeCount: full.likeCount ?? 0,
+    hlsUrl: full.hlsUrl,
+    flvUrl: full.flvUrl,
+    thumbnailUrl: full.coverUrl || candidate.avatarUrl || "",
+    startedAt: full.startedAt ? new Date(full.startedAt).toISOString() : null,
+    hasCommerce: true,
   };
 }
 
-async function verifyBatch(candidates, concurrency = 5, gapMs = 150) {
+async function verifyWithKnownRoomId(candidate) {
+  const roomId = candidate.roomId;
+  const full = await fetchFullRoomInfo(roomId);
+  if (!full) {
+    // roomId cacheado pode ter expirado; retorna "stale" pra front não tentar
+    // de novo a mesma rota. Não é bloqueio do Akamai — é vida normal da live.
+    return { handle: candidate.handle, outcome: "stale-cache" };
+  }
+  if (full.status !== 2) return { handle: candidate.handle, outcome: "offline" };
+  if (!full.hasCommerce) return { handle: candidate.handle, outcome: "no-commerce", roomId };
+  return { handle: candidate.handle, outcome: "live", live: buildLive(candidate, roomId, full) };
+}
+
+async function verifyUnknown(candidate) {
+  const byHandle = await fetchRoomByHandle(candidate.handle);
+  if (byHandle.blocked) return { handle: candidate.handle, outcome: "blocked" };
+  if (byHandle.error) return { handle: candidate.handle, outcome: "error" };
+  if (!byHandle.isLive) return { handle: candidate.handle, outcome: "offline" };
+
+  const roomId = byHandle.roomId;
+  const full = await fetchFullRoomInfo(roomId);
+  if (!full) return { handle: candidate.handle, outcome: "error" };
+  if (full.status !== 2) return { handle: candidate.handle, outcome: "offline" };
+  if (!full.hasCommerce) return { handle: candidate.handle, outcome: "no-commerce", roomId };
+  return { handle: candidate.handle, outcome: "live", live: buildLive(candidate, roomId, full) };
+}
+
+async function runPool(items, worker, concurrency, gapMs) {
   const results = [];
-  const queue = [...candidates];
+  const queue = [...items];
+  let blockedStreak = 0;
+
   const workers = Array.from({ length: concurrency }, async () => {
     while (queue.length > 0) {
+      // Circuit breaker: se 5 blocked seguidos, para esse pool pra evitar
+      // IP ban total. O que sobra volta como "skipped".
+      if (blockedStreak >= 5) {
+        const leftover = queue.splice(0).map((c) => ({ handle: c.handle, outcome: "skipped" }));
+        results.push(...leftover);
+        return;
+      }
       const c = queue.shift();
       if (!c) break;
-      const r = await verifyCandidate(c);
+      const r = await worker(c);
       results.push(r);
-      if (gapMs > 0) await new Promise((res) => setTimeout(res, gapMs));
+      if (r.outcome === "blocked") {
+        blockedStreak++;
+        // Backoff exponencial quando bloqueado: começa em 5s, dobra.
+        await new Promise((res) => setTimeout(res, Math.min(5000 * 2 ** (blockedStreak - 1), 30000)));
+      } else {
+        blockedStreak = 0;
+        if (gapMs > 0) await new Promise((res) => setTimeout(res, jitter(gapMs)));
+      }
     }
   });
   await Promise.all(workers);
   return results;
+}
+
+async function verifyBatch(candidates) {
+  const known = candidates.filter(
+    (c) => c.roomId && typeof c.roomId === "string" && /^\d{15,}$/.test(c.roomId),
+  );
+  const unknownAll = candidates.filter(
+    (c) => !(c.roomId && typeof c.roomId === "string" && /^\d{15,}$/.test(c.roomId)),
+  );
+  // Limita slow path — resto é descartado dessa run e volta em próximas (a cada
+  // ingest, handles verificados ganham roomId cache e saem do slow path).
+  const unknown = unknownAll.slice(0, MAX_UNKNOWN_RESOLVE);
+  const deferred = unknownAll.slice(MAX_UNKNOWN_RESOLVE);
+
+  console.log(
+    `[verify] start: ${candidates.length} total → fast=${known.length} slow=${unknown.length} deferred=${deferred.length}`,
+  );
+
+  // Fast path: webcast/room/info/ não é rate-limited, dá pra ir largo.
+  const fastResults = await runPool(known, verifyWithKnownRoomId, 8, 100);
+
+  // Slow path: /live é Akamai-protegido. Concurrency 2, gap 2500ms base +
+  // jitter ±40%, backoff exponencial em blocked.
+  const slowResults = await runPool(unknown, verifyUnknown, 2, 2500);
+
+  const deferredResults = deferred.map((c) => ({ handle: c.handle, outcome: "deferred" }));
+  return [...fastResults, ...slowResults, ...deferredResults];
 }
 
 function corsHeaders(req) {
@@ -209,7 +277,7 @@ function readBody(req) {
     req.on("data", (c) => {
       chunks.push(c);
       total += c.length;
-      if (total > 2 * 1024 * 1024) {
+      if (total > 4 * 1024 * 1024) {
         reject(new Error("body too large"));
         req.destroy();
       }
@@ -250,27 +318,57 @@ const server = http.createServer(async (req, res) => {
     }
     const candidates = Array.isArray(body.candidates) ? body.candidates : [];
     if (candidates.length === 0) {
-      sendJson(req, res, 200, { lives: [], stats: { total: 0, live: 0, error: 0, offline: 0, noCommerce: 0 } });
+      sendJson(req, res, 200, {
+        lives: [],
+        roomIdHints: [],
+        stats: {
+          total: 0,
+          live: 0,
+          error: 0,
+          offline: 0,
+          noCommerce: 0,
+          blocked: 0,
+          deferred: 0,
+          skipped: 0,
+          staleCache: 0,
+        },
+      });
       return;
     }
-    const concurrency = Math.min(Math.max(1, Number(body.concurrency) || 5), 10);
-    const gapMs = Math.min(Math.max(0, Number(body.gapMs) || 150), 2000);
 
     const t0 = Date.now();
-    const results = await verifyBatch(candidates, concurrency, gapMs);
+    const results = await verifyBatch(candidates);
     const lives = results.filter((r) => r.outcome === "live").map((r) => r.live);
+
+    // Hints: todo roomId descoberto (inclui no-commerce) vira cache pro próximo
+    // run, mesmo quando não foi live-válida. Economiza /live scrape.
+    const roomIdHints = results
+      .filter((r) => (r.outcome === "live" || r.outcome === "no-commerce") && r.roomId)
+      .map((r) => ({ handle: r.handle, roomId: r.outcome === "live" ? r.live.roomId : r.roomId }))
+      .filter((r) => r.roomId);
+    // Live também alimenta hints
+    for (const l of lives) {
+      if (!roomIdHints.find((h) => h.handle === l.hostHandle)) {
+        roomIdHints.push({ handle: l.hostHandle, roomId: l.roomId });
+      }
+    }
+
     const stats = {
       total: results.length,
       live: lives.length,
       error: results.filter((r) => r.outcome === "error").length,
       offline: results.filter((r) => r.outcome === "offline").length,
       noCommerce: results.filter((r) => r.outcome === "no-commerce").length,
+      blocked: results.filter((r) => r.outcome === "blocked").length,
+      deferred: results.filter((r) => r.outcome === "deferred").length,
+      skipped: results.filter((r) => r.outcome === "skipped").length,
+      staleCache: results.filter((r) => r.outcome === "stale-cache").length,
       elapsedMs: Date.now() - t0,
     };
     console.log(
-      `[verify] ${stats.total} → live=${stats.live} offline=${stats.offline} no-commerce=${stats.noCommerce} error=${stats.error} in ${stats.elapsedMs}ms`,
+      `[verify] ${stats.total} → live=${stats.live} offline=${stats.offline} nc=${stats.noCommerce} err=${stats.error} blk=${stats.blocked} def=${stats.deferred} skp=${stats.skipped} stale=${stats.staleCache} in ${stats.elapsedMs}ms`,
     );
-    sendJson(req, res, 200, { lives, stats });
+    sendJson(req, res, 200, { lives, roomIdHints, stats });
     return;
   }
 
@@ -278,9 +376,9 @@ const server = http.createServer(async (req, res) => {
 });
 
 server.listen(PORT, HOST, () => {
-  console.log(`TikTok verify daemon running at http://${HOST}:${PORT}`);
+  console.log(`TikTok verify daemon v${VERSION} running at http://${HOST}:${PORT}`);
   console.log(`  GET  /health`);
-  console.log(`  POST /verify   { candidates: [{handle, nickname?, avatarUrl?, roomId?}], concurrency?, gapMs? }`);
+  console.log(`  POST /verify   { candidates: [{handle, nickname?, avatarUrl?, roomId?}] }`);
   console.log(`Allowed origins: ${[...ALLOWED_ORIGINS].join(", ")}`);
 });
 

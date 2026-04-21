@@ -1831,6 +1831,7 @@ export interface CollectResult {
     feedHot: number;
     dbPool: number;
     highPriority: number;
+    withRoomId: number; // quantos candidatos já têm roomId cacheado (fast path)
     total: number;
     elapsedMs: number;
   };
@@ -1847,6 +1848,9 @@ export async function collectCandidatePool(userId: string): Promise<CollectResul
     })
     .catch(() => null);
 
+  // Cache-hit window: roomId visto há menos de 24h é válido pra fast-path.
+  const roomIdFresh = new Date(Date.now() - 24 * 60 * 60 * 1000);
+
   const [feedResult, highPriority, dbPool, seenLiveFromUser] = await Promise.all([
     fetchTikwmFeedAll().catch(() => ({
       all: [] as Candidate[],
@@ -1858,24 +1862,86 @@ export async function collectCandidatePool(userId: string): Promise<CollectResul
         region: "BR",
         OR: [{ source: "seed" }, { source: "manual" }, { lastSeenLive: { not: null } }],
       },
+      select: {
+        handle: true,
+        nickname: true,
+        avatarUrl: true,
+        source: true,
+        lastKnownRoomId: true,
+        lastKnownRoomIdAt: true,
+      },
       take: 500,
     }),
     prisma.ugcKnownCreator.findMany({
       where: { region: "BR" },
+      select: {
+        handle: true,
+        nickname: true,
+        avatarUrl: true,
+        source: true,
+        lastKnownRoomId: true,
+        lastKnownRoomIdAt: true,
+      },
       take: 2000,
       orderBy: [{ lastChecked: "asc" }],
     }),
     // Handles que o user já viu live antes — re-verificar pros replays recentes
     prisma.liveSession.findMany({
       where: { userId },
-      select: { hostHandle: true, hostNickname: true, hostAvatarUrl: true },
+      select: {
+        hostHandle: true,
+        hostNickname: true,
+        hostAvatarUrl: true,
+        roomId: true,
+        scrapedAt: true,
+      },
       distinct: ["hostHandle"],
       take: 300,
     }),
   ]);
 
+  // Lookup O(1) pra enriquecer fontes externas (hot, feed) com roomId cacheado.
+  const roomIdCache = new Map<string, string>();
+  for (const h of highPriority) {
+    if (
+      h.lastKnownRoomId &&
+      /^\d{15,}$/.test(h.lastKnownRoomId) &&
+      h.lastKnownRoomIdAt &&
+      h.lastKnownRoomIdAt >= roomIdFresh
+    ) {
+      roomIdCache.set(h.handle, h.lastKnownRoomId);
+    }
+  }
+  for (const h of dbPool) {
+    if (roomIdCache.has(h.handle)) continue;
+    if (
+      h.lastKnownRoomId &&
+      /^\d{15,}$/.test(h.lastKnownRoomId) &&
+      h.lastKnownRoomIdAt &&
+      h.lastKnownRoomIdAt >= roomIdFresh
+    ) {
+      roomIdCache.set(h.handle, h.lastKnownRoomId);
+    }
+  }
+  // LiveSession recente do próprio user também é sinal válido: se scrapedAt
+  // < 24h e roomId é numérico, reusa direto (não precisa do cache em creator).
+  for (const s of seenLiveFromUser) {
+    if (!s.hostHandle) continue;
+    if (roomIdCache.has(s.hostHandle)) continue;
+    if (
+      s.roomId &&
+      /^\d{15,}$/.test(s.roomId) &&
+      s.scrapedAt &&
+      s.scrapedAt >= roomIdFresh
+    ) {
+      roomIdCache.set(s.hostHandle, s.roomId);
+    }
+  }
+
   const hotSet = new Set(feedResult.hot.map((c) => c.handle));
   const map = new Map<string, CandidateForVerification>();
+
+  const withRoomId = (handle: string) => roomIdCache.get(handle);
 
   // Ordem de inserção = prioridade de verificação (workers processam em fila).
   // 1. HOT — posts com "ao vivo agora" no título
@@ -1885,6 +1951,7 @@ export async function collectCandidatePool(userId: string): Promise<CollectResul
         handle: c.handle,
         nickname: c.nickname,
         avatarUrl: c.avatarUrl,
+        roomId: withRoomId(c.handle),
         source: "hot",
       });
     }
@@ -1898,6 +1965,7 @@ export async function collectCandidatePool(userId: string): Promise<CollectResul
         handle: s.hostHandle,
         nickname: s.hostNickname ?? undefined,
         avatarUrl: s.hostAvatarUrl ?? undefined,
+        roomId: withRoomId(s.hostHandle),
         source: "seenLive",
       });
     }
@@ -1910,6 +1978,7 @@ export async function collectCandidatePool(userId: string): Promise<CollectResul
         handle: h.handle,
         nickname: h.nickname ?? undefined,
         avatarUrl: h.avatarUrl ?? undefined,
+        roomId: withRoomId(h.handle),
         source: h.source === "seed" ? "seed" : h.source === "manual" ? "manual" : "seenLive",
       });
     }
@@ -1922,6 +1991,7 @@ export async function collectCandidatePool(userId: string): Promise<CollectResul
         handle: c.handle,
         nickname: c.nickname,
         avatarUrl: c.avatarUrl,
+        roomId: withRoomId(c.handle),
         source: "feed",
       });
     }
@@ -1934,20 +2004,29 @@ export async function collectCandidatePool(userId: string): Promise<CollectResul
         handle: h.handle,
         nickname: h.nickname ?? undefined,
         avatarUrl: h.avatarUrl ?? undefined,
+        roomId: withRoomId(h.handle),
         source: "db",
       });
     }
   }
 
-  const candidates = [...map.values()];
+  // Reordena: candidatos COM roomId vão pra frente (verificação instantânea,
+  // não toca em /live). Dentro de cada grupo, preserva prioridade (hot > ...).
+  const ordered = [...map.values()].sort((a, b) => {
+    const aHas = a.roomId ? 0 : 1;
+    const bHas = b.roomId ? 0 : 1;
+    return aHas - bHas;
+  });
+
   return {
-    candidates,
+    candidates: ordered,
     debug: {
       feedAll: feedResult.all.length,
       feedHot: feedResult.hot.length,
       dbPool: dbPool.length,
       highPriority: highPriority.length,
-      total: candidates.length,
+      withRoomId: roomIdCache.size,
+      total: ordered.length,
       elapsedMs: Date.now() - t0,
     },
   };

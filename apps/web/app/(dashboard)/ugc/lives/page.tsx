@@ -76,7 +76,19 @@ interface WorkerVerifyResponse {
     startedAt?: string | null;
     hasCommerce?: boolean;
   }>;
-  stats: { total: number; live: number; offline: number; noCommerce: number; error: number; elapsedMs: number };
+  roomIdHints?: Array<{ handle: string; roomId: string }>;
+  stats: {
+    total: number;
+    live: number;
+    offline: number;
+    noCommerce: number;
+    error: number;
+    elapsedMs: number;
+    blocked?: number;
+    deferred?: number;
+    skipped?: number;
+    staleCache?: number;
+  };
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -513,12 +525,9 @@ export default function LivesPage() {
         const verifyRes = await fetch(`${WORKER_URL}/verify`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            candidates: candJson.candidates,
-            concurrency: 6,
-            gapMs: 120,
-          }),
-          // Pode levar minutos (pool grande). Sem timeout no fetch do browser.
+          // Worker v2 tem seu próprio throttling — concurrency/gap aqui
+          // viraram no-op. Payload inclui candidatos com roomId pré-cacheado.
+          body: JSON.stringify({ candidates: candJson.candidates }),
         });
         if (!verifyRes.ok) throw new Error("worker verify failed");
         const verifyJson = (await verifyRes.json()) as WorkerVerifyResponse;
@@ -527,7 +536,10 @@ export default function LivesPage() {
         const ingestRes = await fetch("/api/ugc/lives/ingest", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ lives: verifyJson.lives }),
+          body: JSON.stringify({
+            lives: verifyJson.lives,
+            roomIdHints: verifyJson.roomIdHints ?? [],
+          }),
         });
         const ingestJson = (await ingestRes.json()) as {
           success: boolean;
@@ -535,6 +547,7 @@ export default function LivesPage() {
           newSessions: number;
           newCreators: number;
           updatedSessions: number;
+          hintsCached?: number;
         };
 
         const liveNow = verifyJson.lives.length;
@@ -550,11 +563,14 @@ export default function LivesPage() {
           debug: {
             keywordsSearched: [
               `candidates=${candJson.debug.total}`,
-              `feedHot=${candJson.debug.feedHot}`,
-              `verified=${verifyJson.stats.live}`,
+              `cached-roomId=${(candJson.debug as { withRoomId?: number }).withRoomId ?? 0}`,
+              `live=${verifyJson.stats.live}`,
               `offline=${verifyJson.stats.offline}`,
               `no-commerce=${verifyJson.stats.noCommerce}`,
-              `errors=${verifyJson.stats.error}`,
+              `error=${verifyJson.stats.error}`,
+              `blocked=${verifyJson.stats.blocked ?? 0}`,
+              `deferred=${verifyJson.stats.deferred ?? 0}`,
+              `hints-cached=${ingestJson.hintsCached ?? 0}`,
             ],
             workerUsed: true,
             workerStats: verifyJson.stats,

@@ -602,11 +602,16 @@ model UgcKnownCreator {
   lastLiveStartedAt DateTime?              // início da última live detectada
   lastLiveTitle     String?                // título da última live
   totalLiveMinutes  Int       @default(0)  // tempo total acumulado de live
+  // Cache de roomId p/ pular o /live HTML (que Akamai banir em lote).
+  // Enquanto estiver "fresco" (< 24h), worker vai direto em webcast/room/info/.
+  lastKnownRoomId   String?
+  lastKnownRoomIdAt DateTime?
   createdAt     DateTime  @default(now())
 
   @@index([region])
   @@index([lastChecked])
   @@index([lastSeenLive])
   @@index([peakViewers])
+  @@index([lastKnownRoomIdAt])
   @@map("ugc_known_creators")
 }
