@@ -1603,6 +1603,15 @@ export async function scrapeLiveSessions(
     orderBy: [{ lastChecked: "asc" }],
   });
 
+  // Set de handles trustados (seed + manual) — passam sem o filtro hasCommerce.
+  // Motivo: webcast às vezes retorna has_commerce_goods=false mesmo pra creator
+  // com Shop ativo. Se o user adicionou manualmente, ele já validou a intenção.
+  const trustedHandles = new Set(
+    highPriority
+      .filter((h) => h.source === "seed" || h.source === "manual")
+      .map((h) => h.handle),
+  );
+
   const hotShuffled = shuffle(hotCandidates.filter((h) => !foundWithRoomId.has(h)));
   const seedShuffled = shuffle(
     highPriority.map((h) => h.handle).filter((h) => !foundWithRoomId.has(h)),
@@ -1668,7 +1677,11 @@ export async function scrapeLiveSessions(
   for (const { room, info } of roomInfos) {
     if (!info) continue;
     if (info.status !== 2) continue;
+    const trusted = trustedHandles.has(room.handle);
     if (info.hasCommerce) {
+      liveWithCommerce++;
+    } else if (trusted) {
+      // Creator seed/manual — passa mesmo sem flag commerce (webcast pode errar).
       liveWithCommerce++;
     } else {
       liveWithoutCommerce++;
@@ -1703,7 +1716,8 @@ export async function scrapeLiveSessions(
     if (check.error) checkErrors++;
     if (!check.isLive) continue;
     const hasCommerce = info?.hasCommerce ?? check.hasCommerce ?? false;
-    if (!hasCommerce) {
+    const trusted = trustedHandles.has(handle);
+    if (!hasCommerce && !trusted) {
       liveWithoutCommerce++;
       continue;
     }

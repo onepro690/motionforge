@@ -52,11 +52,13 @@ export async function POST(req: Request) {
   });
 
   // 3. Checa live AGORA (api-live + webcast/room/info)
+  // Add manual = intenção explícita do user: mostra a live independente do
+  // flag hasCommerce do webcast (TikTok às vezes não sinaliza corretamente).
   let liveSessionId: string | null = null;
   let isCurrentlyLive = false;
   try {
     const live = await checkCreatorLiveNow(handle);
-    if (live && live.hasCommerce) {
+    if (live) {
       isCurrentlyLive = true;
       const viewerCount = live.userCount ?? 0;
       const likeCount = live.likeCount ?? 0;
