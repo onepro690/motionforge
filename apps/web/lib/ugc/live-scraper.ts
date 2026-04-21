@@ -1187,7 +1187,7 @@ const SHOP_RE =
 const SHOP_HASHTAG_RE =
   /#(tiktokshop|tiktokshopbrasil|liveshop|liveshopping|achadinho|achadostiktok|promocao|ofertarelampago|desconto|vendas|modatiktokshop|beleztiktokshop|cozinhatiktokshop)/i;
 const BIO_SHOP_RE =
-  /tiktok\s*shop|live\s*seller|vendas\s*todos?\s*os?\s*dias?|affiliate|afiliad[oa]|seller|achadinho|loja\s*on\s*line|loja\s*virtual|vendas\s*ao\s*vivo|creator\s*shop/i;
+  /tiktok\s*shop|live\s*seller|vendas?\s*(todos?\s*os?\s*dias?|ao\s*vivo|hoje|diari(a|o)s?)|affiliate|afiliad[oa]|seller|achadinho|loja\s*(on\s*line|virtual|fisica|oficial|\bno\b)|creator\s*shop|link\s*(na|da)\s*bio|frete\s*gr[áa]tis|cupom|envios?\s*(diari(o|as?)|r[áa]pidos?)|[📦🛒🛍💰💄💎🎁⚡🏷️🛍️]|promo[çc]ão?|ofert(a|as)|vendedor[a]?|lives?\s*(toda|diaria|todo\s*dia|sempre|hoje|ao\s*vivo)|\b(whats|zap|direct|dm)\s+(comercial|pedidos?|vendas?)|compre\s+(com|no|pelo)|orçamentos?\s+no/i;
 
 function scoreLiveIntent(text: string): number {
   if (LIVE_NOW_RE_STRONG.test(text)) return 80;
@@ -1781,18 +1781,23 @@ export async function scrapeLiveSessions(
     () => mergedCandidates,
   );
 
-  // Threshold v3: prioriza bioMatched (sinal mais confiável de shop creator),
-  // e aceita intent forte ou sinal combinado. Meta ≥15 inferred.
+  // Threshold v4: bioMatched é requisito PRINCIPAL (shop seller confirmado
+  // via bio). Non-bio path só aceita casos extremos (intent forte + commerce
+  // + post muito recente). Menos false-positives, melhor UX no "PROVÁVEL".
   const inferredCandidates = hintsEnriched
     .filter((c) => {
       if (alreadyFinal.has(c.handle)) return false;
-      // (a) Bio matched é o sinal primário — creator é seller confirmado.
-      //     Mesmo sem intent explícito no post, está ativo hoje.
+      // (a) Bio de shop seller — sinal forte
       if (c.bioMatched) return true;
-      // (b) Intent forte (80) + qualquer commerce
-      if (c.liveIntentScore >= 80 && c.commerceScore >= 20) return true;
-      // (c) Sinal combinado strong
-      if (c.liveIntentScore + c.commerceScore >= 70 && c.recencyScore >= 25) return true;
+      // (b) Só sem bio se sinais extremos: intent forte + commerce hashtag +
+      //     post <1h. Esses são casos raros de creator novo que ainda não
+      //     foi enriquecido mas claramente anunciou live agora.
+      if (
+        c.liveIntentScore >= 80 &&
+        c.commerceScore >= 40 &&
+        c.recencyScore >= 60
+      )
+        return true;
       return false;
     })
     .slice(0, 60); // cap pra não poluir UI
