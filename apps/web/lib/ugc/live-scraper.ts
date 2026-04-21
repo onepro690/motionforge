@@ -962,15 +962,17 @@ export interface RapidApiLive {
 //   { data: [ { live_info: { raw_data: "<JSON string>" } } ] }
 // O raw_data é JSON escapado com o room completo (id_str, status, title,
 // owner, user_count, cover, has_commerce_goods, etc).
+// BASIC plan do api23 tem rate limit agressivo (~100/h). Mantém só 8 keywords
+// e concurrency=1 pra não estourar cota numa única rodada.
 const SEARCH_LIVE_KEYWORDS = [
-  "live shop brasil", "tiktok shop brasil", "aovivo brasil",
-  "live ofertas", "live promoção", "live achados",
-  "live maquiagem", "live moda", "live acessórios",
-  "live casa", "live eletrônicos", "live pet",
-  "liveshop", "ao vivo shop", "estou ao vivo",
-  "entra na live", "live vendendo", "live desconto",
-  "shop live", "brazil live shop", "oferta relâmpago",
-  "live bazar", "liquida live", "brechó",
+  "live shop brasil",
+  "tiktok shop brasil",
+  "aovivo brasil",
+  "live ofertas",
+  "liveshop",
+  "estou ao vivo",
+  "live vendendo",
+  "oferta relâmpago",
 ];
 
 async function fetchRapidApiLiveFeed(apiKey: string, host: string): Promise<RapidApiLive[]> {
@@ -1041,8 +1043,8 @@ async function fetchRapidApiLiveFeed(apiKey: string, host: string): Promise<Rapi
     for (const k in o) walkForRaw(o[k]);
   };
 
-  // Chamadas em paralelo com cap de concorrência pra não estourar rate limit
-  const concurrency = 4;
+  // Serial (concurrency=1) pra não estourar rate limit BASIC
+  const concurrency = 1;
   let idx = 0;
   const workers = Array.from({ length: concurrency }, async () => {
     while (idx < urls.length) {
@@ -1066,99 +1068,11 @@ async function fetchRapidApiLiveFeed(apiKey: string, host: string): Promise<Rapi
   return rooms;
 }
 
-async function checkLiveViaRapidApi(apiKey: string, host: string, handle: string): Promise<LiveCheck> {
-  const provider = providerFromHost(host);
-  if (provider !== "api23") return { isLive: false, error: true };
-
-  const headers = {
-    "x-rapidapi-key": apiKey,
-    "x-rapidapi-host": host,
-    "Accept": "application/json",
-  };
-
-  // Passo 1: check-alive → { data: [{ alive, room_id, room_id_str }], status_code: 0 }
-  let roomId: string | undefined;
-  try {
-    const res = await fetch(
-      `https://${host}/api/live/check-alive?uniqueId=${encodeURIComponent(handle)}`,
-      { headers, signal: AbortSignal.timeout(8_000) },
-    );
-    if (!res.ok) return { isLive: false, error: true };
-    const text = await res.text();
-    let d: unknown;
-    try { d = JSON.parse(text); } catch { return { isLive: false, error: true }; }
-    const raw = d as {
-      data?: Array<{ alive?: boolean; room_id?: number | string; room_id_str?: string }>;
-      status_code?: number;
-    };
-    const first = raw.data?.[0];
-    if (!first?.alive) return { isLive: false };
-    const rid = first.room_id_str ?? (first.room_id != null ? String(first.room_id) : undefined);
-    if (!rid || !/^\d{10,}$/.test(rid)) return { isLive: false };
-    roomId = rid;
-  } catch {
-    return { isLive: false, error: true };
-  }
-
-  // Passo 2: /api/live/info?roomId=X pra ter title/user_count/commerce.
-  // Se falhar, ainda retorna isLive:true com roomId (commerce desconhecido).
-  try {
-    const res = await fetch(
-      `https://${host}/api/live/info?roomId=${encodeURIComponent(roomId)}`,
-      { headers, signal: AbortSignal.timeout(8_000) },
-    );
-    if (res.ok) {
-      const text = await res.text();
-      let d: unknown;
-      try { d = JSON.parse(text); } catch { d = null; }
-      const raw = d as {
-        data?: {
-          title?: string;
-          user_count?: number;
-          like_count?: number;
-          create_time?: number;
-          has_commerce_goods?: boolean;
-          goods_num?: number;
-          cover?: { url_list?: string[] };
-          stream_url?: { hls_pull_url?: string | Record<string, string> };
-        };
-      };
-      const info = raw?.data;
-      const hls = typeof info?.stream_url?.hls_pull_url === "string"
-        ? (info.stream_url.hls_pull_url as string)
-        : (info?.stream_url?.hls_pull_url as Record<string, string> | undefined)?.FULL_HD1
-          ?? (info?.stream_url?.hls_pull_url as Record<string, string> | undefined)?.HD1;
-      return {
-        isLive: true,
-        roomId,
-        title: info?.title,
-        coverUrl: info?.cover?.url_list?.[0],
-        userCount: info?.user_count,
-        enterCount: info?.like_count,
-        startedAt: info?.create_time ? info.create_time * 1000 : undefined,
-        hasCommerce: info?.has_commerce_goods === true
-          || (typeof info?.goods_num === "number" && info.goods_num > 0)
-          || COMMERCE_REGEX.test(text),
-        hlsUrl: hls,
-      };
-    }
-  } catch {
-    // cai pro fallback sem info
-  }
-
-  return { isLive: true, roomId };
-}
-
 async function checkLiveStatus(handle: string): Promise<LiveCheck> {
-  // 0. Se tiver RapidAPI key + provider tem endpoint de live check, tenta ela
-  // primeiro (proxy residencial, bypassa WAF). scraper7 NÃO tem live endpoint
-  // (só /user/info com dados de perfil), então skip pra não gastar cota.
-  if (_runApiKey && providerFromHost(_runApiHost) === "api23") {
-    const r = await checkLiveViaRapidApi(_runApiKey, _runApiHost, handle);
-    if (r.isLive) return r;
-    // Só short-circuit se confirmou offline sem erro (resposta definitiva)
-    if (!r.error) return r;
-  }
+  // RapidAPI NÃO é usada aqui: o plano BASIC do api23 tem ~100 req/h,
+  // e 1200 handles por rodada estouraria a cota instantaneamente.
+  // A descoberta via api23 já acontece em fetchRapidApiLiveFeed (search/live),
+  // que devolve rooms com title/user_count/commerce/hls direto.
 
   // 1ª tentativa: webcast direto (pouco WAF-blocked quando funciona).
   //   Só aceita como resposta definitiva se VIU a live. Qualquer outra
