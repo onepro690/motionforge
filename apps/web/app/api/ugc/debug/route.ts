@@ -34,6 +34,35 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({ count: all.length, settings: summary }, { status: 200 });
   }
 
+  if (view === "api23-search") {
+    const keyword = request.nextUrl.searchParams.get("keyword") ?? "live shop brasil";
+    const settings = await prisma.ugcSystemSettings.findFirst({ select: { tiktokScraperApiKey: true } });
+    const key = settings?.tiktokScraperApiKey;
+    if (!key) return NextResponse.json({ error: "no key" }, { status: 400 });
+    const host = "tiktok-api23.p.rapidapi.com";
+    const url = `https://${host}/api/search/live?keyword=${encodeURIComponent(keyword)}`;
+    try {
+      const res = await fetch(url, {
+        headers: { "x-rapidapi-key": key, "x-rapidapi-host": host, "Accept": "application/json" },
+        signal: AbortSignal.timeout(15_000),
+      });
+      const body = await res.text();
+      let parsed: unknown = null;
+      try { parsed = JSON.parse(body); } catch {}
+      // Conta raw_data ocorrências + lista top-level keys
+      const rawCount = (body.match(/"raw_data"/g) ?? []).length;
+      const topKeys = parsed && typeof parsed === "object" && !Array.isArray(parsed)
+        ? Object.keys(parsed as Record<string, unknown>)
+        : [];
+      return NextResponse.json({
+        keyword, host, status: res.status, length: body.length, rawCount, topKeys,
+        bodyPreview: body.slice(0, 4000),
+      }, { status: 200 });
+    } catch (e) {
+      return NextResponse.json({ error: String(e) }, { status: 500 });
+    }
+  }
+
   if (view === "api23-probe") {
     const handle = request.nextUrl.searchParams.get("handle") ?? "shoptiktokbr";
     const settings = await prisma.ugcSystemSettings.findFirst({ select: { tiktokScraperApiKey: true } });
