@@ -1452,7 +1452,7 @@ export async function scrapeLiveSessions(
   //   - tikwm feed search (sempre funciona, candidatos secundários)
   const webcastCursors = [0, 30, 60, 90, 120];
   const webcastRoomsAcc: WebcastFeedRoom[] = [];
-  const [rapidApiRooms, _webcastBatch, lobbyRooms, feedResult, recentHintsRaw] = await Promise.all([
+  const [rapidApiRooms, _webcastBatch, lobbyRooms, feedResult] = await Promise.all([
     apiKey ? fetchRapidApiLiveFeed(apiKey, _runApiHost).catch(() => [] as RapidApiLive[]) : Promise.resolve([] as RapidApiLive[]),
     (async () => {
       for (const c of webcastCursors) {
@@ -1462,11 +1462,8 @@ export async function scrapeLiveSessions(
     })(),
     fetchLobbyRotated().catch(() => [] as DiscoveredRoom[]),
     fetchTikwmFeedAll(),
-    // Paralelo: stage recent-hints — posts de hoje com intent de live NOW.
-    // Roda em paralelo pra não adicionar latência.
-    fetchRecentLiveHintsScored().catch(() => [] as RecentHintCandidate[]),
   ]);
-  console.log(`[live-scraper] recent-hints scored=${recentHintsRaw.length}`);
+  const recentHintsRaw: RecentHintCandidate[] = [];
   console.log(
     `[live-scraper] rapidapi feed: rooms=${rapidApiRooms.length} (apiKey=${apiKey ? "set" : "none"})`,
   );
@@ -1737,122 +1734,24 @@ export async function scrapeLiveSessions(
     });
   }
 
-  // 4b. INFERRED STAGE — top candidatos que NÃO passaram no check webcast
-  //     (WAF bloqueia do Vercel) mas têm sinal de shop creator posting
-  //     today. Entram com roomId=inferred_<handle> + isLive=true. UI
-  //     distingue por roomId prefix. Filtra os que já estão em finals.
-  const alreadyFinal = new Set(finals.keys());
-  let inferredAdded = 0;
-  let inferredBioBoosted = 0;
-
-  // Merge feedResult.all (232 creators de queries shop-focused no pipeline
-  // existente) no pool de inferência. Esses não têm createTime/contentDesc
-  // (Candidate simples), então entram com intent=0 e commerce=20 baseline.
-  // Bio enrichment é quem promove pra inferred — se o creator é shop seller.
-  const hintsByHandle = new Map(recentHintsRaw.map((c) => [c.handle, c]));
-  for (const c of feedResult.all) {
-    if (hintsByHandle.has(c.handle)) continue;
-    hintsByHandle.set(c.handle, {
-      handle: c.handle,
-      nickname: c.nickname,
-      avatarUrl: c.avatarUrl,
-      latestPostTs: 0,
-      liveIntentScore: LIVE_HINT_RE.test(c.postTitle) ? 40 : 0,
-      commerceScore: 20, // baseline — foi retornado por query shop-focused
-      recencyScore: 25, // assumido <4h (posts do feed hoje)
-      hintCount: 1,
-      totalScore:
-        (LIVE_HINT_RE.test(c.postTitle) ? 40 : 0) * 0.4 +
-        25 * 0.3 +
-        20 * 0.2 +
-        5 * 0.1,
-      sampleTitle: c.postTitle.slice(0, 200),
-      postId: "",
-    });
-  }
-  const mergedCandidates = [...hintsByHandle.values()].sort(
-    (a, b) => b.totalScore - a.totalScore,
-  );
-  console.log(
-    `[live-scraper] inference pool: recentHints=${recentHintsRaw.length} + feedAll=${feedResult.all.length} → merged=${mergedCandidates.length}`,
-  );
-
-  const hintsEnriched = await enrichWithShopBio(mergedCandidates).catch(
-    () => mergedCandidates,
-  );
-
-  // Threshold v4: bioMatched é requisito PRINCIPAL (shop seller confirmado
-  // via bio). Non-bio path só aceita casos extremos (intent forte + commerce
-  // + post muito recente). Menos false-positives, melhor UX no "PROVÁVEL".
-  const inferredCandidates = hintsEnriched
-    .filter((c) => {
-      if (alreadyFinal.has(c.handle)) return false;
-      // (a) Bio de shop seller — sinal forte
-      if (c.bioMatched) return true;
-      // (b) Só sem bio se sinais extremos: intent forte + commerce hashtag +
-      //     post <1h. Esses são casos raros de creator novo que ainda não
-      //     foi enriquecido mas claramente anunciou live agora.
-      if (
-        c.liveIntentScore >= 80 &&
-        c.commerceScore >= 40 &&
-        c.recencyScore >= 60
-      )
-        return true;
-      return false;
-    })
-    .slice(0, 60); // cap pra não poluir UI
-
-  for (const c of inferredCandidates) {
-    if (finals.has(c.handle)) continue;
-    if (c.bioMatched) inferredBioBoosted++;
-    const startedAtMs = c.latestPostTs ? c.latestPostTs * 1000 : Date.now();
-    finals.set(c.handle, {
-      roomId: `inferred_${c.handle}`,
-      title: c.sampleTitle,
-      hostHandle: c.handle,
-      hostNickname: c.nickname,
-      hostAvatarUrl: c.avatarUrl,
-      viewerCount: 0,
-      totalViewers: 0,
-      likeCount: 0,
-      estimatedOrders: 0,
-      productCount: 0,
-      products: [],
-      isLive: true,
-      startedAt: new Date(startedAtMs).toISOString(),
-      hlsUrl: undefined,
-      flvUrl: undefined,
-      liveUrl: `https://www.tiktok.com/@${c.handle}/live`,
-      thumbnailUrl: c.avatarUrl,
-      salesScore: Math.round(c.totalScore), // score = confidence, usado como sort
-      __hasCommerce: true,
-    });
-    inferredAdded++;
-  }
-  console.log(
-    `[live-scraper] inferred added=${inferredAdded} (bioBoosted=${inferredBioBoosted}, totalCandidates=${hintsEnriched.length})`,
-  );
+  // 4b. INFERRED STAGE — DESABILITADO a pedido do usuário.
+  //     Antes: candidatos do recent-hints + feedResult.all, filtrados por
+  //     bioMatched (shop seller via bio), entravam como inferred_<handle>.
+  //     Problema: WAF bloqueia verificação real via webcast, então não
+  //     conseguimos confirmar que esses candidatos estão DE FATO live.
+  //     Usuário prefere lista pequena de verificados a lista grande com
+  //     PROVÁVEL. Helpers preservados pra reativação futura se houver
+  //     caminho de verificação real.
 
   const finalLives = [...finals.values()]
     .map(({ __hasCommerce: _, ...rest }) => rest)
-    .sort((a, b) => {
-      // Verificados (roomId numérico) vêm primeiro; depois sort por viewers/score.
-      const aVerified = !a.roomId.startsWith("inferred_");
-      const bVerified = !b.roomId.startsWith("inferred_");
-      if (aVerified !== bVerified) return aVerified ? -1 : 1;
-      // Dentro do mesmo grupo: verified por viewers, inferred por score.
-      if (aVerified) return b.viewerCount - a.viewerCount;
-      return b.salesScore - a.salesScore;
-    });
+    .sort((a, b) => b.viewerCount - a.viewerCount);
 
-  // 6. Update pool: lastChecked para tudo, lastSeenLive só para verified.
-  //    Inferred entries (sem confirmação de status=2) NÃO updatam
-  //    lastSeenLive/liveCount pra não poluir ranking histórico.
+  // 6. Update pool: lastChecked para tudo verificado.
   const now = new Date();
   const allChecked = [
     ...lobbyWithRoomId.map((r) => r.handle),
     ...fallbackHandles,
-    ...inferredCandidates.map((c) => c.handle),
   ];
   if (allChecked.length > 0) {
     await prisma.ugcKnownCreator
@@ -1862,26 +1761,8 @@ export async function scrapeLiveSessions(
       })
       .catch(() => null);
   }
-  // Upsert inferred handles pra pool (descobertos via hints recentes).
-  if (inferredCandidates.length > 0) {
-    await prisma.ugcKnownCreator
-      .createMany({
-        data: inferredCandidates.map((c) => ({
-          handle: c.handle,
-          nickname: c.nickname,
-          avatarUrl: c.avatarUrl,
-          region: "BR",
-          source: "recent_hints",
-        })),
-        skipDuplicates: true,
-      })
-      .catch(() => null);
-  }
   // Atualiza o histórico do creator (peak, último início, título, etc).
-  // updateMany não faz per-row, então fazemos um por live (N pequeno).
   for (const l of finalLives) {
-    const isInferred = l.roomId.startsWith("inferred_");
-    if (isInferred) continue; // só verified entra no histórico
     await prisma.ugcKnownCreator
       .update({
         where: { handle: l.hostHandle },
@@ -1894,7 +1775,6 @@ export async function scrapeLiveSessions(
         },
       })
       .catch(() => null);
-    // peak: set apenas se maior
     await prisma.$executeRaw`
       UPDATE ugc_known_creators
       SET "peakViewers" = GREATEST("peakViewers", ${l.viewerCount})
@@ -1903,7 +1783,7 @@ export async function scrapeLiveSessions(
   }
 
   console.log(
-    `[live-scraper] DONE in ${Date.now() - t0}ms: total=${lobbyRoomsAll.length}, withId=${lobbyWithRoomId.length}, withCommerce=${liveWithCommerce}, inferred=${inferredAdded}, final=${finalLives.length}`,
+    `[live-scraper] DONE in ${Date.now() - t0}ms: total=${lobbyRoomsAll.length}, withId=${lobbyWithRoomId.length}, withCommerce=${liveWithCommerce}, final=${finalLives.length}`,
   );
 
   return {
@@ -1917,12 +1797,8 @@ export async function scrapeLiveSessions(
         `lobby=${lobbyRooms.length}`,
         `feed=${feedResult.all.length}`,
         `hot=${feedResult.hot.length}`,
-        `hints=${recentHintsRaw.length}`,
-        `pool=${mergedCandidates.length}`,
-        `bioMatched=${inferredBioBoosted}`,
-        `inferred=${inferredAdded}`,
       ],
-      candidatesFound: lobbyRoomsAll.length + recentHintsRaw.length,
+      candidatesFound: lobbyRoomsAll.length,
       verifiedLive: finalLives.length + liveWithoutCommerce,
       checkErrors,
       liveWithCommerce,
