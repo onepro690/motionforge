@@ -129,6 +129,10 @@ interface Runtime {
   canvasStream: MediaStream | null; // captureStream() do canvas
   videoEl: HTMLVideoElement | null; // offscreen, fonte do drawImage
   cropRaf: number | null;
+  cropInterval: number | null; // setInterval backup pro drawImage (anti-throttle)
+  watchdog: number | null; // setInterval que detecta videoEl pausado
+  alivePoll: number | null; // setInterval que pergunta /alive pro TikTok
+  lastDrawAt: number; // timestamp do último drawImage — usado pelo watchdog
   writable: FileSystemWritableFileStream | null;
   fileHandle: FileSystemFileHandle | null;
   writeQueue: Promise<void>;
@@ -240,6 +244,15 @@ export function LiveRecordingProvider({
           /* ignore */
         }
       }
+      if (rt.cropInterval !== null) {
+        try { clearInterval(rt.cropInterval); } catch { /* ignore */ }
+      }
+      if (rt.watchdog !== null) {
+        try { clearInterval(rt.watchdog); } catch { /* ignore */ }
+      }
+      if (rt.alivePoll !== null) {
+        try { clearInterval(rt.alivePoll); } catch { /* ignore */ }
+      }
       for (const s of [rt.rawStream, rt.canvasStream]) {
         if (!s) continue;
         for (const t of s.getTracks()) {
@@ -311,6 +324,18 @@ export function LiveRecordingProvider({
             } catch {
               /* noop */
             }
+          }
+          if (rt.cropInterval !== null) {
+            try { clearInterval(rt.cropInterval); } catch { /* noop */ }
+            rt.cropInterval = null;
+          }
+          if (rt.watchdog !== null) {
+            try { clearInterval(rt.watchdog); } catch { /* noop */ }
+            rt.watchdog = null;
+          }
+          if (rt.alivePoll !== null) {
+            try { clearInterval(rt.alivePoll); } catch { /* noop */ }
+            rt.alivePoll = null;
           }
           for (const s of [rt.rawStream, rt.canvasStream]) {
             if (!s) continue;
@@ -388,6 +413,10 @@ export function LiveRecordingProvider({
         canvasStream: null,
         videoEl: null,
         cropRaf: null,
+        cropInterval: null,
+        watchdog: null,
+        alivePoll: null,
+        lastDrawAt: 0,
         writable: null,
         fileHandle: null,
         writeQueue: Promise.resolve(),
@@ -696,7 +725,7 @@ export function LiveRecordingProvider({
         typeof (videoEl as HTMLVideoElement & {
           requestVideoFrameCallback?: unknown;
         }).requestVideoFrameCallback === "function";
-      const drawFrame = () => {
+      const paint = () => {
         if (rt.stopped) return;
         const vw = videoEl.videoWidth;
         const vh = videoEl.videoHeight;
@@ -709,18 +738,42 @@ export function LiveRecordingProvider({
           const cw = Math.max(1, Math.min(Math.round(nw * vw), vw - cx));
           const ch = Math.max(1, Math.min(Math.round(nh * vh), vh - cy));
           ctx.drawImage(videoEl, cx, cy, cw, ch, 0, 0, OUT_W, OUT_H);
-        }
-        if (hasRVFC) {
-          videoEl.requestVideoFrameCallback(drawFrame);
-        } else {
-          rt.cropRaf = window.requestAnimationFrame(drawFrame);
+          rt.lastDrawAt = Date.now();
         }
       };
-      if (hasRVFC) {
-        videoEl.requestVideoFrameCallback(drawFrame);
-      } else {
-        rt.cropRaf = window.requestAnimationFrame(drawFrame);
-      }
+      const drawRVFC = () => {
+        paint();
+        if (rt.stopped) return;
+        if (hasRVFC) videoEl.requestVideoFrameCallback(drawRVFC);
+        else rt.cropRaf = window.requestAnimationFrame(drawRVFC);
+      };
+      if (hasRVFC) videoEl.requestVideoFrameCallback(drawRVFC);
+      else rt.cropRaf = window.requestAnimationFrame(drawRVFC);
+
+      // Fallback timer: setInterval é MUITO menos throttled que RAF quando
+      // a aba do dashboard fica em background. RVFC também pode parar se
+      // o videoEl entrar em idle. O interval a 100ms garante que o canvas
+      // continua atualizando mesmo se RVFC/RAF pararem de disparar.
+      rt.cropInterval = window.setInterval(() => {
+        if (!rt.stopped) paint();
+      }, 100);
+
+      // Watchdog: se o videoEl pausar (browser pode pausar media em
+      // background), chama .play() de novo. Também detecta "frame stall"
+      // (nenhum drawImage em > 2s) e força re-play.
+      rt.lastDrawAt = Date.now();
+      rt.watchdog = window.setInterval(() => {
+        if (rt.stopped) return;
+        if (videoEl.paused || videoEl.ended) {
+          videoEl.play().catch(() => null);
+        }
+        const staleMs = Date.now() - rt.lastDrawAt;
+        if (staleMs > 2000) {
+          // Frame stall — força paint e tenta re-play.
+          videoEl.play().catch(() => null);
+          paint();
+        }
+      }, 1000);
 
       const canvasStream = canvas.captureStream(30);
       const combined = new MediaStream([
@@ -824,8 +877,35 @@ export function LiveRecordingProvider({
       };
 
       recorder.start(CHUNK_MS);
+
+      // Poller de live-alive: pergunta /api/ugc/lives/[id]/alive a cada 60s.
+      // Endpoint usa confirmLiveEnded (status JSON + HLS proof-of-life, duas
+      // janelas separadas por 15s). Primeiro check só após 90s pra evitar
+      // chamar antes da live estabilizar no TikTok.
+      let aliveInitialDelay = true;
+      rt.alivePoll = window.setInterval(async () => {
+        if (rt.stopped) return;
+        if (aliveInitialDelay) {
+          aliveInitialDelay = false;
+          await new Promise((r) => setTimeout(r, 30_000));
+        }
+        try {
+          const res = await fetch(`/api/ugc/lives/${sessionId}/alive`, {
+            cache: "no-store",
+          });
+          if (!res.ok) return;
+          const data = (await res.json()) as { alive?: boolean };
+          if (data.alive === false && !rt.stopped) {
+            console.log(`[live ${sessionId}] ended detected — stopping recording`);
+            rt.stopped = true;
+            void finalize(sessionId);
+          }
+        } catch {
+          // network flake — próximo tick tenta de novo
+        }
+      }, 60_000);
     },
-    [states, updateState],
+    [finalize, states, updateState],
   );
 
   const stopRecording = useCallback(
