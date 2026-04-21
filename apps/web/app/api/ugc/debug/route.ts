@@ -14,6 +14,26 @@ export async function GET(request: NextRequest) {
 
   const view = request.nextUrl.searchParams.get("view");
 
+  if (view === "settings-check") {
+    const all = await prisma.ugcSystemSettings.findMany({
+      select: {
+        userId: true,
+        tiktokScraperApiKey: true,
+        searchKeywords: true,
+        updatedAt: true,
+      },
+    });
+    const summary = all.map((s) => ({
+      userId: s.userId.slice(0, 8) + "...",
+      hasScraperKey: !!s.tiktokScraperApiKey,
+      keyPrefix: s.tiktokScraperApiKey ? s.tiktokScraperApiKey.slice(0, 8) + "..." + s.tiktokScraperApiKey.slice(-4) : null,
+      keyLength: s.tiktokScraperApiKey?.length ?? 0,
+      searchKeywords: s.searchKeywords,
+      updatedAt: s.updatedAt,
+    }));
+    return NextResponse.json({ count: all.length, settings: summary }, { status: 200 });
+  }
+
   if (view === "thumbs") {
     const products = await prisma.ugcTrendingProduct.findMany({
       orderBy: { createdAt: "desc" },
