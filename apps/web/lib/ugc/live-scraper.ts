@@ -1810,3 +1810,145 @@ export async function scrapeLiveSessions(
     },
   };
 }
+
+// ── Candidate collection (worker-mode) ──────────────────────────────────────
+// Discovery-only: roda no Vercel e devolve o pool de handles pro worker
+// local verificar via webcast (que o WAF bloqueia daqui). Não faz nenhuma
+// chamada webcast/room/info que depende de IP residencial.
+
+export interface CandidateForVerification {
+  handle: string;
+  nickname?: string;
+  avatarUrl?: string;
+  roomId?: string; // pode vir pré-verificado de fontes que dão roomId
+  source: "feed" | "hot" | "db" | "seed" | "manual" | "seenLive";
+}
+
+export interface CollectResult {
+  candidates: CandidateForVerification[];
+  debug: {
+    feedAll: number;
+    feedHot: number;
+    dbPool: number;
+    highPriority: number;
+    total: number;
+    elapsedMs: number;
+  };
+}
+
+export async function collectCandidatePool(userId: string): Promise<CollectResult> {
+  const t0 = Date.now();
+
+  // Seed idempotente — mesma lógica de scrapeLiveSessions.
+  await prisma.ugcKnownCreator
+    .createMany({
+      data: SEED_SHOP_CREATORS.map((h) => ({ handle: h, region: "BR", source: "seed" })),
+      skipDuplicates: true,
+    })
+    .catch(() => null);
+
+  const [feedResult, highPriority, dbPool, seenLiveFromUser] = await Promise.all([
+    fetchTikwmFeedAll().catch(() => ({
+      all: [] as Candidate[],
+      hot: [] as Candidate[],
+      stats: { ok: 0, empty: 0 },
+    })),
+    prisma.ugcKnownCreator.findMany({
+      where: {
+        region: "BR",
+        OR: [{ source: "seed" }, { source: "manual" }, { lastSeenLive: { not: null } }],
+      },
+      take: 500,
+    }),
+    prisma.ugcKnownCreator.findMany({
+      where: { region: "BR" },
+      take: 2000,
+      orderBy: [{ lastChecked: "asc" }],
+    }),
+    // Handles que o user já viu live antes — re-verificar pros replays recentes
+    prisma.liveSession.findMany({
+      where: { userId },
+      select: { hostHandle: true, hostNickname: true, hostAvatarUrl: true },
+      distinct: ["hostHandle"],
+      take: 300,
+    }),
+  ]);
+
+  const hotSet = new Set(feedResult.hot.map((c) => c.handle));
+  const map = new Map<string, CandidateForVerification>();
+
+  // Ordem de inserção = prioridade de verificação (workers processam em fila).
+  // 1. HOT — posts com "ao vivo agora" no título
+  for (const c of feedResult.hot) {
+    if (!map.has(c.handle)) {
+      map.set(c.handle, {
+        handle: c.handle,
+        nickname: c.nickname,
+        avatarUrl: c.avatarUrl,
+        source: "hot",
+      });
+    }
+  }
+
+  // 2. Creators que esse user já viu ao vivo — re-checa
+  for (const s of seenLiveFromUser) {
+    if (!s.hostHandle) continue;
+    if (!map.has(s.hostHandle)) {
+      map.set(s.hostHandle, {
+        handle: s.hostHandle,
+        nickname: s.hostNickname ?? undefined,
+        avatarUrl: s.hostAvatarUrl ?? undefined,
+        source: "seenLive",
+      });
+    }
+  }
+
+  // 3. High-priority DB (seed + manual + seenLive global)
+  for (const h of highPriority) {
+    if (!map.has(h.handle)) {
+      map.set(h.handle, {
+        handle: h.handle,
+        nickname: h.nickname ?? undefined,
+        avatarUrl: h.avatarUrl ?? undefined,
+        source: h.source === "seed" ? "seed" : h.source === "manual" ? "manual" : "seenLive",
+      });
+    }
+  }
+
+  // 4. Feed atual (posts recentes — nem todos hot, mas são shop-adjacentes)
+  for (const c of feedResult.all) {
+    if (!map.has(c.handle) && !hotSet.has(c.handle)) {
+      map.set(c.handle, {
+        handle: c.handle,
+        nickname: c.nickname,
+        avatarUrl: c.avatarUrl,
+        source: "feed",
+      });
+    }
+  }
+
+  // 5. DB pool em LRU (rotaciona entre runs)
+  for (const h of dbPool) {
+    if (!map.has(h.handle)) {
+      map.set(h.handle, {
+        handle: h.handle,
+        nickname: h.nickname ?? undefined,
+        avatarUrl: h.avatarUrl ?? undefined,
+        source: "db",
+      });
+    }
+  }
+
+  const candidates = [...map.values()];
+  return {
+    candidates,
+    debug: {
+      feedAll: feedResult.all.length,
+      feedHot: feedResult.hot.length,
+      dbPool: dbPool.length,
+      highPriority: highPriority.length,
+      total: candidates.length,
+      elapsedMs: Date.now() - t0,
+    },
+  };
+}
