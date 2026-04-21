@@ -32,13 +32,50 @@ const randomUA = () => UA_POOL[Math.floor(Math.random() * UA_POOL.length)];
 
 // Cap de quantos handles desconhecidos vamos resolver por run. O /live HTML
 // é o único endpoint Akamai-protegido: mais que isso → IP ban temporário.
-const MAX_UNKNOWN_RESOLVE = 25;
+const MAX_UNKNOWN_RESOLVE = 30;
 
 // Jitter humano no gap, pra randomizar o padrão temporal.
-const jitter = (baseMs, spread = 0.4) => {
+const jitter = (baseMs, spread = 0.5) => {
   const delta = baseMs * spread;
   return baseMs - delta + Math.random() * 2 * delta;
 };
+
+// Cookie jar compartilhado entre requests do slow path — algumas respostas
+// do TikTok setam msToken/ttwid que reduzem suspeita de bot no próximo hit.
+const cookieJar = new Map();
+function cookieHeader() {
+  return [...cookieJar.entries()].map(([k, v]) => `${k}=${v}`).join("; ");
+}
+function absorbSetCookie(res) {
+  const sc = res.headers.get("set-cookie");
+  if (!sc) return;
+  for (const line of sc.split(/,(?=[^;]+=)/)) {
+    const [kv] = line.trim().split(";");
+    const [k, v] = kv.split("=");
+    if (k && v) cookieJar.set(k.trim(), v.trim());
+  }
+}
+
+let warmupDone = false;
+async function warmupSession() {
+  if (warmupDone) return;
+  try {
+    const res = await fetch("https://www.tiktok.com/", {
+      headers: {
+        "User-Agent": randomUA(),
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        "Accept-Language": "pt-BR,pt;q=0.9,en;q=0.6",
+      },
+      signal: AbortSignal.timeout(10_000),
+    });
+    absorbSetCookie(res);
+    await res.text().catch(() => null);
+    warmupDone = true;
+    console.log(`[warmup] ok, cookies=${cookieJar.size}`);
+  } catch (err) {
+    console.log(`[warmup] failed: ${err.message}`);
+  }
+}
 
 function candidateHandleToRegex(h) {
   return String(h).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -66,22 +103,26 @@ function isBlocked(status, html) {
 async function fetchRoomByHandle(handle) {
   const url = `https://www.tiktok.com/@${encodeURIComponent(handle)}/live`;
   try {
+    const headers = {
+      "User-Agent": randomUA(),
+      "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+      "Accept-Language": "pt-BR,pt;q=0.9,en-US;q=0.7,en;q=0.6",
+      "Accept-Encoding": "gzip, deflate, br",
+      "Sec-Fetch-Dest": "document",
+      "Sec-Fetch-Mode": "navigate",
+      "Sec-Fetch-Site": "same-origin",
+      "Sec-Fetch-User": "?1",
+      "Upgrade-Insecure-Requests": "1",
+      "Referer": "https://www.tiktok.com/",
+      "Cache-Control": "max-age=0",
+    };
+    if (cookieJar.size > 0) headers["Cookie"] = cookieHeader();
     const res = await fetch(url, {
-      headers: {
-        "User-Agent": randomUA(),
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-        "Accept-Language": "pt-BR,pt;q=0.9,en-US;q=0.7,en;q=0.6",
-        "Accept-Encoding": "gzip, deflate, br",
-        "Sec-Fetch-Dest": "document",
-        "Sec-Fetch-Mode": "navigate",
-        "Sec-Fetch-Site": "none",
-        "Sec-Fetch-User": "?1",
-        "Upgrade-Insecure-Requests": "1",
-        "Cache-Control": "max-age=0",
-      },
+      headers,
       redirect: "follow",
       signal: AbortSignal.timeout(15_000),
     });
+    absorbSetCookie(res);
     const html = await res.text();
     if (isBlocked(res.status, html)) return { blocked: true };
     if (!res.ok) return { error: true };
@@ -192,16 +233,16 @@ async function verifyUnknown(candidate) {
   return { handle: candidate.handle, outcome: "live", live: buildLive(candidate, roomId, full) };
 }
 
-async function runPool(items, worker, concurrency, gapMs) {
+async function runPool(items, worker, concurrency, gapMs, maxBlocked = 5) {
   const results = [];
   const queue = [...items];
   let blockedStreak = 0;
 
   const workers = Array.from({ length: concurrency }, async () => {
     while (queue.length > 0) {
-      // Circuit breaker: se 5 blocked seguidos, para esse pool pra evitar
+      // Circuit breaker: se N blocked seguidos, para esse pool pra evitar
       // IP ban total. O que sobra volta como "skipped".
-      if (blockedStreak >= 5) {
+      if (blockedStreak >= maxBlocked) {
         const leftover = queue.splice(0).map((c) => ({ handle: c.handle, outcome: "skipped" }));
         results.push(...leftover);
         return;
@@ -212,8 +253,8 @@ async function runPool(items, worker, concurrency, gapMs) {
       results.push(r);
       if (r.outcome === "blocked") {
         blockedStreak++;
-        // Backoff exponencial quando bloqueado: começa em 5s, dobra.
-        await new Promise((res) => setTimeout(res, Math.min(5000 * 2 ** (blockedStreak - 1), 30000)));
+        // Backoff exponencial: 8s → 16s → 32s → 60s (cap).
+        await new Promise((res) => setTimeout(res, Math.min(8000 * 2 ** (blockedStreak - 1), 60000)));
       } else {
         blockedStreak = 0;
         if (gapMs > 0) await new Promise((res) => setTimeout(res, jitter(gapMs)));
@@ -241,11 +282,15 @@ async function verifyBatch(candidates) {
   );
 
   // Fast path: webcast/room/info/ não é rate-limited, dá pra ir largo.
-  const fastResults = await runPool(known, verifyWithKnownRoomId, 8, 100);
+  const fastResults = await runPool(known, verifyWithKnownRoomId, 8, 100, 999);
 
-  // Slow path: /live é Akamai-protegido. Concurrency 2, gap 2500ms base +
-  // jitter ±40%, backoff exponencial em blocked.
-  const slowResults = await runPool(unknown, verifyUnknown, 2, 2500);
+  // Warm-up antes do slow path: 1 GET em www.tiktok.com/ pega ttwid/msToken
+  // que reduzem flag de bot no /live scrape seguinte.
+  await warmupSession();
+
+  // Slow path: /live é Akamai-protegido. Serial (concurrency 1), gap 4000ms
+  // base + jitter ±50% (= 2-6s), circuit breaker em 3 blocked consecutivos.
+  const slowResults = await runPool(unknown, verifyUnknown, 1, 4000, 3);
 
   const deferredResults = deferred.map((c) => ({ handle: c.handle, outcome: "deferred" }));
   return [...fastResults, ...slowResults, ...deferredResults];

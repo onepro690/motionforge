@@ -1829,6 +1829,7 @@ export interface CollectResult {
   debug: {
     feedAll: number;
     feedHot: number;
+    lobbyRooms: number;
     dbPool: number;
     highPriority: number;
     withRoomId: number; // quantos candidatos já têm roomId cacheado (fast path)
@@ -1851,12 +1852,16 @@ export async function collectCandidatePool(userId: string): Promise<CollectResul
   // Cache-hit window: roomId visto há menos de 24h é válido pra fast-path.
   const roomIdFresh = new Date(Date.now() - 24 * 60 * 60 * 1000);
 
-  const [feedResult, highPriority, dbPool, seenLiveFromUser] = await Promise.all([
+  const [feedResult, lobbyRooms, highPriority, dbPool, seenLiveFromUser] = await Promise.all([
     fetchTikwmFeedAll().catch(() => ({
       all: [] as Candidate[],
       hot: [] as Candidate[],
       stats: { ok: 0, empty: 0 },
     })),
+    // Lobby /live page rotada 32× — extrai rooms ATIVAS com roomId embutido.
+    // Não bate em /@handle/live (Akamai-protegido), bate em /live raiz.
+    // Rooms daqui entram direto no fast path do worker.
+    fetchLobbyRotated().catch(() => [] as DiscoveredRoom[]),
     prisma.ugcKnownCreator.findMany({
       where: {
         region: "BR",
@@ -1902,7 +1907,14 @@ export async function collectCandidatePool(userId: string): Promise<CollectResul
 
   // Lookup O(1) pra enriquecer fontes externas (hot, feed) com roomId cacheado.
   const roomIdCache = new Map<string, string>();
+  // Lobby da TikTok acabou de devolver roomIds ativos agora — prioridade máxima.
+  for (const r of lobbyRooms) {
+    if (r.roomId && /^\d{15,}$/.test(r.roomId)) {
+      roomIdCache.set(r.handle, r.roomId);
+    }
+  }
   for (const h of highPriority) {
+    if (roomIdCache.has(h.handle)) continue; // lobby tem roomId mais fresco
     if (
       h.lastKnownRoomId &&
       /^\d{15,}$/.test(h.lastKnownRoomId) &&
@@ -1944,7 +1956,20 @@ export async function collectCandidatePool(userId: string): Promise<CollectResul
   const withRoomId = (handle: string) => roomIdCache.get(handle);
 
   // Ordem de inserção = prioridade de verificação (workers processam em fila).
-  // 1. HOT — posts com "ao vivo agora" no título
+  // 1. LOBBY — rooms ativas do TikTok /live page, todas com roomId
+  for (const r of lobbyRooms) {
+    if (!map.has(r.handle) && r.roomId) {
+      map.set(r.handle, {
+        handle: r.handle,
+        nickname: r.nickname || r.handle,
+        avatarUrl: r.avatarUrl || undefined,
+        roomId: r.roomId,
+        source: "hot",
+      });
+    }
+  }
+
+  // 2. HOT — posts com "ao vivo agora" no título
   for (const c of feedResult.hot) {
     if (!map.has(c.handle)) {
       map.set(c.handle, {
@@ -2023,6 +2048,7 @@ export async function collectCandidatePool(userId: string): Promise<CollectResul
     debug: {
       feedAll: feedResult.all.length,
       feedHot: feedResult.hot.length,
+      lobbyRooms: lobbyRooms.length,
       dbPool: dbPool.length,
       highPriority: highPriority.length,
       withRoomId: roomIdCache.size,
