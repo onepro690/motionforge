@@ -134,9 +134,9 @@ const SEED_SHOP_CREATORS = [
   "shoptiktokbr", "lojavirtualbr", "ofertabrasil", "achadoseconomias",
 ];
 
-// ── Tikwm fetch helper (rotas passam pelo scraper7 quando há chave) ─────────
-// tiktok-scraper7 na RapidAPI é proxy dos endpoints tikwm com IPs residenciais.
-// Quando tem apiKey + host scraper7, reescreve URL. api23 mantém endpoints /api/live/*.
+// ── RapidAPI run-state ──────────────────────────────────────────────────────
+// Setado no início de scrapeLiveSessions. checkLiveStatus usa pra bypassar
+// WAF via proxy residencial. tikwm.com calls ficam diretos (tikwm não é blocked).
 
 let _runApiKey: string | undefined;
 let _runApiHost = "tiktok-scraper7.p.rapidapi.com";
@@ -145,28 +145,6 @@ function providerFromHost(host: string): "scraper7" | "api23" | "other" {
   if (host.includes("scraper7") || host.includes("tikwm")) return "scraper7";
   if (host.includes("api23")) return "api23";
   return "other";
-}
-
-// Transforma URL tikwm.com → proxy rapidapi quando há chave
-function tikwmProxyUrl(tikwmUrl: string): string {
-  if (!_runApiKey) return tikwmUrl;
-  const provider = providerFromHost(_runApiHost);
-  if (provider !== "scraper7") return tikwmUrl;
-  const u = new URL(tikwmUrl);
-  // scraper7 usa mesmos paths do tikwm mas sem /api prefix em alguns endpoints.
-  // Mantemos /api/ porque scraper7 aceita ambos.
-  return `https://${_runApiHost}${u.pathname}${u.search}`;
-}
-
-function tikwmHeaders(): Record<string, string> {
-  if (!_runApiKey || providerFromHost(_runApiHost) !== "scraper7") {
-    return { "User-Agent": randomUA() };
-  }
-  return {
-    "x-rapidapi-key": _runApiKey,
-    "x-rapidapi-host": _runApiHost,
-    "Accept": "application/json",
-  };
 }
 
 // ── Tikwm user info (pra manual add + verificação alt) ──────────────────────
@@ -180,10 +158,11 @@ export interface TikwmUserInfo {
 }
 
 export async function fetchTikwmUserInfo(handle: string): Promise<TikwmUserInfo | null> {
-  const url = tikwmProxyUrl(`https://www.tikwm.com/api/user/info?unique_id=${encodeURIComponent(handle)}`);
+  // tikwm.com NÃO é bloqueado pelo WAF — chamada direta é mais rápida
+  const url = `https://www.tikwm.com/api/user/info?unique_id=${encodeURIComponent(handle)}`;
   try {
     const res = await fetch(url, {
-      headers: tikwmHeaders(),
+      headers: { "User-Agent": randomUA() },
       signal: AbortSignal.timeout(10_000),
     });
     if (!res.ok) return null;
@@ -326,12 +305,12 @@ async function fetchTikwmFeedPage(
   sortType = 0,
 ): Promise<Candidate[]> {
   // publish_time=0 = all time. Antes estava 1 (today) que restringia demais.
-  const url = tikwmProxyUrl(`https://www.tikwm.com/api/feed/search?keywords=${encodeURIComponent(
+  const url = `https://www.tikwm.com/api/feed/search?keywords=${encodeURIComponent(
     keyword,
-  )}&count=30&cursor=${cursor}&region=br&publish_time=0&sort_type=${sortType}`);
+  )}&count=30&cursor=${cursor}&region=br&publish_time=0&sort_type=${sortType}`;
   try {
     const res = await fetch(url, {
-      headers: tikwmHeaders(),
+      headers: { "User-Agent": randomUA() },
       signal: AbortSignal.timeout(12_000),
     });
     if (!res.ok) return [];
@@ -424,10 +403,10 @@ interface TikwmUser {
 }
 
 async function fetchTikwmFollowing(handle: string, cursor = 0): Promise<TikwmUser[]> {
-  const url = tikwmProxyUrl(`https://www.tikwm.com/api/user/following?unique_id=${encodeURIComponent(handle)}&count=30&cursor=${cursor}`);
+  const url = `https://www.tikwm.com/api/user/following?unique_id=${encodeURIComponent(handle)}&count=30&cursor=${cursor}`;
   try {
     const res = await fetch(url, {
-      headers: tikwmHeaders(),
+      headers: { "User-Agent": randomUA() },
       signal: AbortSignal.timeout(12_000),
     });
     if (!res.ok) return [];
@@ -443,10 +422,10 @@ async function fetchTikwmFollowing(handle: string, cursor = 0): Promise<TikwmUse
 }
 
 async function fetchTikwmFollowers(handle: string, cursor = 0): Promise<TikwmUser[]> {
-  const url = tikwmProxyUrl(`https://www.tikwm.com/api/user/followers?unique_id=${encodeURIComponent(handle)}&count=30&cursor=${cursor}`);
+  const url = `https://www.tikwm.com/api/user/followers?unique_id=${encodeURIComponent(handle)}&count=30&cursor=${cursor}`;
   try {
     const res = await fetch(url, {
-      headers: tikwmHeaders(),
+      headers: { "User-Agent": randomUA() },
       signal: AbortSignal.timeout(12_000),
     });
     if (!res.ok) return [];
@@ -980,14 +959,18 @@ export interface RapidApiLive {
 
 // Lista lives ativas por região. Bypass total do WAF — API paga acessa
 // endpoints internos do TikTok com proxies residenciais.
-// Tenta múltiplos endpoints pra cobrir api23, scraper7, tokapi e scraptik.
+// api23 tem endpoint dedicado; scraper7 NÃO expõe live discovery — nesse caso
+// retorna vazio e confia no fetchTikwmFeedAll + checkLiveViaRapidApi per-user.
 async function fetchRapidApiLiveFeed(apiKey: string, host: string): Promise<RapidApiLive[]> {
   const rooms: RapidApiLive[] = [];
   const seen = new Set<string>();
   const provider = providerFromHost(host);
 
-  const endpoints = provider === "api23"
-    ? [
+  // scraper7 não tem "lista todas as lives" — skip pra evitar falsos positivos
+  // (/feed/list devolve vídeos, não rooms; walk confundia os dois)
+  if (provider !== "api23") return [];
+
+  const endpoints = [
         `https://${host}/api/live/feed?region=BR&limit=50`,
         `https://${host}/api/live/feed?region=BR&limit=50&page=2`,
         `https://${host}/api/live/feed?region=BR&limit=50&page=3`,
@@ -995,16 +978,6 @@ async function fetchRapidApiLiveFeed(apiKey: string, host: string): Promise<Rapi
         `https://${host}/api/live/feed?limit=50&page=2`,
         `https://${host}/api/live/popular?region=BR&limit=50`,
         `https://${host}/api/live/ranklist?region=BR`,
-      ]
-    : [
-        // scraper7 / tikwm-style — tenta live discovery + recommend + challenge
-        `https://${host}/live/recommend?region=br`,
-        `https://${host}/live/feed?region=br`,
-        `https://${host}/live/popular?region=br`,
-        `https://${host}/api/live/recommend?region=br`,
-        `https://${host}/api/live/feed?region=br`,
-        `https://${host}/feed/list?region=br&count=30`,
-        `https://${host}/challenge/posts?keywords=aovivo&count=30`,
       ];
 
   for (const url of endpoints) {
@@ -1068,10 +1041,9 @@ async function checkLiveViaRapidApi(apiKey: string, host: string, handle: string
   const urls = provider === "api23"
     ? [`https://${host}/api/live/check-alive?uniqueId=${encodeURIComponent(handle)}`]
     : [
-        `https://${host}/api/user/info?unique_id=${encodeURIComponent(handle)}`,
-        `https://${host}/user/info?unique_id=${encodeURIComponent(handle)}`,
-        `https://${host}/live/info?unique_id=${encodeURIComponent(handle)}`,
-        `https://${host}/live/check?unique_id=${encodeURIComponent(handle)}`,
+        // scraper7 wraps tikwm — endpoint oficial tikwm pra live check
+        `https://${host}/api/user/live?unique_id=${encodeURIComponent(handle)}`,
+        `https://${host}/user/live?unique_id=${encodeURIComponent(handle)}`,
       ];
 
   for (const url of urls) {
@@ -1088,7 +1060,26 @@ async function checkLiveViaRapidApi(apiKey: string, host: string, handle: string
       const text = await res.text();
       let d: unknown;
       try { d = JSON.parse(text); } catch { continue; }
-      const raw = d as { data?: { status?: number; room?: { id_str?: string; title?: string; user_count?: number; like_count?: number; has_commerce_goods?: boolean; goods_num?: number; create_time?: number }; user?: { roomId?: string; liveRoomId?: string; room_id?: string }; liveRoom?: { status?: number; roomId?: string; title?: string } }; isLive?: boolean; roomId?: string };
+      const raw = d as {
+        code?: number;
+        msg?: string;
+        data?: {
+          status?: number;
+          room_id?: string | number;
+          title?: string;
+          cover_url?: string;
+          user_count?: number;
+          like_count?: number;
+          create_time?: number;
+          has_commerce_goods?: boolean;
+          goods_num?: number;
+          room?: { id_str?: string; title?: string; user_count?: number; like_count?: number; has_commerce_goods?: boolean; goods_num?: number; create_time?: number };
+          user?: { roomId?: string; liveRoomId?: string; room_id?: string | number };
+          liveRoom?: { status?: number; roomId?: string; title?: string };
+        };
+        isLive?: boolean;
+        roomId?: string;
+      };
 
       // api23 shape
       if (raw.data?.status === 2 && raw.data?.room?.id_str) {
@@ -1104,12 +1095,34 @@ async function checkLiveViaRapidApi(apiKey: string, host: string, handle: string
         };
       }
 
-      // tikwm/scraper7 user/info shape — pode vir liveRoomId ou room_id embedded
+      // tikwm/scraper7 /api/user/live shape — code:0 data com room_id direto
+      if (raw.code === 0 && raw.data?.room_id) {
+        const rid = String(raw.data.room_id);
+        if (/^\d{10,}$/.test(rid)) {
+          return {
+            isLive: true,
+            roomId: rid,
+            title: raw.data.title,
+            coverUrl: raw.data.cover_url,
+            userCount: raw.data.user_count,
+            enterCount: raw.data.like_count,
+            startedAt: raw.data.create_time ? raw.data.create_time * 1000 : undefined,
+            hasCommerce: raw.data.has_commerce_goods === true || (typeof raw.data.goods_num === "number" && raw.data.goods_num > 0) || COMMERCE_REGEX.test(text),
+          };
+        }
+      }
+
+      // tikwm retorna code !== 0 quando user não tá live (definitivo)
+      if (typeof raw.code === "number" && raw.code !== 0) {
+        return { isLive: false };
+      }
+
+      // user/info shape — pode vir liveRoomId ou room_id embedded
       const userRoom = raw.data?.user?.roomId ?? raw.data?.user?.liveRoomId ?? raw.data?.user?.room_id;
-      if (typeof userRoom === "string" && /^\d{10,}$/.test(userRoom)) {
+      if (userRoom && /^\d{10,}$/.test(String(userRoom))) {
         return {
           isLive: true,
-          roomId: userRoom,
+          roomId: String(userRoom),
           hasCommerce: COMMERCE_REGEX.test(text),
         };
       }
@@ -1125,7 +1138,7 @@ async function checkLiveViaRapidApi(apiKey: string, host: string, handle: string
       }
 
       // Resposta válida mas user offline → definitivo
-      if (raw.data && !raw.data.status && !raw.data.liveRoom && !raw.data.user?.roomId) {
+      if (raw.data && !raw.data.status && !raw.data.liveRoom && !raw.data.user?.roomId && !raw.data.room_id) {
         return { isLive: false };
       }
     } catch {
