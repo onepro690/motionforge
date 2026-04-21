@@ -962,25 +962,30 @@ export interface RapidApiLive {
 //   { data: [ { live_info: { raw_data: "<JSON string>" } } ] }
 // O raw_data é JSON escapado com o room completo (id_str, status, title,
 // owner, user_count, cover, has_commerce_goods, etc).
-// BASIC plan do api23 tem rate limit agressivo (~100/h). Mantém só 8 keywords
-// e concurrency=1 pra não estourar cota numa única rodada.
+// BASIC plan do api23 tem rate limit MUITO apertado (provavelmente ~5-10/h).
+// Mantém só 3 keywords genéricas — search/live já devolve até 20 rooms por
+// chamada, então 3 keywords × 20 = 60 rooms potenciais por rodada.
 const SEARCH_LIVE_KEYWORDS = [
   "live shop brasil",
-  "tiktok shop brasil",
+  "tiktok shop",
   "aovivo brasil",
-  "live ofertas",
-  "liveshop",
-  "estou ao vivo",
-  "live vendendo",
-  "oferta relâmpago",
 ];
 
+// Cache in-memory pra reduzir requests quando user clica "Buscar Lives" várias
+// vezes seguidas — evita estourar cota do BASIC plan.
+let _rapidApiCache: { rooms: RapidApiLive[]; at: number } | null = null;
+const RAPIDAPI_CACHE_TTL_MS = 10 * 60 * 1000;
+
 async function fetchRapidApiLiveFeed(apiKey: string, host: string): Promise<RapidApiLive[]> {
+  const provider = providerFromHost(host);
+  if (provider !== "api23") return [];
+
+  if (_rapidApiCache && Date.now() - _rapidApiCache.at < RAPIDAPI_CACHE_TTL_MS) {
+    return _rapidApiCache.rooms;
+  }
+
   const rooms: RapidApiLive[] = [];
   const seen = new Set<string>();
-  const provider = providerFromHost(host);
-
-  if (provider !== "api23") return [];
 
   // Monta URLs de search/live com cada keyword. Região opcional.
   const urls = SEARCH_LIVE_KEYWORDS.map(
@@ -1065,6 +1070,7 @@ async function fetchRapidApiLiveFeed(apiKey: string, host: string): Promise<Rapi
   });
   await Promise.all(workers);
 
+  if (rooms.length > 0) _rapidApiCache = { rooms, at: Date.now() };
   return rooms;
 }
 
