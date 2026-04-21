@@ -42,11 +42,17 @@ export async function GET(request: NextRequest) {
     if (!key) return NextResponse.json({ error: "no key" }, { status: 400 });
     const host = "tiktok-scraper7.p.rapidapi.com";
     const paths = [
-      `/api/user/live?unique_id=${handle}`,
-      `/user/live?unique_id=${handle}`,
-      `/api/user/info?unique_id=${handle}`,
       `/user/info?unique_id=${handle}`,
-      `/`,
+      `/user/info/v2?unique_id=${handle}`,
+      `/live/check?unique_id=${handle}`,
+      `/check/live?unique_id=${handle}`,
+      `/live/room?unique_id=${handle}`,
+      `/live/search?keywords=live`,
+      `/live/list?region=br`,
+      `/feed/live?region=br`,
+      `/popular/live?region=br`,
+      `/recommend/live?region=br`,
+      `/endpoints`,
     ];
     const out: Array<{ path: string; status: number; rateLimitHeaders: Record<string, string>; bodyPreview: string }> = [];
     for (const p of paths) {
@@ -57,12 +63,12 @@ export async function GET(request: NextRequest) {
         });
         const rateLimitHeaders: Record<string, string> = {};
         res.headers.forEach((v, k) => {
-          if (k.toLowerCase().includes("rate") || k.toLowerCase().includes("quota") || k.toLowerCase().includes("limit") || k.toLowerCase() === "x-ratelimit-remaining" || k.toLowerCase() === "x-ratelimit-requests-remaining") {
+          if (k.toLowerCase().includes("rate") || k.toLowerCase().includes("quota") || k.toLowerCase().includes("limit")) {
             rateLimitHeaders[k] = v;
           }
         });
         const body = await res.text();
-        out.push({ path: p, status: res.status, rateLimitHeaders, bodyPreview: body.slice(0, 500) });
+        out.push({ path: p, status: res.status, rateLimitHeaders, bodyPreview: body.slice(0, 800) });
       } catch (e) {
         out.push({ path: p, status: -1, rateLimitHeaders: {}, bodyPreview: String(e).slice(0, 500) });
       }
