@@ -21,6 +21,7 @@ import {
   Radio,
   UserCircle,
   FileVideo,
+  ScanFace,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import {
@@ -49,6 +50,7 @@ const ugcNavItems = [
   { href: "/ugc/review", label: "Review", icon: LayoutDashboard },
   { href: "/ugc/lives", label: "Lives Shop", icon: Radio },
   { href: "/ugc/personagens", label: "Personagens", icon: UserCircle },
+  { href: "/ugc/face-swap", label: "Trocar Rosto", icon: ScanFace },
   { href: "/ugc/converter", label: "Conversor MP4", icon: FileVideo },
 ];
 

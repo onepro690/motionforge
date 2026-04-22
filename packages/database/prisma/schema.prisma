@@ -582,6 +582,28 @@ model UgcCharacter {
   @@map("ugc_characters")
 }
 
+// Face swap em vídeo arbitrário do usuário (não vinculado a produto/TikTok).
+// Fluxo: user faz upload do vídeo e escolhe um UgcCharacter; submetemos pro
+// Fal Pixverse Swap (same engine que fidelity_clone usa) preservando áudio.
+// Status: QUEUED → PROCESSING (falRequestId preenchido) → DONE/FAILED.
+model FaceSwapJob {
+  id             String    @id @default(cuid())
+  userId         String
+  characterId    String
+  sourceVideoUrl String
+  falRequestId   String?
+  status         String    @default("QUEUED")
+  resultVideoUrl String?
+  errorMessage   String?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+  completedAt    DateTime?
+
+  @@index([userId])
+  @@index([status])
+  @@map("face_swap_jobs")
+}
+
 // Pool global de creators TikTok descobertos (compartilhado entre users).
 // Crescemos este pool a cada scrape; a próxima checagem verifica TODOS os
 // creators conhecidos + descobre novos.

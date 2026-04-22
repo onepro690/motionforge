@@ -12,6 +12,7 @@ import { NextResponse } from "next/server";
 import { prisma } from "@motion/database";
 import { pollAndAssembleTakes } from "@/lib/ugc/pipeline";
 import { pollFidelityClone, isFidelityClone } from "@/lib/ugc/fidelity-clone";
+import { pollFaceSwap } from "@/lib/ugc/face-swap";
 
 export const maxDuration = 300;
 export const runtime = "nodejs";
@@ -30,19 +31,27 @@ export async function GET(req: Request) {
     select: { id: true, transitionMode: true },
   });
 
-  const results: Array<{ id: string; status: string; ok: boolean; error?: string }> = [];
+  const faceSwapPending = await prisma.faceSwapJob.findMany({
+    where: { status: "PROCESSING" },
+    orderBy: { createdAt: "asc" },
+    take: 10,
+    select: { id: true },
+  });
+
+  const results: Array<{ id: string; kind: string; status: string; ok: boolean; error?: string }> = [];
   for (const v of pending) {
     try {
       if (isFidelityClone(v)) {
         const r = await pollFidelityClone(v.id);
-        results.push({ id: v.id, status: r.status, ok: true });
+        results.push({ id: v.id, kind: "fidelity", status: r.status, ok: true });
       } else {
         const r = await pollAndAssembleTakes(v.id);
-        results.push({ id: v.id, status: r.status, ok: true });
+        results.push({ id: v.id, kind: "takes", status: r.status, ok: true });
       }
     } catch (err) {
       results.push({
         id: v.id,
+        kind: "ugc",
         status: "error",
         ok: false,
         error: err instanceof Error ? err.message : String(err),
@@ -50,5 +59,23 @@ export async function GET(req: Request) {
     }
   }
 
-  return NextResponse.json({ processed: pending.length, results });
+  for (const j of faceSwapPending) {
+    try {
+      const r = await pollFaceSwap(j.id);
+      results.push({ id: j.id, kind: "face-swap", status: r.status, ok: true });
+    } catch (err) {
+      results.push({
+        id: j.id,
+        kind: "face-swap",
+        status: "error",
+        ok: false,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  return NextResponse.json({
+    processed: pending.length + faceSwapPending.length,
+    results,
+  });
 }
