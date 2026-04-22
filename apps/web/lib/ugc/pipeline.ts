@@ -206,7 +206,17 @@ async function submitVeoTake(
     headers: { "Content-Type": "application/json", Authorization: `Bearer ${accessToken}` },
     body: JSON.stringify({
       instances: [instance],
-      parameters: { aspectRatio: "9:16", durationSeconds, sampleCount: 1 },
+      parameters: {
+        aspectRatio: "9:16",
+        durationSeconds,
+        sampleCount: 1,
+        // Default do Vertex bloqueia muita coisa (close-up de boca com
+        // objetos, peles com tatuagens, etc). "allow_adult" autoriza
+        // geração de adultos — rejeita só menores/conteúdo explícito.
+        // Necessário pra vídeos tipo raspador de língua, maquiagem, skincare,
+        // onde o close facial trigga o default "dont_allow".
+        personGeneration: "allow_adult",
+      },
     }),
   });
   const data = (await res.json()) as { name?: string; error?: { message: string } };
