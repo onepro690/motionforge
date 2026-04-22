@@ -17,9 +17,18 @@ import { tmpdir } from "os";
 import { join } from "path";
 import ffmpegInstaller from "@ffmpeg-installer/ffmpeg";
 
+// half-moon-ai/ai-face-swap/faceswapvideo:
+//   - True face swap (preserva 100% do movimento, expressão, áudio do
+//     vídeo original). Pixverse que usávamos antes era generativo e
+//     deformava a ação (ex: vídeo com raspador de língua virou "sorriso
+//     genérico"). Novo modelo SÓ troca a identidade.
+//   - Aceita até 25min por request (FPS cap 25).
+//   - occlusion=true habilita modelo ciente de oclusão (mãos/objetos
+//     cobrindo rosto). Custa 2x mais mas é essencial pra vídeos tipo
+//     tongue scraper, dentista, alimentação. Sempre ligado.
 const FAL_QUEUE = "https://queue.fal.run";
-const FAL_SUBMIT_PATH = "fal-ai/pixverse/swap";
-const FAL_QUEUE_NAMESPACE = "fal-ai/pixverse";
+const FAL_SUBMIT_PATH = "half-moon-ai/ai-face-swap/faceswapvideo";
+const FAL_QUEUE_NAMESPACE = "half-moon-ai/ai-face-swap";
 const MAX_AGE_MS = 120 * 60 * 1000; // 2h pra jobs longos
 const MAX_CONCURRENT_SUBMITS = 5;    // não inundar o Fal de uma vez
 
@@ -41,11 +50,9 @@ async function submitChunkToFal(params: {
     method: "POST",
     headers: { Authorization: `Key ${apiKey}`, "Content-Type": "application/json" },
     body: JSON.stringify({
-      video_url: params.videoUrl,
-      image_url: params.imageUrl,
-      mode: "person",
-      resolution: "720p",
-      original_sound_switch: true,
+      source_face_url: params.imageUrl,
+      target_video_url: params.videoUrl,
+      occlusion: true,
     }),
   });
   if (!res.ok) {

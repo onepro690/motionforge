@@ -11,7 +11,9 @@ import { CharacterAvatar } from "@/components/character-avatar";
 import { toast } from "sonner";
 import { splitVideo, probeVideoDuration } from "@/lib/video-splitter";
 
-const CHUNK_SECONDS = 60;
+// half-moon-ai aceita até 25min por request; usamos 20min por chunk pra
+// margem de segurança. Vídeo de 1h30m vira ~5 chunks.
+const CHUNK_SECONDS = 20 * 60;
 
 interface Character {
   id: string;
@@ -143,7 +145,7 @@ export default function FaceSwapPage() {
       setPhaseMsg(
         totalExpected === 1
           ? "Enviando vídeo..."
-          : `Splitando em ${totalExpected} pedaços de ${CHUNK_SECONDS}s...`,
+          : `Splitando em ${totalExpected} pedaços de ${CHUNK_SECONDS / 60}min...`,
       );
 
       await splitVideo(videoFile, {
@@ -231,7 +233,7 @@ export default function FaceSwapPage() {
           Trocar Rosto no Vídeo
         </h1>
         <p className="text-sm text-white/40 mt-1">
-          Suba um vídeo (até 2GB). Pra vídeos longos, splitamos em pedaços de 60s e processamos em paralelo — áudio e voz originais preservados.
+          Suba um vídeo (até 2GB). True face swap — preserva 100% do movimento, expressão e áudio originais. Vídeos longos são splitados em pedaços de 20min e processados em paralelo.
         </p>
       </div>
 
@@ -247,8 +249,8 @@ export default function FaceSwapPage() {
                   <Scissors className="w-3 h-3" />
                   {formatDuration(videoDuration)} ·{" "}
                   {expectedChunks! > 1
-                    ? `será splitado em ${expectedChunks} pedaços de ${CHUNK_SECONDS}s`
-                    : "vídeo curto, processado em 1 chunk só"}
+                    ? `será splitado em ${expectedChunks} pedaços de ${CHUNK_SECONDS / 60}min`
+                    : "vídeo curto, processado em 1 request só"}
                 </p>
               )}
               <button
@@ -345,7 +347,7 @@ export default function FaceSwapPage() {
             )}
           </Button>
           <p className="text-xs text-white/30 mt-2">
-            Vídeo curto: ~2-5min. Vídeo longo: cada pedaço de 60s vira 1 request Pixverse (~$0.10-0.30 cada).
+            True face swap — preserva TODO o vídeo original, só muda o rosto. Modelo com occlusion ligado (lida com mãos/objetos na frente do rosto).
           </p>
           {busy && phaseProgress > 0 && (
             <div className="mt-3 h-1.5 w-full max-w-md bg-white/5 rounded overflow-hidden">
