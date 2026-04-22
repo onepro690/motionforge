@@ -316,15 +316,25 @@ export async function generateVeoPrompts(
   // locks ANTES da ação do Gemini e Veo ignorava a ação.
   // ──────────────────────────────────────────────────────────────────────
 
-  // Constrói um bloco de instruções de reprodução a partir da TAKE_SPEC ou das cenas.
+  // Extrai a ação física/demonstrativa do take — vai virar a PRIMEIRA frase
+  // do prompt Veo. Veo 3 pesa brutalmente o começo: se a ação específica
+  // ficar enterrada depois de "reproduces seconds 0-5s", o modelo ignora e
+  // usa priors genéricos (pessoa sorrindo pra câmera).
+  const buildActionHeadline = (i: number): string => {
+    const spec = takeSpecs?.[i];
+    const sceneForTake = scenes?.[i];
+    const action = spec?.exactAction ?? sceneForTake?.action ?? "";
+    return action.trim();
+  };
+
+  // Bloco de contexto secundário: visuals, framing, background, wardrobe.
+  // Vem DEPOIS da headline de ação pra não competir com ela.
   const buildReferenceBlock = (i: number): string => {
     const spec = takeSpecs?.[i];
     const sceneForTake = scenes?.[i];
     const parts: string[] = [];
 
     if (spec) {
-      parts.push(`REFERENCE SEGMENT: this take reproduces seconds ${spec.startTime.toFixed(1)}s–${spec.endTime.toFixed(1)}s of the original video (duration ${spec.duration.toFixed(1)}s).`);
-      if (spec.exactAction) parts.push(`Reproduce this EXACT action: "${spec.exactAction}".`);
       if (spec.exactVisuals) parts.push(`Match these EXACT visuals: "${spec.exactVisuals}".`);
       if (spec.exactFraming) parts.push(`Keep the framing as "${spec.exactFraming}".`);
       if (spec.exactBackground) parts.push(`Background: "${spec.exactBackground}".`);
@@ -332,8 +342,9 @@ export async function generateVeoPrompts(
       if (spec.peopleCount > 1) {
         parts.push(`People count: EXACTLY ${spec.peopleCount} people visible — do NOT merge them, do NOT remove any, do NOT add more.`);
       }
+      parts.push(`(This take reproduces seconds ${spec.startTime.toFixed(1)}s–${spec.endTime.toFixed(1)}s of the original, duration ${spec.duration.toFixed(1)}s.)`);
     } else if (sceneForTake) {
-      parts.push(`REFERENCE SEGMENT (${sceneForTake.timeRange ?? `take ${i + 1}`}): reproduce this EXACT action: "${sceneForTake.action}". Match these visuals: "${sceneForTake.visuals}".`);
+      parts.push(`Match these visuals: "${sceneForTake.visuals}".`);
       if (sceneForTake.peopleCount && sceneForTake.peopleCount > 1) {
         parts.push(`People count: EXACTLY ${sceneForTake.peopleCount} people visible — preserve all of them.`);
       }
@@ -403,14 +414,23 @@ export async function generateVeoPrompts(
       const looksLikeGroup = /\b(grupo|várias pessoas|varias pessoas|muita gente|multidão|multidao|coro|crowd|group|together|juntas|juntos|todos|todas|em uníssono|em unissono)\b/.test(visualsText);
       const effectiveMode = speakerMode !== "solo" && speakerMode !== "none" ? speakerMode : (looksLikeGroup ? "group_unison" : "solo");
       const peopleCount = spec?.peopleCount ?? sceneForTake?.peopleCount ?? 1;
+      const actionHeadline = buildActionHeadline(i);
 
-      // 1) Opening directive (short)
+      // 1) ACTION HEADLINE — primeira frase do prompt, máxima prioridade.
+      // Veo 3 pondera o início do prompt de forma desproporcional; quando a
+      // ação específica fica enterrada no meio, o modelo cai no prior genérico
+      // (pessoa sorrindo falando pra câmera) e ignora a demonstração física.
+      const actionBlock = actionHeadline
+        ? `PHYSICAL ACTION (MANDATORY, EVERY FRAME): ${actionHeadline}. Perform this action CONTINUOUSLY for the entire take — do NOT replace it with a generic smile, nod, or neutral pose. Hands/face/body must visibly execute the described gesture with the described object. If the action is not visible in the output, the generation is WRONG.`
+        : "";
+
+      // 2) Opening directive (short)
       const opener = `REENACT THIS REFERENCE SHOT — reproduce the input image's scene exactly. The only thing you may change is the person's identity (use the face/body/skin/hair from the input image). Everything else (scene, camera, framing, lighting, pose, motion, wardrobe, props) must match the input image.`;
 
-      // 2) SCENE (the highest-signal line: what happens, how it looks)
+      // 3) SCENE context (secondary — supports the action block above)
       const sceneLine = referenceBlock
-        ? `SCENE TO REENACT: ${referenceBlock}`
-        : `SCENE TO REENACT: reproduce exactly what the input image shows — same pose, same framing, same action implied by the input.`;
+        ? `SCENE CONTEXT: ${referenceBlock}`
+        : `SCENE CONTEXT: reproduce exactly what the input image shows — same pose, same framing, same action implied by the input.`;
 
       // 3) SPEECH block — literal text, who speaks, lip-sync directive
       let speechBlock: string;
@@ -457,14 +477,25 @@ export async function generateVeoPrompts(
       // 8) Tail dialog lock — repetir texto no final ajuda Veo a não desviar
       const tailDialog = ` FINAL DIALOG LOCK: spoken line is EXACTLY this pt-BR text: "${takeScript}". No English, no Chinese, no paraphrase, no added/skipped words. If unsure of a word, stay silent with mouth closed — never switch language.`;
 
-      prompt = `${opener} ${sceneLine} ${speechBlock}${voiceLine}${continuityLine}${pronLine} ${peopleLock} ${locks}${tailDialog}`;
+      // 9) Tail action lock — se a ação física existe, repete no fim também
+      // (mesmo princípio do tailDialog: Veo valoriza início E fim do prompt).
+      const tailAction = actionHeadline
+        ? ` FINAL ACTION LOCK: the subject is performing THIS action throughout the entire take: "${actionHeadline}". NOT smiling idly, NOT just talking — actively performing the physical gesture described.`
+        : "";
+
+      prompt = `${actionBlock ? actionBlock + " " : ""}${opener} ${sceneLine} ${speechBlock}${voiceLine}${continuityLine}${pronLine} ${peopleLock} ${locks}${tailDialog}${tailAction}`;
     } else {
       // ── SILENT / VOICEOVER REENACTMENT ────────────────────────────────
+      const actionHeadline = buildActionHeadline(i);
+      const actionBlock = actionHeadline
+        ? `PHYSICAL ACTION (MANDATORY, EVERY FRAME): ${actionHeadline}. Perform this action CONTINUOUSLY for the entire take — do NOT replace it with a generic smile, nod, or neutral pose. Hands/face/body must visibly execute the described gesture with the described object. If the action is not visible in the output, the generation is WRONG.`
+        : "";
+
       const opener = `REENACT THIS REFERENCE SHOT — reproduce the input image's scene exactly. The only thing you may change is the person's identity (use the face/body/skin/hair from the input image). Everything else (scene, camera, framing, lighting, pose, motion, wardrobe, props) must match the input image.`;
 
       const sceneLine = referenceBlock
-        ? `SCENE TO REENACT: ${referenceBlock}`
-        : `SCENE TO REENACT: reproduce exactly what the input image shows — same pose, same framing, same action implied by the input.`;
+        ? `SCENE CONTEXT: ${referenceBlock}`
+        : `SCENE CONTEXT: reproduce exactly what the input image shows — same pose, same framing, same action implied by the input.`;
 
       const audioLine = isSilent
         ? `SILENCE: mouth stays CLOSED throughout the take — NO lip-sync, NO speech, NO singing, NO mouthing. AUDIO: ambient only, ZERO voices.`
@@ -472,7 +503,11 @@ export async function generateVeoPrompts(
 
       const locks = combinedLockBlock(false);
 
-      prompt = `${opener} ${sceneLine} ${audioLine} ${peopleLock} ${locks}`;
+      const tailAction = actionHeadline
+        ? ` FINAL ACTION LOCK: the subject is performing THIS action throughout the entire take: "${actionHeadline}". NOT smiling idly — actively performing the physical gesture described.`
+        : "";
+
+      prompt = `${actionBlock ? actionBlock + " " : ""}${opener} ${sceneLine} ${audioLine} ${peopleLock} ${locks}${tailAction}`;
     }
 
     result[key] = prompt;

@@ -579,8 +579,8 @@ Retorne APENAS um JSON com esta estrutura:
   },
   "sceneCount": N,
   "scenes": [
-    { "timeRange": "0-Xs", "action": "ação EXATA (ex: segura o vestido rosa na frente do corpo)", "visuals": "visual DETALHADO: cor EXATA da roupa/produto, posição da pessoa, objetos, fundo (ex: 'mulher segura vestido ROSA em cabide, fundo branco, espelho à esquerda')", "peopleCount": N, "speakerMode": "none" | "solo" | "group_unison" | "multiple_alternating", "continuesPreviousScene": false },
-    { "timeRange": "Xs-Ys", "action": "ação EXATA da segunda cena", "visuals": "visual DETALHADO com cor/variante EXATA (ex: 'mulher veste vestido AZUL, gira mostrando o caimento')", "peopleCount": N, "speakerMode": "...", "continuesPreviousScene": true|false }
+    { "timeRange": "0-Xs", "action": "ação EXATA descrita VERBO-POR-VERBO com detalhes físicos de manipulação do objeto/produto — mãos, rosto, corpo, ferramentas envolvidas. NÃO resuma. NÃO use abstrações genéricas (ex NÃO FAZ: 'usa o produto'). Exemplos BONS: 'pega raspador de língua metálico na mão direita, abre a boca, põe a língua pra fora, encosta o raspador na base da língua, puxa com firmeza em direção à ponta raspando toda extensão, retira e mostra o raspador pra câmera' OU 'segura pote de creme na mão esquerda, desrosca a tampa com a direita, mergulha dedo indicador no creme, espalha o creme em linhas no rosto, massageia com movimentos circulares de baixo pra cima'. Se a cena for fala pra câmera sem ação física, descreva expressões e gestos ('encara câmera sorrindo, levanta sobrancelhas, aponta pra produto').", "visuals": "visual DETALHADO: cor EXATA da roupa/produto, posição da pessoa, objetos visíveis, fundo, enquadramento (ex: 'close-up do rosto e mãos de homem de barba, fundo branco de banheiro, raspador metálico prateado visível')", "peopleCount": N, "speakerMode": "none" | "solo" | "group_unison" | "multiple_alternating", "continuesPreviousScene": false },
+    { "timeRange": "Xs-Ys", "action": "ação EXATA verbo-por-verbo da segunda cena", "visuals": "visual DETALHADO com cor/variante EXATA", "peopleCount": N, "speakerMode": "...", "continuesPreviousScene": true|false }
   ],
   "keyVisualSequence": "descrição compacta da progressão visual do vídeo inteiro, citando CADA cor/variante na ordem exata",
   "productShownAs": "como o produto é mostrado (segurando, vestindo, demonstrando, etc)",
@@ -589,10 +589,12 @@ Retorne APENAS um JSON com esta estrutura:
 }
 
 REGRAS CRÍTICAS:
+- CAMPO "action" É O MAIS IMPORTANTE — descreva VERBO POR VERBO o que as mãos/rosto/corpo fazem com o produto. Se o vídeo é uma demonstração de uso (raspador, creme, maquiagem, ferramenta, comida, etc), a ação precisa ser detalhada o suficiente pra um modelo de vídeo reproduzir o GESTO FÍSICO EXATO — não apenas dizer "usa o produto". Quando a pessoa está apenas falando pra câmera sem manipular nada, descreva expressões (sorriso, sobrancelhas, gestos das mãos).
 - "direct_speech" = pessoa visível falando pra câmera com lip-sync.
 - "voiceover" = narrador em off, pessoa não fala com a câmera.
 - "none" = só música/ambient, ninguém fala.
 - Se o áudio é SÓ música (mesmo com letra cantada) e ninguém narra o produto → "none".
+- IMPORTANTE: se o vídeo é uma DEMONSTRAÇÃO FÍSICA (raspador de língua, aplicação de creme, maquiagem, uso de ferramenta, preparação de comida etc) e a pessoa não fala olhando pra câmera durante o gesto, marque "speakerMode": "none" mesmo que haja narração em off. Isso evita que Veo gere lip-sync sobreposto à ação física.
 - Quando hasNarration=true, voiceStyle DEVE ser preenchido ouvindo o áudio REAL do vídeo. Não use valores genéricos — analise pitch, cadência, entonação, energia, sotaque COMO ELES REALMENTE SOAM. Quando hasNarration=false, voiceStyle=null.
 - "sceneCount" = número TOTAL de cenas distintas. Se o vídeo mostra 4 roupas diferentes, sceneCount=4. Se mostra 2 ângulos do mesmo look, sceneCount=2. CONTE EXATAMENTE quantas cenas tem.
 - O array "scenes" DEVE ter EXATAMENTE sceneCount elementos — um por cena. NÃO agrupe cenas. Se tem 4 trocas de roupa, retorne 4 cenas, NÃO 3.
