@@ -82,8 +82,8 @@ export default function FaceSwapPage() {
       toast.error("Selecione um arquivo de vídeo");
       return;
     }
-    if (file.size > 500 * 1024 * 1024) {
-      toast.error("Vídeo máximo 500MB");
+    if (file.size > 2 * 1024 * 1024 * 1024) {
+      toast.error("Vídeo máximo 2GB");
       return;
     }
     setVideoFile(file);
@@ -175,8 +175,8 @@ export default function FaceSwapPage() {
           ) : (
             <label className="flex flex-col items-center justify-center gap-2 border-2 border-dashed border-white/10 hover:border-violet-500/30 rounded-lg p-10 cursor-pointer transition-colors">
               <Upload className="w-8 h-8 text-white/30" />
-              <span className="text-sm text-white/50">Clique para enviar vídeo (máx. 500MB)</span>
-              <span className="text-xs text-white/30">MP4, MOV, WebM</span>
+              <span className="text-sm text-white/50">Clique para enviar vídeo (máx. 2GB)</span>
+              <span className="text-xs text-white/30">MP4, MOV, WebM — duração recomendada até 60s (limite Pixverse)</span>
               <input
                 type="file"
                 accept="video/mp4,video/quicktime,video/webm"

@@ -26,8 +26,8 @@ export async function POST(request: NextRequest) {
           // For videos, restrict to known types. For images, allow any format (HEIC, AVIF, etc.)
           allowedContentTypes: isVideo ? ALLOWED_VIDEO_TYPES : undefined,
           maximumSizeInBytes: isVideo
-            ? 500 * 1024 * 1024  // 500MB for video
-            : 50 * 1024 * 1024,  // 50MB for image
+            ? 2 * 1024 * 1024 * 1024  // 2GB for video
+            : 50 * 1024 * 1024,       // 50MB for image
           addRandomSuffix: true,
           tokenPayload: JSON.stringify({ userId: session.user.id, fileType }),
         };
