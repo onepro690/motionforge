@@ -36,13 +36,27 @@ export default function FaceSwapPage() {
   const [selectedCharacterId, setSelectedCharacterId] = useState<string>("");
   const [submitting, setSubmitting] = useState(false);
   const [uploadProgress, setUploadProgress] = useState(0);
+  const [refreshingChars, setRefreshingChars] = useState(false);
   const pollTimer = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  const loadCharacters = useCallback(async () => {
+    setRefreshingChars(true);
+    try {
+      const res = await fetch("/api/ugc/characters", { cache: "no-store" });
+      if (res.ok) {
+        const data = await res.json();
+        setCharacters(data.characters);
+      }
+    } finally {
+      setRefreshingChars(false);
+    }
+  }, []);
 
   const loadAll = useCallback(async () => {
     try {
       const [charsRes, jobsRes] = await Promise.all([
-        fetch("/api/ugc/characters"),
-        fetch("/api/ugc/face-swap"),
+        fetch("/api/ugc/characters", { cache: "no-store" }),
+        fetch("/api/ugc/face-swap", { cache: "no-store" }),
       ]);
       if (charsRes.ok) {
         const data = await charsRes.json();
@@ -189,7 +203,19 @@ export default function FaceSwapPage() {
 
         {/* Character select */}
         <div className="space-y-2">
-          <label className="text-sm text-white/60">2. Personagem (novo rosto)</label>
+          <div className="flex items-center justify-between">
+            <label className="text-sm text-white/60">2. Personagem (novo rosto)</label>
+            <Button
+              size="sm"
+              variant="ghost"
+              onClick={loadCharacters}
+              disabled={refreshingChars}
+              className="h-7 text-xs text-white/50 hover:text-white"
+            >
+              <RefreshCw className={`w-3 h-3 mr-1 ${refreshingChars ? "animate-spin" : ""}`} />
+              Atualizar personagens
+            </Button>
+          </div>
           {characters.length === 0 ? (
             <p className="text-xs text-white/40">
               Nenhum personagem cadastrado. Crie um em{" "}
@@ -209,7 +235,16 @@ export default function FaceSwapPage() {
                         : "border-white/10 hover:border-white/30"
                     }`}
                   >
-                    <img src={char.imageUrl} alt={char.name} className="w-full h-full object-cover" />
+                    <img
+                      src={char.imageUrl}
+                      alt={char.name}
+                      loading="lazy"
+                      referrerPolicy="no-referrer"
+                      className="w-full h-full object-cover bg-white/5"
+                      onError={(e) => {
+                        (e.currentTarget as HTMLImageElement).style.opacity = "0.2";
+                      }}
+                    />
                     <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-transparent to-transparent" />
                     <div className="absolute bottom-0 left-0 right-0 p-2">
                       <p className="text-xs font-semibold text-white truncate">{char.name}</p>
