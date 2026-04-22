@@ -7,6 +7,7 @@ import {
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
+import { CharacterAvatar } from "@/components/character-avatar";
 import { toast } from "sonner";
 
 interface Character {
@@ -235,16 +236,7 @@ export default function FaceSwapPage() {
                         : "border-white/10 hover:border-white/30"
                     }`}
                   >
-                    <img
-                      src={char.imageUrl}
-                      alt={char.name}
-                      loading="lazy"
-                      referrerPolicy="no-referrer"
-                      className="w-full h-full object-cover bg-white/5"
-                      onError={(e) => {
-                        (e.currentTarget as HTMLImageElement).style.opacity = "0.2";
-                      }}
-                    />
+                    <CharacterAvatar name={char.name} imageUrl={char.imageUrl} />
                     <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-transparent to-transparent" />
                     <div className="absolute bottom-0 left-0 right-0 p-2">
                       <p className="text-xs font-semibold text-white truncate">{char.name}</p>
@@ -313,11 +305,9 @@ export default function FaceSwapPage() {
                 <div className="flex items-start gap-4">
                   {/* Character avatar */}
                   {job.character ? (
-                    <img
-                      src={job.character.imageUrl}
-                      alt={job.character.name}
-                      className="w-14 h-14 rounded-lg object-cover border border-white/10 flex-shrink-0"
-                    />
+                    <div className="w-14 h-14 rounded-lg overflow-hidden border border-white/10 flex-shrink-0">
+                      <CharacterAvatar name={job.character.name} imageUrl={job.character.imageUrl} />
+                    </div>
                   ) : (
                     <div className="w-14 h-14 rounded-lg bg-white/5 flex items-center justify-center flex-shrink-0">
                       <UserCircle className="w-6 h-6 text-white/20" />

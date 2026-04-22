@@ -6,6 +6,7 @@ import {
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
+import { CharacterAvatar } from "@/components/character-avatar";
 import { toast } from "sonner";
 
 interface Character {
@@ -207,7 +208,7 @@ export default function PersonagensPage() {
           {characters.map((char) => (
             <Card key={char.id} className="bg-white/[0.03] border-white/[0.06] overflow-hidden group">
               <div className="aspect-[3/4] relative">
-                <img src={char.imageUrl} alt={char.name} className="w-full h-full object-cover" />
+                <CharacterAvatar name={char.name} imageUrl={char.imageUrl} />
                 <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-transparent to-transparent" />
                 <div className="absolute bottom-0 left-0 right-0 p-3">
                   <p className="text-sm font-semibold text-white">{char.name}</p>
