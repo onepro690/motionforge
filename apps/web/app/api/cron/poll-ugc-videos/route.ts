@@ -12,7 +12,7 @@ import { NextResponse } from "next/server";
 import { prisma } from "@motion/database";
 import { pollAndAssembleTakes } from "@/lib/ugc/pipeline";
 import { pollFidelityClone, isFidelityClone } from "@/lib/ugc/fidelity-clone";
-import { pollFaceSwap } from "@/lib/ugc/face-swap";
+import { pollFaceSwapJob, startFaceSwapJob } from "@/lib/ugc/face-swap";
 
 export const maxDuration = 300;
 export const runtime = "nodejs";
@@ -29,6 +29,13 @@ export async function GET(req: Request) {
     orderBy: { createdAt: "asc" },
     take: 10,
     select: { id: true, transitionMode: true },
+  });
+
+  const faceSwapQueued = await prisma.faceSwapJob.findMany({
+    where: { status: "QUEUED" },
+    orderBy: { createdAt: "asc" },
+    take: 5,
+    select: { id: true },
   });
 
   const faceSwapPending = await prisma.faceSwapJob.findMany({
@@ -59,9 +66,26 @@ export async function GET(req: Request) {
     }
   }
 
+  // Se algum job ficou em QUEUED (ex: POST bateu timeout antes de submeter),
+  // retoma a submissão no cron.
+  for (const j of faceSwapQueued) {
+    try {
+      await startFaceSwapJob(j.id);
+      results.push({ id: j.id, kind: "face-swap-submit", status: "ok", ok: true });
+    } catch (err) {
+      results.push({
+        id: j.id,
+        kind: "face-swap-submit",
+        status: "error",
+        ok: false,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
   for (const j of faceSwapPending) {
     try {
-      const r = await pollFaceSwap(j.id);
+      const r = await pollFaceSwapJob(j.id);
       results.push({ id: j.id, kind: "face-swap", status: r.status, ok: true });
     } catch (err) {
       results.push({
@@ -75,7 +99,7 @@ export async function GET(req: Request) {
   }
 
   return NextResponse.json({
-    processed: pending.length + faceSwapPending.length,
+    processed: pending.length + faceSwapQueued.length + faceSwapPending.length,
     results,
   });
 }

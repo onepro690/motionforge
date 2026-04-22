@@ -583,25 +583,48 @@ model UgcCharacter {
 }
 
 // Face swap em vídeo arbitrário do usuário (não vinculado a produto/TikTok).
-// Fluxo: user faz upload do vídeo e escolhe um UgcCharacter; submetemos pro
-// Fal Pixverse Swap (same engine que fidelity_clone usa) preservando áudio.
-// Status: QUEUED → PROCESSING (falRequestId preenchido) → DONE/FAILED.
+// Browser splita vídeos longos em chunks de ~60s (ffmpeg.wasm); servidor
+// submete cada chunk pro Fal Pixverse Swap em paralelo; quando todos
+// terminam faz concat e gera o vídeo final. Para vídeos curtos (<60s)
+// ainda é 1 chunk apenas.
+// Status: QUEUED → PROCESSING → MERGING → DONE / FAILED.
 model FaceSwapJob {
-  id             String    @id @default(cuid())
-  userId         String
+  id              String    @id @default(cuid())
+  userId          String
   characterId    String
-  sourceVideoUrl String
-  falRequestId   String?
-  status         String    @default("QUEUED")
-  resultVideoUrl String?
-  errorMessage   String?
-  createdAt      DateTime  @default(now())
-  updatedAt      DateTime  @updatedAt
-  completedAt    DateTime?
+  sourceVideoUrl  String?
+  status          String    @default("QUEUED")
+  resultVideoUrl  String?
+  errorMessage    String?
+  totalChunks     Int       @default(0)
+  completedChunks Int       @default(0)
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+  completedAt     DateTime?
+  chunks          FaceSwapChunk[]
 
   @@index([userId])
   @@index([status])
   @@map("face_swap_jobs")
+}
+
+// Um pedaço de 60s do vídeo original submetido ao Fal individualmente.
+model FaceSwapChunk {
+  id           String      @id @default(cuid())
+  jobId        String
+  job          FaceSwapJob @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  index        Int
+  sourceUrl    String
+  falRequestId String?
+  resultUrl    String?
+  status       String      @default("QUEUED")
+  errorMessage String?
+  createdAt    DateTime    @default(now())
+  updatedAt    DateTime    @updatedAt
+
+  @@index([jobId])
+  @@index([status])
+  @@map("face_swap_chunks")
 }
 
 // Pool global de creators TikTok descobertos (compartilhado entre users).
