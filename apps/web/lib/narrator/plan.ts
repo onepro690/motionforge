@@ -34,6 +34,7 @@ export async function planNarratorSegments({ copy, takeCount, vibe }: PlanArgs):
 
   const system = [
     "Você divide narrações em segmentos visuais para um motor de vídeo (Veo 3).",
+    "Responda SEMPRE em JSON puro no schema fornecido pelo usuário, sem markdown nem explicação fora do JSON.",
     "Regras invioláveis:",
     "1. Concatenar os campos `text` dos segmentos na ordem retornada DEVE reproduzir a copy original PALAVRA POR PALAVRA — sem omitir, adicionar, reescrever ou parafrasear nada. Mantenha pontuação e espaços.",
     "2. Você DEVE retornar exatamente o número de segmentos pedido.",
