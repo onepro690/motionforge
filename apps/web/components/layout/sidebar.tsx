@@ -22,6 +22,7 @@ import {
   UserCircle,
   FileVideo,
   ScanFace,
+  Mic,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import {
@@ -37,6 +38,7 @@ const navItems = [
   { href: "/dashboard", label: "Dashboard", icon: LayoutDashboard },
   { href: "/generate", label: "Motion Control", icon: Plus },
   { href: "/animate", label: "Animar por Texto", icon: Wand2 },
+  { href: "/narrator", label: "Narrador IA", icon: Mic },
   { href: "/nanobanana", label: "Nano Banana", icon: ImagePlus },
   { href: "/join", label: "Juntar Vídeos", icon: Merge },
   { href: "/youtube", label: "YouTube DL", icon: Youtube },
