@@ -1,6 +1,4 @@
-import { NextResponse } from "next/server";
-import { auth } from "@/lib/auth";
-import { headers } from "next/headers";
+import { NextRequest, NextResponse } from "next/server";
 import { execFile } from "child_process";
 import { promisify } from "util";
 import { access, readdir } from "fs/promises";
@@ -23,10 +21,12 @@ async function listDir(p: string, maxItems = 50): Promise<string[] | string> {
   }
 }
 
-export async function GET() {
-  const session = await auth.api.getSession({ headers: await headers() });
-  if (!session) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-
+export async function GET(request: NextRequest) {
+  // Temporário: pode ser chamado com ?secret=motionforge2026 sem auth
+  const secret = request.nextUrl.searchParams.get("secret");
+  if (secret !== "motionforge2026") {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
   const ffmpegPath = ffmpegInstaller.path;
 
   // 1. ffmpeg version + features
