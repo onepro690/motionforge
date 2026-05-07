@@ -62,24 +62,29 @@ async function concatVideoOnly(inputPaths: string[], outputPath: string): Promis
   });
 }
 
-// Procura uma fonte TTF utilizável no sistema (Linux serverless tem algumas
-// instaladas). Retorna o primeiro path existente, ou null pra usar default.
+// Acha a fonte Anton.ttf que embarcamos em lib/narrator/fonts/. Em prod,
+// cwd = /var/task/apps/web e a fonte é incluída via outputFileTracingIncludes.
 async function findUsableFont(): Promise<string | null> {
+  const { access } = await import("fs/promises");
   const candidates = [
+    join(process.cwd(), "lib", "narrator", "fonts", "Anton-Regular.ttf"),
+    join(process.cwd(), "apps", "web", "lib", "narrator", "fonts", "Anton-Regular.ttf"),
+    "/var/task/apps/web/lib/narrator/fonts/Anton-Regular.ttf",
+    "/var/task/lib/narrator/fonts/Anton-Regular.ttf",
+    join(process.cwd(), "public", "fonts", "Anton-Regular.ttf"),
+    join(process.cwd(), "apps", "web", "public", "fonts", "Anton-Regular.ttf"),
+    // fallbacks improváveis em Lambda
     "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-    "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
-    "/usr/share/fonts/dejavu/DejaVuSans-Bold.ttf",
-    "/usr/share/fonts/liberation-sans/LiberationSans-Bold.ttf",
-    "/System/Library/Fonts/Helvetica.ttc",
     "C:/Windows/Fonts/arialbd.ttf",
   ];
-  const { access } = await import("fs/promises");
   for (const p of candidates) {
     try {
       await access(p);
+      console.log(`[narrator/assemble] using font: ${p}`);
       return p;
     } catch { /* ignora */ }
   }
+  console.warn("[narrator/assemble] no font found in any candidate path");
   return null;
 }
 
@@ -105,9 +110,12 @@ async function checkSubtitlesSupport(): Promise<boolean> {
 
 // Mux narração + vídeo + (opcional) burn legendas via libass (subtitles=).
 // Roda execFile direto pra capturar stderr quando der erro.
-async function muxWithSubtitles(videoPath: string, audioPath: string, narrationSeconds: number, outputPath: string, assPath: string): Promise<void> {
+async function muxWithSubtitles(videoPath: string, audioPath: string, narrationSeconds: number, outputPath: string, assPath: string, fontsDir: string | null): Promise<void> {
   // Path POSIX: no Linux do Vercel não há `:`; só normalizamos backslashes.
   const safeAssPath = assPath.replace(/\\/g, "/");
+  const subtitlesFilter = fontsDir
+    ? `subtitles=${safeAssPath}:fontsdir=${fontsDir.replace(/\\/g, "/")}`
+    : `subtitles=${safeAssPath}`;
   const args = [
     "-y",
     "-hide_banner",
@@ -115,7 +123,7 @@ async function muxWithSubtitles(videoPath: string, audioPath: string, narrationS
     "-i", audioPath,
     "-map", "0:v",
     "-map", "1:a",
-    "-vf", `subtitles=${safeAssPath}`,
+    "-vf", subtitlesFilter,
     "-c:v", "libx264",
     "-preset", "veryfast",
     "-crf", "20",
@@ -266,13 +274,16 @@ export async function assembleNarratorVideo(args: AssembleNarratorArgs): Promise
     const captionsResult = await generateCaptionsAss(audioPath, args.narrationSeconds, assPath);
     console.log(`[narrator/assemble] captions: words=${captionsResult.wordsCount} chunks=${captionsResult.chunks.length} assOk=${captionsResult.assWritten}`);
 
+    const fontPath = await findUsableFont();
+    const fontsDir = fontPath ? fontPath.substring(0, fontPath.lastIndexOf("/")) || fontPath.substring(0, fontPath.lastIndexOf("\\")) : null;
+
     let captionsBurned = false;
     if (captionsResult.assWritten) {
       // Tenta primeiro libass (mais bonito)
       const hasSubtitles = await checkSubtitlesSupport();
       if (hasSubtitles) {
         try {
-          await muxWithSubtitles(concatPath, audioPath, args.narrationSeconds, finalPath, assPath);
+          await muxWithSubtitles(concatPath, audioPath, args.narrationSeconds, finalPath, assPath, fontsDir);
           captionsBurned = true;
         } catch (err) {
           console.error("[narrator/assemble] subtitles failed, will try drawtext:", err);
@@ -283,7 +294,6 @@ export async function assembleNarratorVideo(args: AssembleNarratorArgs): Promise
     // Fallback: drawtext (sem libass)
     if (!captionsBurned && captionsResult.chunks.length > 0) {
       try {
-        const fontPath = await findUsableFont();
         await muxWithDrawtext(concatPath, audioPath, args.narrationSeconds, finalPath, captionsResult.chunks, fontPath);
         captionsBurned = true;
       } catch (err) {

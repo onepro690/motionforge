@@ -30,6 +30,11 @@ const nextConfig: NextConfig = {
       ],
     },
   },
+  // Garante que a fonte do narrator vai pro bundle serverless (Next 15 trace
+  // não inclui assets binários por default).
+  outputFileTracingIncludes: {
+    "/api/narrator/**": ["./lib/narrator/fonts/**"],
+  },
   images: {
     remotePatterns: [
       { protocol: "http", hostname: "localhost" },

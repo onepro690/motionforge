@@ -138,10 +138,9 @@ function buildAss(chunks: CaptionChunk[], totalDurationSec: number): string {
 
   lines.push("[V4+ Styles]");
   lines.push("Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding");
-  // Fonte "Liberation Sans Bold" geralmente disponível em Linux serverless;
-  // ffmpeg cai num fallback se não achar. Tamanho 110 + bold + outline grosso
-  // pra ficar bem TikTok-style.
-  lines.push("Style: Viral,Liberation Sans,110,&H00FFFFFF,&H00FFFFFF,&H00000000,&H80000000,1,0,0,0,100,100,0,0,1,8,3,5,80,80,0,1");
+  // Fonte "Anton" — embarcada em apps/web/public/fonts/Anton-Regular.ttf,
+  // carregada via fontsdir no filtro subtitles. Display bold pra TikTok-style.
+  lines.push("Style: Viral,Anton,120,&H00FFFFFF,&H00FFFFFF,&H00000000,&H80000000,0,0,0,0,100,100,0,0,1,9,3,5,80,80,0,1");
   lines.push("");
 
   lines.push("[Events]");

@@ -54,13 +54,13 @@ export async function GET(request: NextRequest) {
 
   // 2. Font candidates check
   const fontCandidates = [
-    "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-    "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
-    "/usr/share/fonts/dejavu/DejaVuSans-Bold.ttf",
-    "/usr/share/fonts/liberation-sans/LiberationSans-Bold.ttf",
+    `${process.cwd()}/lib/narrator/fonts/Anton-Regular.ttf`,
+    `${process.cwd()}/apps/web/lib/narrator/fonts/Anton-Regular.ttf`,
+    "/var/task/apps/web/lib/narrator/fonts/Anton-Regular.ttf",
+    "/var/task/lib/narrator/fonts/Anton-Regular.ttf",
+    `${process.cwd()}/public/fonts/Anton-Regular.ttf`,
     "/var/task/apps/web/public/fonts/Anton-Regular.ttf",
-    "/var/task/public/fonts/Anton-Regular.ttf",
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
   ];
   const fontsExist: Record<string, boolean> = {};
   for (const p of fontCandidates) {
