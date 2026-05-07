@@ -26,7 +26,7 @@ async function transcribeWords(audioPath: string): Promise<WhisperWord[] | null>
   form.append("model", "whisper-1");
   form.append("response_format", "verbose_json");
   form.append("timestamp_granularities[]", "word");
-  form.append("language", "pt");
+  // Sem `language` → Whisper auto-detecta. Forçar PT quebrava copies em EN.
 
   const res = await fetch("https://api.openai.com/v1/audio/transcriptions", {
     method: "POST",
