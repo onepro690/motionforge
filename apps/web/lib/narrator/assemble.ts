@@ -11,9 +11,12 @@ import { writeFile, readFile, unlink, mkdir, rmdir } from "fs/promises";
 import { join } from "path";
 import { randomBytes } from "crypto";
 import { put } from "@vercel/blob";
-import { generateCaptionsAss } from "./captions";
+import { execFile } from "child_process";
+import { promisify } from "util";
+import { generateCaptionsAss, type DrawtextChunk } from "./captions";
 
 ffmpeg.setFfmpegPath(ffmpegInstaller.path);
+const execFileP = promisify(execFile);
 
 async function downloadToFile(url: string, destPath: string): Promise<void> {
   const res = await fetch(url, { signal: AbortSignal.timeout(120_000) });
@@ -59,37 +62,161 @@ async function concatVideoOnly(inputPaths: string[], outputPath: string): Promis
   });
 }
 
-// Combina vídeo (sem áudio) + narração e força a duração da narração.
-// Se assPath for fornecido, queima as legendas no vídeo (re-encode necessário).
-async function muxNarrationOverVideo(videoPath: string, audioPath: string, narrationSeconds: number, outputPath: string, assPath?: string): Promise<void> {
+// Procura uma fonte TTF utilizável no sistema (Linux serverless tem algumas
+// instaladas). Retorna o primeiro path existente, ou null pra usar default.
+async function findUsableFont(): Promise<string | null> {
+  const candidates = [
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+    "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+    "/usr/share/fonts/dejavu/DejaVuSans-Bold.ttf",
+    "/usr/share/fonts/liberation-sans/LiberationSans-Bold.ttf",
+    "/System/Library/Fonts/Helvetica.ttc",
+    "C:/Windows/Fonts/arialbd.ttf",
+  ];
+  const { access } = await import("fs/promises");
+  for (const p of candidates) {
+    try {
+      await access(p);
+      return p;
+    } catch { /* ignora */ }
+  }
+  return null;
+}
+
+// Checa se o ffmpeg do installer tem o filtro `subtitles` (libass) disponível.
+// Cacheia resultado pra não rodar a cada call.
+let subtitlesSupportCache: boolean | null = null;
+async function checkSubtitlesSupport(): Promise<boolean> {
+  if (subtitlesSupportCache !== null) return subtitlesSupportCache;
+  try {
+    const { stdout } = await execFileP(ffmpegInstaller.path, ["-hide_banner", "-filters"], {
+      maxBuffer: 5 * 1024 * 1024,
+    });
+    const has = /\bsubtitles\b/i.test(stdout);
+    console.log(`[narrator/assemble] subtitles filter support: ${has}`);
+    subtitlesSupportCache = has;
+    return has;
+  } catch (err) {
+    console.error("[narrator/assemble] checkSubtitlesSupport error:", err);
+    subtitlesSupportCache = false;
+    return false;
+  }
+}
+
+// Mux narração + vídeo + (opcional) burn legendas via libass (subtitles=).
+// Roda execFile direto pra capturar stderr quando der erro.
+async function muxWithSubtitles(videoPath: string, audioPath: string, narrationSeconds: number, outputPath: string, assPath: string): Promise<void> {
+  // Path POSIX: no Linux do Vercel não há `:`; só normalizamos backslashes.
+  const safeAssPath = assPath.replace(/\\/g, "/");
+  const args = [
+    "-y",
+    "-hide_banner",
+    "-i", videoPath,
+    "-i", audioPath,
+    "-map", "0:v",
+    "-map", "1:a",
+    "-vf", `subtitles=${safeAssPath}`,
+    "-c:v", "libx264",
+    "-preset", "veryfast",
+    "-crf", "20",
+    "-pix_fmt", "yuv420p",
+    "-c:a", "aac",
+    "-b:a", "192k",
+    "-t", narrationSeconds.toFixed(3),
+    "-movflags", "+faststart",
+    outputPath,
+  ];
+  console.log("[narrator/assemble] running ffmpeg with subtitles filter, ass:", safeAssPath);
+  try {
+    const { stderr } = await execFileP(ffmpegInstaller.path, args, {
+      maxBuffer: 100 * 1024 * 1024,
+      timeout: 240_000,
+    });
+    // ffmpeg sempre escreve no stderr — só é erro se exit != 0 (lança throw)
+    const tail = stderr.split("\n").slice(-6).join("\n");
+    console.log("[narrator/assemble] ffmpeg subtitles done. tail:\n", tail);
+  } catch (err) {
+    const e = err as { stderr?: string; message?: string };
+    console.error("[narrator/assemble] ffmpeg subtitles FAILED:", e.message);
+    console.error("[narrator/assemble] ffmpeg stderr:", e.stderr?.slice(-3000));
+    throw err;
+  }
+}
+
+// Mux com drawtext (fallback se libass não disponível). Cada chunk vira um
+// drawtext com `enable='between(t,start,end)'` e leve fade via alpha expr.
+async function muxWithDrawtext(videoPath: string, audioPath: string, narrationSeconds: number, outputPath: string, chunks: DrawtextChunk[], fontPath: string | null): Promise<void> {
+  // Constrói filter graph com N drawtext encadeados
+  const filters = chunks.map((c, i) => {
+    const safeText = c.text
+      .replace(/\\/g, "\\\\")
+      .replace(/'/g, "’")  // troca apóstrofo por aspa unicode pra evitar bagunça
+      .replace(/:/g, "\\:")
+      .replace(/,/g, "\\,")
+      .toUpperCase();
+    const startMs = (c.start * 1000).toFixed(0);
+    const endMs = (c.end * 1000).toFixed(0);
+    const popDur = Math.min(180, Math.max(80, (c.end - c.start) * 1000 * 0.3));
+    // alpha: fade in nos primeiros 100ms, fade out nos últimos 80ms
+    const alphaExpr = `if(lt(t,${c.start}),0,if(lt(t,${c.start}+0.1),(t-${c.start})/0.1,if(gt(t,${c.end}-0.08),max(0,(${c.end}-t)/0.08),1)))`;
+    // fontsize varia: cresce 18% nos primeiros popDur ms e estabiliza
+    const baseSize = i % 4 === 1 ? 130 : 120;
+    const colorByIdx = ["white", "0xFFD700", "white", "0xFFC857"];
+    const color = colorByIdx[i % colorByIdx.length];
+    const fontfileArg = fontPath ? `:fontfile='${fontPath.replace(/\\/g, "/")}'` : "";
+    return `drawtext=text='${safeText}'${fontfileArg}:fontsize=${baseSize}:fontcolor=${color}:bordercolor=black:borderw=8:shadowcolor=black@0.7:shadowx=2:shadowy=4:x=(w-text_w)/2:y=h*0.66:alpha='${alphaExpr}':enable='between(t,${c.start},${c.end})'`;
+  }).join(",");
+
+  const args = [
+    "-y",
+    "-hide_banner",
+    "-i", videoPath,
+    "-i", audioPath,
+    "-map", "0:v",
+    "-map", "1:a",
+    "-vf", filters,
+    "-c:v", "libx264",
+    "-preset", "veryfast",
+    "-crf", "20",
+    "-pix_fmt", "yuv420p",
+    "-c:a", "aac",
+    "-b:a", "192k",
+    "-t", narrationSeconds.toFixed(3),
+    "-movflags", "+faststart",
+    outputPath,
+  ];
+
+  console.log(`[narrator/assemble] running ffmpeg with drawtext (${chunks.length} chunks, font=${fontPath ?? "default"})`);
+  try {
+    const { stderr } = await execFileP(ffmpegInstaller.path, args, {
+      maxBuffer: 100 * 1024 * 1024,
+      timeout: 240_000,
+    });
+    const tail = stderr.split("\n").slice(-6).join("\n");
+    console.log("[narrator/assemble] drawtext done. tail:\n", tail);
+  } catch (err) {
+    const e = err as { stderr?: string; message?: string };
+    console.error("[narrator/assemble] drawtext FAILED:", e.message);
+    console.error("[narrator/assemble] drawtext stderr:", e.stderr?.slice(-3000));
+    throw err;
+  }
+}
+
+// Mux sem legendas (fallback final): copia vídeo, troca áudio.
+async function muxNoCaptions(videoPath: string, audioPath: string, narrationSeconds: number, outputPath: string): Promise<void> {
   await new Promise<void>((resolve, reject) => {
-    const cmd = ffmpeg().input(videoPath).input(audioPath);
-
-    const outOpts = [
-      "-map", "0:v",
-      "-map", "1:a",
-    ];
-
-    if (assPath) {
-      // Burn-in subtitles via filter `subtitles=`. No Linux precisamos escapar
-      // o path: substituir `\` por `/`, e escapar `:` (não tem no /tmp). Para
-      // segurança usamos POSIX path direto.
-      const safe = assPath.replace(/\\/g, "/").replace(/:/g, "\\:").replace(/'/g, "\\'");
-      cmd.videoFilter(`subtitles='${safe}'`);
-      outOpts.push("-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p");
-    } else {
-      outOpts.push("-c:v", "copy");
-    }
-
-    outOpts.push(
-      "-c:a", "aac",
-      "-b:a", "192k",
-      "-t", narrationSeconds.toFixed(3),
-      "-movflags", "+faststart",
-    );
-
-    cmd
-      .outputOptions(outOpts)
+    ffmpeg()
+      .input(videoPath)
+      .input(audioPath)
+      .outputOptions([
+        "-map", "0:v",
+        "-map", "1:a",
+        "-c:v", "copy",
+        "-c:a", "aac",
+        "-b:a", "192k",
+        "-t", narrationSeconds.toFixed(3),
+        "-movflags", "+faststart",
+      ])
       .output(outputPath)
       .on("end", () => resolve())
       .on("error", (err: Error) => reject(err))
@@ -135,12 +262,40 @@ export async function assembleNarratorVideo(args: AssembleNarratorArgs): Promise
     // Concatena vídeos (sem áudio — takes já vêm sem áudio do strip)
     await concatVideoOnly(takePaths, concatPath);
 
-    // Gera arquivo ASS com legendas animadas (Whisper + chunks). Best-effort:
-    // se Whisper falhar, segue sem legenda em vez de quebrar o pipeline.
-    const captionsOk = await generateCaptionsAss(audioPath, args.narrationSeconds, assPath);
+    // Gera ASS + chunks (whisper). Se Whisper falhar, segue sem legenda.
+    const captionsResult = await generateCaptionsAss(audioPath, args.narrationSeconds, assPath);
+    console.log(`[narrator/assemble] captions: words=${captionsResult.wordsCount} chunks=${captionsResult.chunks.length} assOk=${captionsResult.assWritten}`);
 
-    // Mux narração + corta pra duração exata + queima legendas (se geradas)
-    await muxNarrationOverVideo(concatPath, audioPath, args.narrationSeconds, finalPath, captionsOk ? assPath : undefined);
+    let captionsBurned = false;
+    if (captionsResult.assWritten) {
+      // Tenta primeiro libass (mais bonito)
+      const hasSubtitles = await checkSubtitlesSupport();
+      if (hasSubtitles) {
+        try {
+          await muxWithSubtitles(concatPath, audioPath, args.narrationSeconds, finalPath, assPath);
+          captionsBurned = true;
+        } catch (err) {
+          console.error("[narrator/assemble] subtitles failed, will try drawtext:", err);
+        }
+      }
+    }
+
+    // Fallback: drawtext (sem libass)
+    if (!captionsBurned && captionsResult.chunks.length > 0) {
+      try {
+        const fontPath = await findUsableFont();
+        await muxWithDrawtext(concatPath, audioPath, args.narrationSeconds, finalPath, captionsResult.chunks, fontPath);
+        captionsBurned = true;
+      } catch (err) {
+        console.error("[narrator/assemble] drawtext failed too, will mux without captions:", err);
+      }
+    }
+
+    // Fallback final: sem legenda
+    if (!captionsBurned) {
+      console.warn("[narrator/assemble] burning no captions");
+      await muxNoCaptions(concatPath, audioPath, args.narrationSeconds, finalPath);
+    }
 
     const buffer = await readFile(finalPath);
     const blob = await put(`narrator-${args.jobId}.mp4`, buffer, {

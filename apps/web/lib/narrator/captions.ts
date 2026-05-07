@@ -43,11 +43,13 @@ async function transcribeWords(audioPath: string): Promise<WhisperWord[] | null>
   return data.words ?? null;
 }
 
-interface CaptionChunk {
+export interface DrawtextChunk {
   start: number;
   end: number;
   text: string;
 }
+
+type CaptionChunk = DrawtextChunk;
 
 // Agrupa palavras em chunks curtos pra dar pegada viral (1-3 palavras por
 // vez, max ~700ms). Quebra em pontuação ou quando atingir tamanho.
@@ -188,23 +190,35 @@ function buildAss(chunks: CaptionChunk[], totalDurationSec: number): string {
   return lines.join("\n");
 }
 
-export async function generateCaptionsAss(audioPath: string, totalDurationSec: number, outAssPath: string): Promise<boolean> {
+export interface CaptionsBuildResult {
+  wordsCount: number;
+  chunks: DrawtextChunk[];
+  assWritten: boolean;
+}
+
+export async function generateCaptionsAss(audioPath: string, totalDurationSec: number, outAssPath: string): Promise<CaptionsBuildResult> {
   try {
     const words = await transcribeWords(audioPath);
     if (!words || words.length === 0) {
-      console.warn("[narrator/captions] no words from whisper");
-      return false;
+      console.warn("[narrator/captions] whisper retornou 0 palavras");
+      return { wordsCount: 0, chunks: [], assWritten: false };
     }
+    console.log(`[narrator/captions] whisper words: ${words.length}, sample: ${words.slice(0, 5).map((w) => w.word).join("|")}`);
     const chunks = chunkWords(words);
     if (chunks.length === 0) {
-      console.warn("[narrator/captions] no chunks built");
-      return false;
+      console.warn("[narrator/captions] nenhum chunk gerado");
+      return { wordsCount: words.length, chunks: [], assWritten: false };
     }
     const ass = buildAss(chunks, totalDurationSec);
     await writeFile(outAssPath, ass, "utf8");
-    return true;
+    return { wordsCount: words.length, chunks, assWritten: true };
   } catch (err) {
     console.error("[narrator/captions] generateCaptionsAss error:", err);
-    return false;
+    return { wordsCount: 0, chunks: [], assWritten: false };
   }
+}
+
+// Helper exposto pra que o assemble use os mesmos chunks no fallback drawtext.
+export function generateCaptionsDrawtext(words: WhisperWord[]): DrawtextChunk[] {
+  return chunkWords(words);
 }
