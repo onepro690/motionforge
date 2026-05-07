@@ -180,6 +180,8 @@ function buildVeoPrompt(visualPrompt: string, vibe?: string): string {
     visualPrompt,
     "The audio track must be completely silent — no voice, no speech, no music.",
     "No people speaking on camera. No subtitles. No text overlays. No on-screen captions.",
-    `Vertical 9:16 framing, cinematic premium B-roll, sharp focus, professional color grading.${styleSuffix}`,
+    "Mystical astrology and tarot atmosphere: deep cosmic blacks, violet and indigo tones with gold accents, volumetric god rays, smoke particles, lens flares, anamorphic light streaks.",
+    "Dynamic revealing camera movement throughout — fast push-in, snap zoom, orbiting camera, crane reveal, vertigo zoom. Never static.",
+    `Vertical 9:16 framing, cinematic premium B-roll, sharp focus, dramatic high-contrast color grading, suspenseful and revelatory pacing.${styleSuffix}`,
   ].join(" ");
 }

@@ -29,20 +29,29 @@ export async function planNarratorSegments({ copy, takeCount, vibe }: PlanArgs):
   if (!apiKey) throw new Error("OPENAI_API_KEY not configured");
 
   const styleHint = vibe?.trim()
-    ? `Estilo solicitado: ${vibe.trim()}.`
-    : "Estilo: cinematográfico moderno, B-roll publicitário premium, cores vibrantes, profundidade de campo.";
+    ? `Estilo extra solicitado pelo usuário: ${vibe.trim()}.`
+    : "";
 
   const system = [
-    "Você divide narrações em segmentos visuais para um motor de vídeo (Veo 3).",
+    "Você é diretor de arte de vídeos virais de ASTROLOGIA, TARÔ e ESPIRITUALIDADE.",
+    "Sua missão: dividir uma narração mística em N segmentos visuais cinematográficos para um motor de vídeo (Veo 3).",
     "Responda SEMPRE em JSON puro no schema fornecido pelo usuário, sem markdown nem explicação fora do JSON.",
-    "Regras invioláveis:",
+    "",
+    "REGRAS de segmentação (invioláveis):",
     "1. Concatenar os campos `text` dos segmentos na ordem retornada DEVE reproduzir a copy original PALAVRA POR PALAVRA — sem omitir, adicionar, reescrever ou parafrasear nada. Mantenha pontuação e espaços.",
     "2. Você DEVE retornar exatamente o número de segmentos pedido.",
     "3. Cada segmento tem ~7.5 segundos de fala (≈18-22 palavras em PT-BR), distribua o texto de forma equilibrada e quebre em fronteiras naturais (vírgula, ponto, conjunção).",
-    "4. `visualPrompt` é uma descrição EM INGLÊS de uma cena B-roll cinematográfica que ilustra metaforicamente o que está sendo narrado nesse segmento. Vertical 9:16. SEM pessoas falando, SEM diálogo, SEM legendas, SEM texto na tela. Câmera, luz, ação visual concreta.",
-    "5. Cenas devem fluir entre si com coerência narrativa.",
+    "",
+    "REGRAS de `visualPrompt` (em INGLÊS, B-roll cinematográfico místico, vertical 9:16, SEM pessoas falando, SEM diálogo, SEM legendas, SEM texto na tela):",
+    "A. TEMA OBRIGATÓRIO: astrology, tarot, divination, zodiac, mysticism, prophecy, celestial revelation. NUNCA fuja desse universo — TODA cena DEVE conter ao menos um elemento icônico de tarot/astrologia.",
+    "B. Banco de elementos visuais (escolha 2-3 por cena, varie entre segmentos): tarot cards flipping in slow motion, glowing tarot deck, crystal ball with swirling smoke, zodiac wheel rotating, constellations connecting, glowing zodiac symbol carved in stone, hand drawing rune, ancient astrology map unfolding, candles flickering in dark room, purple/violet smoke, golden particles floating, moon phases morphing, stars exploding, sacred geometry mandala, ethereal hands hovering over cards, pendulum swinging, third eye opening, planets aligning, nebula clouds, mystical book pages turning, glowing sigil drawing itself in the air.",
+    "C. CÂMERA SEMPRE DINÂMICA E REVELADORA: rapid push-in, dolly zoom, fast crane reveal, snap-zoom into card, orbiting camera around crystal ball, vertigo zoom into eye, pull focus from card to background. Nunca câmera estática.",
+    "D. ILUMINAÇÃO MÍSTICA: deep blacks, violet/indigo/gold rim light, volumetric god rays, lens flares from candles, bokeh particles, anamorphic streaks. Ambiente noturno/cósmico.",
+    "E. RITMO: cada cena deve transmitir REVELAÇÃO/SUSPENSE — algo se revelando (carta virando, símbolo brilhando, olho abrindo, mapa se traçando sozinho).",
+    "F. Cenas devem fluir narrativamente: variar elementos para não repetir a mesma cena.",
+    "",
     styleHint,
-  ].join("\n");
+  ].filter(Boolean).join("\n");
 
   const user = JSON.stringify({
     copy,

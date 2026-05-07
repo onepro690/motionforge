@@ -11,6 +11,7 @@ import { writeFile, readFile, unlink, mkdir, rmdir } from "fs/promises";
 import { join } from "path";
 import { randomBytes } from "crypto";
 import { put } from "@vercel/blob";
+import { generateCaptionsAss } from "./captions";
 
 ffmpeg.setFfmpegPath(ffmpegInstaller.path);
 
@@ -59,20 +60,36 @@ async function concatVideoOnly(inputPaths: string[], outputPath: string): Promis
 }
 
 // Combina vídeo (sem áudio) + narração e força a duração da narração.
-async function muxNarrationOverVideo(videoPath: string, audioPath: string, narrationSeconds: number, outputPath: string): Promise<void> {
+// Se assPath for fornecido, queima as legendas no vídeo (re-encode necessário).
+async function muxNarrationOverVideo(videoPath: string, audioPath: string, narrationSeconds: number, outputPath: string, assPath?: string): Promise<void> {
   await new Promise<void>((resolve, reject) => {
-    ffmpeg()
-      .input(videoPath)
-      .input(audioPath)
-      .outputOptions([
-        "-map", "0:v",
-        "-map", "1:a",
-        "-c:v", "copy",
-        "-c:a", "aac",
-        "-b:a", "192k",
-        "-t", narrationSeconds.toFixed(3),
-        "-movflags", "+faststart",
-      ])
+    const cmd = ffmpeg().input(videoPath).input(audioPath);
+
+    const outOpts = [
+      "-map", "0:v",
+      "-map", "1:a",
+    ];
+
+    if (assPath) {
+      // Burn-in subtitles via filter `subtitles=`. No Linux precisamos escapar
+      // o path: substituir `\` por `/`, e escapar `:` (não tem no /tmp). Para
+      // segurança usamos POSIX path direto.
+      const safe = assPath.replace(/\\/g, "/").replace(/:/g, "\\:").replace(/'/g, "\\'");
+      cmd.videoFilter(`subtitles='${safe}'`);
+      outOpts.push("-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p");
+    } else {
+      outOpts.push("-c:v", "copy");
+    }
+
+    outOpts.push(
+      "-c:a", "aac",
+      "-b:a", "192k",
+      "-t", narrationSeconds.toFixed(3),
+      "-movflags", "+faststart",
+    );
+
+    cmd
+      .outputOptions(outOpts)
       .output(outputPath)
       .on("end", () => resolve())
       .on("error", (err: Error) => reject(err))
@@ -100,6 +117,7 @@ export async function assembleNarratorVideo(args: AssembleNarratorArgs): Promise
   const takePaths: string[] = [];
   const concatPath = join(tmpDir, "concat.mp4");
   const audioPath  = join(tmpDir, "narration.mp3");
+  const assPath    = join(tmpDir, "captions.ass");
   const finalPath  = join(tmpDir, "final.mp4");
 
   try {
@@ -117,8 +135,12 @@ export async function assembleNarratorVideo(args: AssembleNarratorArgs): Promise
     // Concatena vídeos (sem áudio — takes já vêm sem áudio do strip)
     await concatVideoOnly(takePaths, concatPath);
 
-    // Mux narração + corta pra duração exata
-    await muxNarrationOverVideo(concatPath, audioPath, args.narrationSeconds, finalPath);
+    // Gera arquivo ASS com legendas animadas (Whisper + chunks). Best-effort:
+    // se Whisper falhar, segue sem legenda em vez de quebrar o pipeline.
+    const captionsOk = await generateCaptionsAss(audioPath, args.narrationSeconds, assPath);
+
+    // Mux narração + corta pra duração exata + queima legendas (se geradas)
+    await muxNarrationOverVideo(concatPath, audioPath, args.narrationSeconds, finalPath, captionsOk ? assPath : undefined);
 
     const buffer = await readFile(finalPath);
     const blob = await put(`narrator-${args.jobId}.mp4`, buffer, {
@@ -130,7 +152,7 @@ export async function assembleNarratorVideo(args: AssembleNarratorArgs): Promise
 
     return { finalVideoUrl: blob.url, durationSeconds: args.narrationSeconds };
   } finally {
-    const all = [...takePaths, concatPath, audioPath, finalPath];
+    const all = [...takePaths, concatPath, audioPath, assPath, finalPath];
     await Promise.all(all.map((p) => unlink(p).catch(() => {})));
     await rmdir(tmpDir).catch(() => {});
   }
