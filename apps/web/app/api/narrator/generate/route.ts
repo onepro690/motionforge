@@ -182,6 +182,9 @@ function buildVeoPrompt(visualPrompt: string, vibe?: string): string {
     "No people speaking on camera. No subtitles. No text overlays. No on-screen captions.",
     "Mystical astrology and tarot atmosphere: deep cosmic blacks, violet and indigo tones with gold accents, volumetric god rays, smoke particles, lens flares, anamorphic light streaks.",
     "Dynamic revealing camera movement throughout — fast push-in, snap zoom, orbiting camera, crane reveal, vertigo zoom. Never static.",
-    `Vertical 9:16 framing, cinematic premium B-roll, sharp focus, dramatic high-contrast color grading, suspenseful and revelatory pacing.${styleSuffix}`,
+    // Framing extremamente explícito: Veo às vezes gera conteúdo "horizontal por dentro"
+    // de um frame 9:16, dando aparência cortada. Reforçamos full-frame portrait.
+    "STRICTLY VERTICAL portrait orientation, 9:16 aspect ratio, 1080x1920 mobile vertical full-frame composition, the subject and action FILL the entire vertical frame from top to bottom, no letterboxing, no pillarboxing, no black bars, no horizontal-style framing, framed for TikTok/Reels/Shorts.",
+    `Cinematic premium B-roll, sharp focus, dramatic high-contrast color grading, suspenseful and revelatory pacing.${styleSuffix}`,
   ].join(" ");
 }

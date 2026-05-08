@@ -24,12 +24,23 @@ async function downloadToFile(url: string, destPath: string): Promise<void> {
   await writeFile(destPath, Buffer.from(await res.arrayBuffer()));
 }
 
+// Força cada take pra 1080x1920 (9:16 vertical exato). Veo às vezes retorna
+// vídeos com aspect ratio interno ligeiramente diferente ou com letterbox/
+// pillarbox dentro do frame, o que aparece como "vídeo cortado" pro user.
+// scale=1080:1920:force_original_aspect_ratio=increase faz upscale mantendo
+// proporção até cobrir toda a área, e crop=1080:1920 corta o excedente
+// centralizado. Resultado: NUNCA tem barras pretas, sempre vertical full-frame.
+const FORCE_VERTICAL_FILTER = "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1";
+
 // Concat com re-encode (necessário porque os takes podem vir do Veo com
 // timestamps/parâmetros levemente diferentes — concat demuxer falharia).
+// Cada take passa pelo FORCE_VERTICAL_FILTER antes do concat pra garantir
+// que TODOS estão em 1080x1920 puro.
 async function concatVideoOnly(inputPaths: string[], outputPath: string): Promise<void> {
   if (inputPaths.length === 1) {
     await new Promise<void>((resolve, reject) => {
       ffmpeg(inputPaths[0])
+        .videoFilter(FORCE_VERTICAL_FILTER)
         .outputOptions(["-an", "-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p", "-movflags", "+faststart"])
         .output(outputPath)
         .on("end", () => resolve())
@@ -39,8 +50,13 @@ async function concatVideoOnly(inputPaths: string[], outputPath: string): Promis
     return;
   }
 
-  const videoLabels = inputPaths.map((_, i) => `[${i}:v]`).join("");
-  const filter = `${videoLabels}concat=n=${inputPaths.length}:v=1:a=0[vout]`;
+  // Pra múltiplos inputs: aplica FORCE_VERTICAL_FILTER em cada stream antes
+  // do concat. Cadeia: [0:v]filter[v0];[1:v]filter[v1];...;[v0][v1]...concat[vout]
+  const perInputFilters = inputPaths
+    .map((_, i) => `[${i}:v]${FORCE_VERTICAL_FILTER}[v${i}]`)
+    .join(";");
+  const concatLabels = inputPaths.map((_, i) => `[v${i}]`).join("");
+  const filter = `${perInputFilters};${concatLabels}concat=n=${inputPaths.length}:v=1:a=0[vout]`;
 
   await new Promise<void>((resolve, reject) => {
     const cmd = ffmpeg();
