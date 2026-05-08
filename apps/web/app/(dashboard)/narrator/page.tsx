@@ -40,6 +40,7 @@ export default function NarratorPage() {
   const [finalUrl, setFinalUrl] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [narrationDuration, setNarrationDuration] = useState<number | null>(null);
+  const [downloading, setDownloading] = useState(false);
   const pollRef = useRef<NodeJS.Timeout | null>(null);
 
   // Polling loop
@@ -130,6 +131,33 @@ export default function NarratorPage() {
     setSegments([]);
     setProgress(null);
     setNarrationDuration(null);
+  };
+
+  // Download forçado: fetch → blob → click invisível. <a download> direto não
+  // funciona pq o vídeo está em blob.vercel-storage.com (cross-origin) — o
+  // navegador ignora o atributo download e abre o vídeo no player.
+  const handleDownload = async () => {
+    if (!finalUrl) return;
+    setDownloading(true);
+    try {
+      const res = await fetch(finalUrl);
+      if (!res.ok) throw new Error(`Download falhou: ${res.status}`);
+      const blob = await res.blob();
+      const objectUrl = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = objectUrl;
+      a.download = `narrator-${jobId ?? Date.now()}.mp4`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      // libera memória depois de um tick
+      setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Erro ao baixar";
+      toast.error(msg);
+    } finally {
+      setDownloading(false);
+    }
   };
 
   const isLocked = phase === "submitting" || phase === "polling";
@@ -288,11 +316,18 @@ export default function NarratorPage() {
               style={{ aspectRatio: "9/16", maxHeight: "70vh" }}
             />
             <div className="flex gap-2">
-              <Button asChild className="flex-1">
-                <a href={finalUrl} download={`narrator-${jobId}.mp4`} target="_blank" rel="noopener noreferrer">
-                  <Download className="w-4 h-4 mr-2" />
-                  Baixar MP4
-                </a>
+              <Button onClick={handleDownload} disabled={downloading} className="flex-1">
+                {downloading ? (
+                  <>
+                    <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                    Baixando...
+                  </>
+                ) : (
+                  <>
+                    <Download className="w-4 h-4 mr-2" />
+                    Baixar MP4
+                  </>
+                )}
               </Button>
             </div>
           </CardContent>
