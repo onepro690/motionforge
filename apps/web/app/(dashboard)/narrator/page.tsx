@@ -16,6 +16,7 @@ interface SegmentSummary {
   text: string;
   status: "PROCESSING" | "COMPLETED" | "FAILED";
   error?: string | null;
+  usedFallback?: boolean;
 }
 
 interface PollResponse {
@@ -442,14 +443,24 @@ export default function NarratorPage() {
                     <span
                       className={cn(
                         "w-2 h-2 rounded-full mt-1 flex-shrink-0",
-                        s.status === "COMPLETED" && "bg-emerald-400",
+                        s.status === "COMPLETED" && (s.usedFallback ? "bg-amber-400" : "bg-emerald-400"),
                         s.status === "PROCESSING" && "bg-violet-400 animate-pulse",
                         s.status === "FAILED" && "bg-red-400"
                       )}
                     />
-                    <span className="text-white/50 line-clamp-2">{s.text}</span>
+                    <span className="text-white/50 line-clamp-2 flex-1">{s.text}</span>
+                    {s.usedFallback && (
+                      <span className="text-amber-300/80 text-[10px] whitespace-nowrap" title="Filtro Vertex bloqueou a foto — take rodou com avatar genérico">
+                        avatar genérico
+                      </span>
+                    )}
                   </div>
                 ))}
+              </div>
+            )}
+            {segments.some((s) => s.usedFallback) && (
+              <div className="mt-2 text-[11px] text-amber-300/80 bg-amber-500/10 border border-amber-500/30 rounded px-2 py-1.5">
+                Alguns takes não conseguiram usar sua foto (filtro de segurança do Vertex). Eles foram gerados com avatar genérico falando o trecho. Tente uma foto frontal mais neutra se quiser todos com seu avatar.
               </div>
             )}
           </CardContent>

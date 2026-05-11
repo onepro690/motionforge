@@ -9,8 +9,12 @@ export interface NarratorSegmentState {
   videoUrl: string | null;
   errorMessage: string | null;
   // Quantas vezes esse take já foi re-submetido após bloqueio RAI (default 0).
-  // Quando bate MAX_RAI_RETRIES (2), marcamos FAILED definitivo.
+  // Quando bate MAX_RAI_RETRIES, último retry cai pra text-only sem imagem.
   retryCount?: number;
+  // True quando o take rodou em fallback text-only (sem foto do avatar) porque
+  // todos os retries com imagem foram bloqueados pelo filtro RAI. UI deve
+  // sinalizar isso pro user.
+  usedFallback?: boolean;
 }
 
 export interface NarratorJobState {

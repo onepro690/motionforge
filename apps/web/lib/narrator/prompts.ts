@@ -62,4 +62,22 @@ export function buildBrollPrompt(visualPrompt: string, vibe: string | undefined,
   ].filter(Boolean).join(" ");
 }
 
-export const MAX_RAI_RETRIES = 2;
+export const MAX_RAI_RETRIES = 3;
+
+// Fallback FINAL quando todos os retries com imagem falharam por RAI. Gera
+// uma pessoa GENÉRICA falando o texto via text-only (sem foto do avatar).
+// Resultado: pessoa diferente da foto original, mas o vídeo completa em vez
+// de falhar. UI sinaliza isso pro user.
+export function buildAvatarFallbackTextOnlyPrompt(text: string, gender: "male" | "female"): string {
+  const voiceLabel = gender === "male" ? "male" : "female";
+  return [
+    "Wholesome, family-friendly, safe-for-all-audiences UGC video.",
+    `A casual everyday ${voiceLabel === "male" ? "young adult man" : "young adult woman"} looks directly at the camera in selfie framing, speaks naturally in Brazilian Portuguese saying EXACTLY these words and nothing else: "${text}".`,
+    `Voice: natural Brazilian Portuguese ${voiceLabel} voice, intimate UGC narrator tone, conversational pace.`,
+    "Modest casual modern clothing. Neutral friendly facial expression. Soft natural daylight. Plain minimalist indoor background, slightly out of focus.",
+    "Lips MUST be in tight sync with the spoken Brazilian Portuguese words. No camera movement other than handheld micro-shake.",
+    "STRICTLY VERTICAL 9:16, 1080x1920, full-frame portrait, no letterboxing, no pillarboxing, no black bars.",
+    "Audio is ONLY the spoken sentence in Brazilian Portuguese — NO music, NO ambient sound effects, NO other voices.",
+    "NO subtitles, NO captions, NO on-screen text, NO watermarks. Do NOT speak in English or any other language.",
+  ].join(" ");
+}

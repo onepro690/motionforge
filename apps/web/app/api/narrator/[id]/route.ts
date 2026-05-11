@@ -22,6 +22,7 @@ import {
   buildAvatarSpeechPrompt,
   buildAvatarSilentPrompt,
   buildBrollPrompt,
+  buildAvatarFallbackTextOnlyPrompt,
   MAX_RAI_RETRIES,
 } from "@/lib/narrator/prompts";
 import type { NarratorJobState, NarratorSegmentState } from "@/lib/narrator/types";
@@ -80,7 +81,7 @@ export async function GET(
         status: "COMPLETED",
         finalVideoUrl: state.finalVideoUrl,
         narrationDurationSeconds: state.narrationDurationSeconds,
-        segments: state.segments.map((s) => ({ index: s.index, status: s.status, text: s.text })),
+        segments: state.segments.map((s) => ({ index: s.index, status: s.status, text: s.text, usedFallback: s.usedFallback ?? false })),
       });
     }
     if (job.status === "FAILED") {
@@ -88,7 +89,7 @@ export async function GET(
         id: job.id,
         status: "FAILED",
         errorMessage: job.errorMessage ?? state.finalErrorMessage,
-        segments: state.segments.map((s) => ({ index: s.index, status: s.status, text: s.text, error: s.errorMessage })),
+        segments: state.segments.map((s) => ({ index: s.index, status: s.status, text: s.text, error: s.errorMessage, usedFallback: s.usedFallback ?? false })),
       });
     }
 
@@ -120,16 +121,25 @@ export async function GET(
         const seg = state.segments[idx];
 
         // Bloqueio por RAI: tenta de novo com prompt cada vez mais "safe" até
-        // MAX_RAI_RETRIES. Filtro Vertex é meio aleatório com fotos realistas;
-        // costuma destravar na 2ª tentativa.
+        // MAX_RAI_RETRIES. Última tentativa cai pra text-only sem foto pra
+        // garantir que o vídeo completa mesmo se a foto disparar face filter.
         if (r.raiBlocked) {
           const currentRetry = seg.retryCount ?? 0;
           if (currentRetry < MAX_RAI_RETRIES) {
             const nextAttempt = currentRetry + 1;
+            const isFinalFallback = nextAttempt === MAX_RAI_RETRIES && Boolean(state.avatarImageUrl);
             try {
-              const newOp = await resubmitSegment(seg, state, nextAttempt, accessToken, getAvatarImage);
+              const { opName: newOp, usedFallback } = await resubmitSegment(
+                seg,
+                state,
+                nextAttempt,
+                isFinalFallback,
+                accessToken,
+                getAvatarImage,
+              );
               seg.opName = newOp;
               seg.retryCount = nextAttempt;
+              seg.usedFallback = seg.usedFallback || usedFallback;
               seg.status = "PROCESSING";
               seg.errorMessage = null;
               continue;
@@ -184,7 +194,7 @@ export async function GET(
         id: job.id,
         status: "PROCESSING",
         narrationDurationSeconds: state.narrationDurationSeconds,
-        segments: state.segments.map((s) => ({ index: s.index, status: s.status, text: s.text })),
+        segments: state.segments.map((s) => ({ index: s.index, status: s.status, text: s.text, usedFallback: s.usedFallback ?? false })),
         progress: {
           completed: state.segments.filter((s) => s.status === "COMPLETED").length,
           total: state.segments.length,
@@ -210,7 +220,7 @@ export async function GET(
         id: job.id,
         status: "FAILED",
         errorMessage: msg,
-        segments: state.segments.map((s) => ({ index: s.index, status: s.status, text: s.text, error: s.errorMessage })),
+        segments: state.segments.map((s) => ({ index: s.index, status: s.status, text: s.text, error: s.errorMessage, usedFallback: s.usedFallback ?? false })),
       });
     }
 
@@ -239,7 +249,7 @@ export async function GET(
           status: "COMPLETED",
           finalVideoUrl: result.finalVideoUrl,
           narrationDurationSeconds: state.narrationDurationSeconds,
-          segments: state.segments.map((s) => ({ index: s.index, status: s.status, text: s.text })),
+          segments: state.segments.map((s) => ({ index: s.index, status: s.status, text: s.text, usedFallback: s.usedFallback ?? false })),
         });
       } catch (err) {
         const msg = err instanceof Error ? err.message : "Erro no assembly";
@@ -267,16 +277,36 @@ export async function GET(
   }
 }
 
-// Re-submete um segmento após bloqueio RAI com prompt cada vez mais "safe"
-// (attempt 1 → moderado, 2 → máximo). Devolve o novo opName.
+// Re-submete um segmento após bloqueio RAI. Quando isFallback=true (último
+// retry com avatar), descarta a foto e gera text-only com pessoa genérica
+// falando o trecho — perde fidelidade do avatar mas garante que o take render.
 async function resubmitSegment(
   seg: NarratorSegmentState,
   state: NarratorJobState,
   attempt: number,
+  isFallback: boolean,
   accessToken: string,
   getAvatarImage: () => Promise<VeoImageInput | null>,
-): Promise<string> {
+): Promise<{ opName: string; usedFallback: boolean }> {
   const hasAvatar = Boolean(state.avatarImageUrl);
+
+  // FALLBACK: avatar não responde a prompt safer. Cai pra text-only descrevendo
+  // pessoa genérica falando o texto. Só aplica em audioMode = veo_native — no
+  // tts_overlay o avatar é meramente decorativo (mudo), então deixa text-only
+  // genérico também.
+  if (hasAvatar && isFallback) {
+    const prompt =
+      state.audioMode === "veo_native"
+        ? buildAvatarFallbackTextOnlyPrompt(seg.text, state.gender)
+        : buildBrollPrompt(
+            "A young adult person stands in a softly lit minimal interior, looking at the camera neutrally.",
+            undefined,
+            attempt,
+          );
+    const res = await submitVeoTextOnly(prompt, accessToken);
+    return { opName: res.opName, usedFallback: true };
+  }
+
   if (hasAvatar) {
     const image = await getAvatarImage();
     if (!image) throw new Error("Avatar image não encontrada pra retry");
@@ -285,9 +315,9 @@ async function resubmitSegment(
         ? buildAvatarSpeechPrompt(seg.text, state.gender, undefined, attempt)
         : buildAvatarSilentPrompt(undefined, attempt);
     const res = await submitVeoWithImage(prompt, image, accessToken);
-    return res.opName;
+    return { opName: res.opName, usedFallback: false };
   }
   const prompt = buildBrollPrompt(seg.visualPrompt, undefined, attempt);
   const res = await submitVeoTextOnly(prompt, accessToken);
-  return res.opName;
+  return { opName: res.opName, usedFallback: false };
 }
