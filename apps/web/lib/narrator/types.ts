@@ -38,4 +38,9 @@ export interface NarratorJobState {
   segments: NarratorSegmentState[];
   finalVideoUrl: string | null;
   finalErrorMessage: string | null;
+  // Timestamp (ms epoch) de quando o assembly final começou. Usado pra evitar
+  // re-entry — o polling roda a cada 8s e o assembly pode demorar 30-60s.
+  // Se != null e < 5min atrás, polling não retrigger; se > 5min, assume travou
+  // e libera pra nova tentativa.
+  assemblyStartedAt?: number | null;
 }

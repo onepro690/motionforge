@@ -93,6 +93,28 @@ export async function GET(
       });
     }
 
+    // Timeout de take: se ficou >10min em PROCESSING, marca FAILED.
+    // Veo 3 Fast tipicamente leva 30-120s; >10min = travou.
+    const TAKE_TIMEOUT_MS = 10 * 60 * 1000;
+    const jobStartedAt = job.startedAt?.getTime() ?? Date.now();
+    const elapsedMs = Date.now() - jobStartedAt;
+    if (elapsedMs > TAKE_TIMEOUT_MS) {
+      let anyTimedOut = false;
+      for (const seg of state.segments) {
+        if (seg.status === "PROCESSING") {
+          seg.status = "FAILED";
+          seg.errorMessage = `Take ${seg.index + 1} excedeu ${TAKE_TIMEOUT_MS / 60000}min em PROCESSING — Veo timeout.`;
+          anyTimedOut = true;
+        }
+      }
+      if (anyTimedOut) {
+        await prisma.generationJob.update({
+          where: { id: job.id },
+          data: { generatedPrompt: JSON.stringify(state) },
+        });
+      }
+    }
+
     // Polling: pra cada segmento PROCESSING, chama fetchPredictOperation
     const accessToken = await getVertexAccessToken();
     const language = state.language ?? "pt-BR";
@@ -226,6 +248,31 @@ export async function GET(
     }
 
     if (allOk) {
+      // GUARD contra re-entry: polling roda a cada 8s e assembly demora 30s+.
+      // Sem guard, várias instâncias do assembly rodam em paralelo, saturando
+      // ffmpeg/IO e às vezes travando. Se assembly começou recentemente
+      // (<5min), retorna PROCESSING sem retrigger; se >5min, assume travou.
+      const now = Date.now();
+      const ASSEMBLY_LOCK_MS = 5 * 60 * 1000;
+      if (state.assemblyStartedAt && now - state.assemblyStartedAt < ASSEMBLY_LOCK_MS) {
+        return NextResponse.json({
+          id: job.id,
+          status: "PROCESSING",
+          narrationDurationSeconds: state.narrationDurationSeconds,
+          segments: state.segments.map((s) => ({ index: s.index, status: s.status, text: s.text, usedFallback: s.usedFallback ?? false })),
+          progress: {
+            completed: state.segments.length,
+            total: state.segments.length,
+          },
+        });
+      }
+      // Marca início do assembly e persiste ANTES de chamar ffmpeg.
+      state.assemblyStartedAt = now;
+      await prisma.generationJob.update({
+        where: { id: job.id },
+        data: { generatedPrompt: JSON.stringify(state) },
+      });
+
       const takeUrls = state.segments.map((s) => s.videoUrl!).filter(Boolean);
       try {
         const result = await assembleNarratorVideo({

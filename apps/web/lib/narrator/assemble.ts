@@ -59,21 +59,19 @@ const SPEECH_END_PADDING = 0.3;
 // a duração inteira do take (8s).
 async function detectSpeechEnd(audioPath: string): Promise<number> {
   try {
-    // silencedetect=n=-35dB:d=0.4 → marca silêncios >=0.4s abaixo de -35dB.
-    // Saída no stderr: "silence_start: 5.234" e "silence_end: 5.789".
     const { stderr } = await execFileP(
       FFMPEG_MODERN_PATH,
-      ["-hide_banner", "-i", audioPath, "-af", "silencedetect=n=-35dB:d=0.4", "-f", "null", "-"],
-      { maxBuffer: 10 * 1024 * 1024, timeout: 30_000 },
+      ["-hide_banner", "-nostdin", "-i", audioPath, "-af", "silencedetect=n=-35dB:d=0.4", "-f", "null", "-"],
+      { maxBuffer: 10 * 1024 * 1024, timeout: 15_000 },
     );
-    // Pega o MAIOR silence_start (último silêncio antes do fim do clip)
     const matches = [...stderr.matchAll(/silence_start:\s*([\d.]+)/g)];
     if (matches.length === 0) return TAKE_DURATION_SECS;
     const lastSilenceStart = parseFloat(matches[matches.length - 1][1]);
     const trimAt = Math.min(TAKE_DURATION_SECS, lastSilenceStart + SPEECH_END_PADDING);
     if (trimAt < MIN_TAKE_AFTER_TRIM) return TAKE_DURATION_SECS;
     return trimAt;
-  } catch {
+  } catch (err) {
+    console.warn("[narrator/assemble] detectSpeechEnd failed, using full duration:", err instanceof Error ? err.message : err);
     return TAKE_DURATION_SECS;
   }
 }
