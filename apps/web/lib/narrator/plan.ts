@@ -138,8 +138,8 @@ export async function planNarratorSegments({ copy, takeCount, vibe }: PlanArgs):
   return segments;
 }
 
-// Fallback: divide a copy em N partes de tamanho similar, quebrando em
-// fronteira de palavra. Garante que NENHUMA palavra se perca.
+// Fallback antigo: divide por chars em fronteira de palavra. Mantido pra
+// retrocompatibilidade do `planNarratorSegments` quando o LLM retorna lixo.
 function splitCopyDeterministic(copy: string, n: number): string[] {
   const words = copy.split(/(\s+)/); // mantém os espaços
   const totalChars = copy.length;
@@ -165,6 +165,53 @@ function splitCopyDeterministic(copy: string, n: number): string[] {
   return out;
 }
 
+// Split por fim de oração (`.`, `!`, `?`). Agrupa sentenças em buckets até
+// cada bucket aproximar de `targetTakeCount` em char count balanceado. Nunca
+// quebra dentro de uma frase — cada take começa e termina em fronteira de
+// pontuação forte.
+//
+// Trade-off: o número de buckets PODE diferir de `targetTakeCount`. Se a copy
+// tem poucas frases (ex 3 frases longas pra 5 takes pedidos), devolve 3 takes.
+// Se tem muitas frases curtas, agrupa pra chegar perto do target.
+function splitCopyBySentences(copy: string, targetTakeCount: number): string[] {
+  // Captura cada sentença com sua pontuação final (mantém aspas/parênteses
+  // de fechamento depois do ponto). Trecho final sem pontuação vira sentença.
+  const sentenceRegex = /[^.!?\n]+[.!?]+["”'’)\]]*\s*|[^.!?\n]+(?:\n|$)/g;
+  const sentences = (copy.match(sentenceRegex) ?? [copy])
+    .map((s) => s.trim())
+    .filter(Boolean);
+
+  if (sentences.length === 0) return [copy.trim()];
+  if (sentences.length <= targetTakeCount) {
+    return sentences;
+  }
+
+  const totalChars = sentences.reduce((a, s) => a + s.length, 0);
+  const targetPerBucket = totalChars / targetTakeCount;
+
+  const buckets: string[] = [];
+  let current = "";
+  let currentChars = 0;
+
+  for (const s of sentences) {
+    const remainingTakes = targetTakeCount - buckets.length;
+    const wouldBeChars = currentChars + s.length + (current ? 1 : 0);
+    // Fecha o bucket atual quando ele já ultrapassou o target E ainda há mais
+    // takes a preencher (last bucket recebe tudo que sobrar).
+    if (current && wouldBeChars > targetPerBucket * 1.4 && remainingTakes > 1) {
+      buckets.push(current);
+      current = s;
+      currentChars = s.length;
+    } else {
+      current = current ? `${current} ${s}` : s;
+      currentChars = wouldBeChars;
+    }
+  }
+  if (current) buckets.push(current);
+
+  return buckets;
+}
+
 function defaultVisualPrompt(_text: string, vibe?: string): string {
   const style = vibe?.trim() || "cinematic premium B-roll";
   return `Vertical 9:16 ${style}, dynamic camera movement, rich color grading, no people speaking, no text on screen, no subtitles, ambient documentary tone.`;
@@ -174,8 +221,12 @@ function defaultVisualPrompt(_text: string, vibe?: string): string {
 // foto do avatar (reusada em todos os takes), portanto não precisamos de
 // visualPrompt cinematográfico — o prompt do Veo é construído no caller a
 // partir do `text` + voice/gender/audioMode.
+//
+// Split é por fim de oração: cada take termina em ponto/exclamação/interrogação,
+// nunca corta no meio de uma frase. Pode resultar em menos takes que o pedido
+// (quando copy tem poucas frases longas) — está OK, prefere coerência narrativa.
 export function planAvatarSegments(copy: string, takeCount: number): NarratorSegment[] {
-  return splitCopyDeterministic(copy, takeCount).map((text) => ({
+  return splitCopyBySentences(copy, takeCount).map((text) => ({
     text,
     visualPrompt: "",
   }));

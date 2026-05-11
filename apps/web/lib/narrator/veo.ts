@@ -3,6 +3,13 @@
 // puramente texto → vídeo (sem image input).
 
 import { GoogleAuth } from "google-auth-library";
+import ffmpegInstaller from "@ffmpeg-installer/ffmpeg";
+import ffmpeg from "fluent-ffmpeg";
+import { writeFile, readFile, unlink } from "fs/promises";
+import { join } from "path";
+import { randomBytes } from "crypto";
+
+ffmpeg.setFfmpegPath(ffmpegInstaller.path);
 
 const PROJECT_ID = "gen-lang-client-0466084510";
 const LOCATION   = "us-central1";
@@ -65,21 +72,56 @@ export interface VeoImageInput {
   mimeType: string;
 }
 
+// Converte qualquer imagem (square, landscape, vertical não-padrão) pra
+// 1080x1920 JPEG via ffmpeg center-crop. Necessário porque Veo image-to-video
+// respeita o aspect ratio da imagem de entrada e ignora `aspectRatio:"9:16"`
+// quando há mismatch — resultado: vídeo sai quadrado/horizontal se a foto não
+// for vertical. Forçar 9:16 na imagem garante saída 9:16.
+async function forceImageTo916(input: Buffer): Promise<Buffer> {
+  const id = randomBytes(8).toString("hex");
+  const inPath = join("/tmp", `narrator-img-in-${id}.bin`);
+  const outPath = join("/tmp", `narrator-img-out-${id}.jpg`);
+  try {
+    await writeFile(inPath, input);
+    await new Promise<void>((resolve, reject) => {
+      ffmpeg(inPath)
+        .videoFilter("scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1")
+        .outputOptions(["-frames:v", "1", "-q:v", "2"])
+        .output(outPath)
+        .on("end", () => resolve())
+        .on("error", (err: Error) => reject(err))
+        .run();
+    });
+    return await readFile(outPath);
+  } finally {
+    await unlink(inPath).catch(() => {});
+    await unlink(outPath).catch(() => {});
+  }
+}
+
 // Baixa uma URL HTTPS e devolve {bytesBase64Encoded, mimeType} pronto pra
-// Vertex AI. mimeType vem do Content-Type da resposta (ou heurística no path).
-export async function fetchImageForVeo(url: string): Promise<VeoImageInput> {
+// Vertex AI. Quando opts.forceVertical=true (default), a imagem é convertida
+// pra 1080x1920 JPEG via center-crop antes de virar base64.
+export async function fetchImageForVeo(
+  url: string,
+  opts: { forceVertical?: boolean } = { forceVertical: true },
+): Promise<VeoImageInput> {
   const res = await fetch(url, { signal: AbortSignal.timeout(30_000) });
   if (!res.ok) throw new Error(`Falha ao baixar imagem do avatar (${res.status})`);
   const contentType = res.headers.get("content-type")?.split(";")[0]?.trim() ?? "";
   const ext = url.split("?")[0].split(".").pop()?.toLowerCase() ?? "";
-  const mimeType =
+  let mimeType =
     contentType.startsWith("image/")
       ? contentType
       : ext === "png" ? "image/png"
       : ext === "webp" ? "image/webp"
       : ext === "heic" ? "image/heic"
       : "image/jpeg";
-  const buffer = Buffer.from(await res.arrayBuffer());
+  let buffer: Buffer = Buffer.from(await res.arrayBuffer());
+  if (opts.forceVertical !== false) {
+    buffer = await forceImageTo916(buffer);
+    mimeType = "image/jpeg";
+  }
   return { bytesBase64Encoded: buffer.toString("base64"), mimeType };
 }
 
