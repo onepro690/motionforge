@@ -46,6 +46,11 @@ const TAKE_DURATION_SECS = 8;
 // 0.25s é curto o suficiente pra ficar imperceptível no áudio quando a quebra
 // é em fronteira de pontuação (split por sentence).
 const CROSSFADE_SECS = 0.25;
+// Filtro de normalização aplicado a cada take ANTES do xfade. fps e
+// setpts=PTS-STARTPTS são obrigatórios pra xfade não dar "Invalid argument" —
+// streams precisam ter timebase e fps idênticos.
+const XFADE_VIDEO_NORMALIZE = "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1,fps=30,setpts=PTS-STARTPTS";
+const XFADE_AUDIO_NORMALIZE = "aresample=44100,aformat=sample_fmts=fltp:channel_layouts=stereo,asetpts=N/SR/TB";
 
 // Concat ou crossfade os takes em sequência. Quando N > 1, usa xfade visual
 // pra eliminar "snap" entre takes (cada take parte da mesma foto, então sem
@@ -72,8 +77,8 @@ async function concatTakes(inputPaths: string[], outputPath: string, includeAudi
   }
 
   const n = inputPaths.length;
-  // Vertical-force em cada input
-  const vFilters = inputPaths.map((_, i) => `[${i}:v]${FORCE_VERTICAL_FILTER}[v${i}]`).join(";");
+  // Normaliza cada input (fps + sar + setpts) pra xfade não reclamar.
+  const vFilters = inputPaths.map((_, i) => `[${i}:v]${XFADE_VIDEO_NORMALIZE}[v${i}]`).join(";");
 
   // Cadeia de xfade encadeado:
   // [v0][v1]xfade=...:offset=7.75[xv1]
@@ -96,9 +101,7 @@ async function concatTakes(inputPaths: string[], outputPath: string, includeAudi
 
   if (includeAudio) {
     // Áudio: cadeia de acrossfade pareada com o xfade visual.
-    const aPrep = inputPaths
-      .map((_, i) => `[${i}:a]aresample=44100,aformat=sample_fmts=fltp:channel_layouts=stereo[a${i}]`)
-      .join(";");
+    const aPrep = inputPaths.map((_, i) => `[${i}:a]${XFADE_AUDIO_NORMALIZE}[a${i}]`).join(";");
     let acrossfadeChain = "";
     let aPrev = "a0";
     for (let i = 1; i < n; i++) {
@@ -114,6 +117,7 @@ async function concatTakes(inputPaths: string[], outputPath: string, includeAudi
     codecArgs = ["-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p", "-movflags", "+faststart", "-an"];
   }
 
+  console.log(`[narrator/assemble] complex filter (${n} takes):`, filter.slice(0, 500));
   await new Promise<void>((resolve, reject) => {
     const cmd = ffmpeg();
     for (const p of inputPaths) cmd.input(p);
@@ -121,6 +125,9 @@ async function concatTakes(inputPaths: string[], outputPath: string, includeAudi
       .complexFilter(filter)
       .outputOptions([...mapArgs, ...codecArgs])
       .output(outputPath)
+      .on("stderr", (line: string) => {
+        if (/error|invalid|fail/i.test(line)) console.error("[narrator/assemble][ffmpeg]", line);
+      })
       .on("end", () => resolve())
       .on("error", (err: Error) => reject(err))
       .run();
