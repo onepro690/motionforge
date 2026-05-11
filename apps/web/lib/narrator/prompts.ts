@@ -110,7 +110,9 @@ export function buildAvatarSilentPrompt(vibe: string | undefined, attempt: numbe
   ].filter(Boolean).join(" ");
 }
 
-// Prompt do Veo no modo B-roll (sem avatar) — comportamento legado.
+// Prompt do Veo no modo B-roll (sem avatar) — comportamento legado AstroCopy.
+// Injeta estética mystical/astrology em CIMA do visualPrompt. NÃO usar em
+// mixed mode — lá o B-roll precisa ilustrar literalmente sem viés temático.
 export function buildBrollPrompt(visualPrompt: string, vibe: string | undefined, attempt: number = 0): string {
   const styleSuffix = vibe?.trim() ? ` Style: ${vibe.trim()}.` : "";
   return [
@@ -122,6 +124,21 @@ export function buildBrollPrompt(visualPrompt: string, vibe: string | undefined,
     "Dynamic revealing camera movement throughout — fast push-in, snap zoom, orbiting camera, crane reveal, vertigo zoom. Never static.",
     "STRICTLY VERTICAL portrait orientation, 9:16 aspect ratio, 1080x1920 mobile vertical full-frame composition, the subject and action FILL the entire vertical frame from top to bottom, no letterboxing, no pillarboxing, no black bars, no horizontal-style framing, framed for TikTok/Reels/Shorts.",
     `Cinematic premium B-roll, sharp focus, dramatic high-contrast color grading, suspenseful and revelatory pacing.${styleSuffix}`,
+  ].filter(Boolean).join(" ");
+}
+
+// Prompt do Veo pra B-roll GENÉRICO (modo mixed). Não injeta estética temática
+// hardcoded — confia no visualPrompt do LLM pra dizer EXATAMENTE o que mostrar.
+// Cinematográfico realista, ilustrando literalmente o que a copy fala.
+export function buildBrollPromptGeneric(visualPrompt: string, attempt: number = 0): string {
+  return [
+    safetyPrefix(attempt),
+    visualPrompt,
+    "Photographic realism, cinematic short-form vertical content (TikTok/Reels/Shorts style).",
+    "Subtle camera movement that supports the subject (slow push-in, slight handheld, or static if appropriate). Natural realistic lighting that fits the scene described above. Sharp focus on the subject, gentle depth of field.",
+    "STRICTLY VERTICAL 9:16, 1080x1920, full-frame composition that fills the entire vertical frame from top to bottom. No letterboxing, no pillarboxing, no black bars.",
+    "NO people speaking. NO subtitles. NO captions. NO on-screen text. NO watermarks. NO logos. NO motion graphics. NO animated overlays. NO sparkles. NO particles added in post. NO light streaks added.",
+    "The audio track must be COMPLETELY SILENT — no voice, no music, no sound effects, no ambient sound. Treat audio as a muted clip.",
   ].filter(Boolean).join(" ");
 }
 

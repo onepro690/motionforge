@@ -100,19 +100,30 @@ const PREPROCESS_AUDIO_FILTER = "aresample=44100,aformat=sample_fmts=fltp:channe
 // includeAudio=true preserva o áudio dos takes (modo Veo nativo) e aplica
 // acrossfade pareado pra manter sync com xfade visual. includeAudio=false
 // descarta áudio (B-roll / TTS overlay — áudio é narração muxada depois).
-// Pré-processa um take: aplica normalize de vídeo, normalize de áudio (se
-// includeAudio), e trim na duração detectada. Output é um MP4 pronto pra ser
-// alimentado num filter complex simples (xfade only) sem precisar de mais
-// filtros pesados.
+// Pré-processa um take: aplica normalize de vídeo + áudio + trim na duração
+// detectada. Output: MP4 pronto pra filter complex simples (xfade only).
+//
+// Quando audioOverridePath é fornecido, descarta o áudio original do take e
+// usa o MP3 fornecido — usado em modo misturado pros takes broll receberem
+// o TTS específico daquele trecho.
 async function preprocessTake(
   inputPath: string,
   outputPath: string,
   duration: number,
   includeAudio: boolean,
+  audioOverridePath: string | null = null,
 ): Promise<void> {
-  const args = ["-y", "-hide_banner", "-i", inputPath, "-t", duration.toFixed(3)];
+  const args = ["-y", "-hide_banner", "-i", inputPath];
+  if (audioOverridePath) args.push("-i", audioOverridePath);
+  args.push("-t", duration.toFixed(3));
   args.push("-vf", PREPROCESS_VIDEO_FILTER);
-  if (includeAudio) {
+  if (audioOverridePath) {
+    // Mapeia vídeo do input 0, áudio do input 1 (override). Trim no áudio
+    // também via -t global.
+    args.push("-map", "0:v", "-map", "1:a");
+    args.push("-af", PREPROCESS_AUDIO_FILTER);
+    args.push("-c:a", "aac", "-b:a", "192k");
+  } else if (includeAudio) {
     args.push("-af", PREPROCESS_AUDIO_FILTER);
     args.push("-c:a", "aac", "-b:a", "192k");
   } else {
@@ -151,7 +162,7 @@ async function mapWithConcurrency<T, R>(
   return results;
 }
 
-async function concatTakes(inputPaths: string[], outputPath: string, includeAudio: boolean): Promise<void> {
+async function concatTakes(inputPaths: string[], outputPath: string, includeAudio: boolean, audioOverridePaths: (string | null)[] = []): Promise<void> {
   // Detecta fim da fala em cada take (modo includeAudio). Concorrência limitada
   // também aqui pra não atropelar o Lambda.
   const trimDurations = includeAudio
@@ -168,8 +179,9 @@ async function concatTakes(inputPaths: string[], outputPath: string, includeAudi
   const normalizedPaths: string[] = new Array(inputPaths.length);
   await mapWithConcurrency(inputPaths, FFMPEG_CONCURRENCY, async (input, i) => {
     const out = join(tmpDir, `narrator-norm-${runId}-${i}.mp4`);
-    console.log(`[narrator/assemble] preprocess take ${i} (dur=${trimDurations[i].toFixed(2)}s)`);
-    await preprocessTake(input, out, trimDurations[i], includeAudio);
+    const audioOverride = audioOverridePaths[i] ?? null;
+    console.log(`[narrator/assemble] preprocess take ${i} (dur=${trimDurations[i].toFixed(2)}s)${audioOverride ? " [audio override]" : ""}`);
+    await preprocessTake(input, out, trimDurations[i], includeAudio, audioOverride);
     normalizedPaths[i] = out;
   });
 
@@ -422,10 +434,14 @@ async function muxNoCaptions(videoPath: string, audioPath: string, narrationSeco
 
 export interface AssembleNarratorArgs {
   takeUrls: string[];                   // URLs dos N takes Veo (ordem)
-  narrationAudioUrl: string | null;     // URL do MP3 do TTS (null no modo Veo nativo)
+  narrationAudioUrl: string | null;     // URL do MP3 do TTS global (null no modo Veo nativo)
   narrationSeconds: number;             // duração estimada/real da narração
   jobId: string;                        // pra nomear o blob
   audioMode: "veo_native" | "tts_overlay";
+  // Modo misturado: por take, opcional URL de MP3 que SUBSTITUI o áudio
+  // daquele take. Usado pros segments style='broll' em mixed mode (avatar/cutout
+  // mantém áudio Veo). null/undefined em índices que mantêm áudio original.
+  audioOverlays?: (string | null)[];
 }
 
 export interface AssembleNarratorResult {
@@ -444,6 +460,10 @@ export async function assembleNarratorVideo(args: AssembleNarratorArgs): Promise
   const assPath    = join(tmpDir, "captions.ass");
   const finalPath  = join(tmpDir, "final.mp4");
 
+  // Audio overlays paths (depois do download). Mesmo tamanho que takeUrls,
+  // entrada null pra takes que mantêm áudio original.
+  const audioOverlayPaths: (string | null)[] = new Array(args.takeUrls.length).fill(null);
+
   try {
     // Download takes em paralelo
     await Promise.all(
@@ -454,11 +474,25 @@ export async function assembleNarratorVideo(args: AssembleNarratorArgs): Promise
       })
     );
 
+    // Download audio overlays (se houver) em paralelo
+    if (args.audioOverlays && args.audioOverlays.length > 0) {
+      await Promise.all(
+        args.audioOverlays.map(async (url, i) => {
+          if (!url) return;
+          const p = join(tmpDir, `overlay-${i}.mp3`);
+          await downloadToFile(url, p);
+          audioOverlayPaths[i] = p;
+        }),
+      );
+    }
+
     // ───────── Modo Veo nativo ─────────
     // Áudio (fala + lip-sync) vem direto dos takes. Concat preservando áudio,
-    // sem TTS overlay, sem captions. Duração final = soma dos takes.
+    // sem TTS overlay global, sem captions. Em modo mixed, alguns takes têm
+    // audioOverlay (TTS específico daquele segment broll) que substitui o áudio
+    // mudo do Veo.
     if (args.audioMode === "veo_native") {
-      await concatTakes(takePaths, finalPath, true);
+      await concatTakes(takePaths, finalPath, true, audioOverlayPaths);
       const buffer = await readFile(finalPath);
       const blob = await put(`narrator-${args.jobId}.mp4`, buffer, {
         access: "public",
@@ -529,7 +563,8 @@ export async function assembleNarratorVideo(args: AssembleNarratorArgs): Promise
 
     return { finalVideoUrl: blob.url, durationSeconds: args.narrationSeconds };
   } finally {
-    const all = [...takePaths, concatPath, audioPath, assPath, finalPath];
+    const overlays = audioOverlayPaths.filter((p): p is string => Boolean(p));
+    const all = [...takePaths, ...overlays, concatPath, audioPath, assPath, finalPath];
     await Promise.all(all.map((p) => unlink(p).catch(() => {})));
     await rmdir(tmpDir).catch(() => {});
   }

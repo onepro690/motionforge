@@ -21,6 +21,7 @@ import {
   buildAvatarSpeechPrompt,
   buildAvatarSilentPrompt,
   buildBrollPrompt,
+  buildBrollPromptGeneric,
 } from "@/lib/narrator/prompts";
 import { detectLanguage } from "@/lib/narrator/language";
 import type { NarratorJobState, NarratorSegmentState, NarratorAudioMode } from "@/lib/narrator/types";
@@ -41,7 +42,7 @@ const schema = z.object({
   mixMode: z.enum(["avatar", "broll", "mixed"]).optional(),
 });
 
-async function generateTtsToBlob(script: string, voice: string, jobId: string): Promise<{ url: string; durationSeconds: number }> {
+async function generateTtsToBlob(script: string, voice: string, jobId: string, suffix = ""): Promise<{ url: string; durationSeconds: number }> {
   const apiKey = process.env.OPENAI_API_KEY;
   if (!apiKey) throw new Error("OPENAI_API_KEY not configured");
 
@@ -69,7 +70,7 @@ async function generateTtsToBlob(script: string, voice: string, jobId: string): 
   const durationSeconds = await ffmpegProbeDuration(tmp);
   await unlink(tmp).catch(() => {});
 
-  const blob = await put(`narrator-tts-${jobId}.mp3`, buffer, {
+  const blob = await put(`narrator-tts-${jobId}${suffix}.mp3`, buffer, {
     access: "public",
     contentType: "audio/mpeg",
     addRandomSuffix: false,
@@ -108,12 +109,16 @@ export async function POST(request: NextRequest) {
     if (!hasAvatar) mixMode = "broll";
 
     // audioMode resolution:
-    //  - "mixed" precisa de áudio consistente entre estilos → força tts_overlay
-    //  - "broll" sempre tts_overlay (legado)
+    //  - "broll" sem avatar → tts_overlay (legado)
+    //  - "mixed" → veo_native nos takes avatar/cutout (lipsync), TTS por take
+    //    nos broll. Tratado como "veo_native" no state mas com segment.audioOverlayUrl
+    //    populado pros broll.
     //  - "avatar" respeita audioMode; default veo_native
     let audioMode: NarratorAudioMode;
-    if (mixMode === "broll" || mixMode === "mixed") {
+    if (mixMode === "broll") {
       audioMode = "tts_overlay";
+    } else if (mixMode === "mixed") {
+      audioMode = "veo_native";
     } else {
       audioMode = parsed.data.audioMode ?? "veo_native";
     }
@@ -192,40 +197,67 @@ export async function POST(request: NextRequest) {
         avatarImage = await fetchImageForVeo(avatarImageUrl!);
       }
 
-      // Pra cutouts, prepara fotos editadas via Nano Banana em paralelo ANTES
-      // de submeter os Veos. Se Nano Banana falhar (RAI/etc), fallback p/ avatar
-      // normal usando a foto original.
+      // PREPS PARALELOS:
+      //  1. Pra cutouts: Nano Banana edita foto (troca fundo).
+      //  2. Pra broll em mixed mode: gera TTS específico daquele trecho.
       const cutoutImages: Record<number, VeoImageInput | null> = {};
-      const cutoutPrep = segments.map(async (seg, i) => {
-        if (seg.style !== "avatar_cutout") return;
-        if (!avatarImageUrl) return;
-        const editedUrl = await swapAvatarBackground(
-          avatarImageUrl,
-          seg.backgroundDescription || "soft cinematic indoor scene with natural light",
-          job.id,
-          i,
-        );
-        if (editedUrl) {
-          try {
-            cutoutImages[i] = await fetchImageForVeo(editedUrl);
-            (seg as PlannedSegment & { editedImageUrl?: string }).editedImageUrl = editedUrl;
-          } catch {
-            cutoutImages[i] = null;
+      const brollTtsUrls: Record<number, string | null> = {};
+
+      await Promise.all(
+        segments.flatMap((seg, i) => {
+          const tasks: Promise<void>[] = [];
+
+          // 1. Nano Banana cutout
+          if (seg.style === "avatar_cutout" && avatarImageUrl) {
+            tasks.push((async () => {
+              const editedUrl = await swapAvatarBackground(
+                avatarImageUrl,
+                seg.backgroundDescription || "soft cinematic indoor scene with natural light",
+                job.id,
+                i,
+              );
+              if (editedUrl) {
+                try {
+                  cutoutImages[i] = await fetchImageForVeo(editedUrl);
+                  (seg as PlannedSegment & { editedImageUrl?: string }).editedImageUrl = editedUrl;
+                } catch {
+                  cutoutImages[i] = null;
+                }
+              }
+            })());
           }
-        }
-      });
-      await Promise.all(cutoutPrep);
+
+          // 2. TTS por segmento em mixed mode (só broll precisa — avatar/cutout
+          //    têm áudio Veo nativo com lipsync).
+          if (mixMode === "mixed" && seg.style === "broll" && seg.text.trim()) {
+            tasks.push((async () => {
+              try {
+                const tts = await generateTtsToBlob(seg.text, voice, job.id, `-seg-${i}`);
+                brollTtsUrls[i] = tts.url;
+              } catch (err) {
+                console.error(`[narrator] TTS por segmento ${i} falhou:`, err);
+                brollTtsUrls[i] = null;
+              }
+            })());
+          }
+
+          return tasks;
+        }),
+      );
+
+      // Helper: escolhe builder de prompt B-roll. Em mixed, usa o genérico
+      // (ilustra literalmente sem injetar estética hardcoded).
+      const brollBuilder = mixMode === "mixed" ? buildBrollPromptGeneric : (vp: string, attempt: number) => buildBrollPrompt(vp, vibe, attempt);
 
       const submitResults = await Promise.allSettled(
         segments.map((seg, i) => {
           if (seg.style === "broll") {
-            return submitVeoTextOnly(buildBrollPrompt(seg.visualPrompt, vibe, 0), accessToken);
+            return submitVeoTextOnly(brollBuilder(seg.visualPrompt, 0), accessToken);
           }
-          // avatar OR avatar_cutout — ambos usam image-to-video
+          // avatar OR avatar_cutout — image-to-video
           const image = seg.style === "avatar_cutout" ? cutoutImages[i] ?? avatarImage : avatarImage;
           if (!image) {
-            // fallback final: text-only avatar
-            return submitVeoTextOnly(buildBrollPrompt(seg.visualPrompt, vibe, 0), accessToken);
+            return submitVeoTextOnly(brollBuilder(seg.visualPrompt, 0), accessToken);
           }
           const prompt =
             audioMode === "veo_native"
@@ -239,6 +271,7 @@ export async function POST(request: NextRequest) {
       const segState: NarratorSegmentState[] = segments.map((seg, i) => {
         const r = submitResults[i];
         const editedImageUrl = (seg as PlannedSegment & { editedImageUrl?: string }).editedImageUrl ?? null;
+        const audioOverlayUrl = brollTtsUrls[i] ?? null;
         if (r.status === "fulfilled") {
           return {
             index: i,
@@ -251,6 +284,7 @@ export async function POST(request: NextRequest) {
             lastSubmittedAt: submittedAt,
             style: seg.style,
             editedImageUrl,
+            audioOverlayUrl,
           };
         }
         return {
@@ -263,6 +297,7 @@ export async function POST(request: NextRequest) {
           errorMessage: r.reason instanceof Error ? r.reason.message : String(r.reason),
           style: seg.style,
           editedImageUrl,
+          audioOverlayUrl,
         };
       });
 

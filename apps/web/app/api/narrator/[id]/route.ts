@@ -321,6 +321,7 @@ export async function GET(
       });
 
       const takeUrls = state.segments.map((s) => s.videoUrl!).filter(Boolean);
+      const audioOverlays = state.segments.map((s) => s.audioOverlayUrl ?? null);
       try {
         const result = await assembleNarratorVideo({
           takeUrls,
@@ -328,6 +329,7 @@ export async function GET(
           narrationSeconds: state.narrationDurationSeconds,
           jobId: job.id,
           audioMode: state.audioMode,
+          audioOverlays,
         });
         state.finalVideoUrl = result.finalVideoUrl;
         await prisma.generationJob.update({

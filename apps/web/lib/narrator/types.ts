@@ -31,6 +31,10 @@ export interface NarratorSegmentState {
   style?: NarratorSegmentStyle;
   // URL da foto editada por Nano Banana — só pra style='avatar_cutout'.
   editedImageUrl?: string | null;
+  // URL do MP3 do TTS específico desse segmento. Setado em modo 'mixed' pros
+  // takes 'broll' (avatar/cutout têm áudio Veo nativo). Quando presente, o
+  // assembly substitui o áudio do take por esse TTS.
+  audioOverlayUrl?: string | null;
 }
 
 export interface NarratorJobState {
