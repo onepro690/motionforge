@@ -40,6 +40,20 @@ const FORCE_VERTICAL_FILTER = "scale=1080:1920:force_original_aspect_ratio=incre
 // includeAudio=true preserva o áudio dos takes (usado no modo Veo nativo onde
 // o lip-sync vem direto do Veo). includeAudio=false descarta áudio (modo
 // B-roll/TTS overlay — áudio é a narração que será muxada depois).
+// Duração de cada take Veo 3 Fast (sempre 8s).
+const TAKE_DURATION_SECS = 8;
+// Duração do crossfade entre takes — suaviza snap visual sem comprometer fala.
+// 0.25s é curto o suficiente pra ficar imperceptível no áudio quando a quebra
+// é em fronteira de pontuação (split por sentence).
+const CROSSFADE_SECS = 0.25;
+
+// Concat ou crossfade os takes em sequência. Quando N > 1, usa xfade visual
+// pra eliminar "snap" entre takes (cada take parte da mesma foto, então sem
+// crossfade haveria um corte seco onde o avatar volta pra pose inicial).
+//
+// includeAudio=true preserva o áudio dos takes (modo Veo nativo) e aplica
+// acrossfade pareado pra manter sync com xfade visual. includeAudio=false
+// descarta áudio (B-roll / TTS overlay — áudio é narração muxada depois).
 async function concatTakes(inputPaths: string[], outputPath: string, includeAudio: boolean): Promise<void> {
   if (inputPaths.length === 1) {
     const opts = includeAudio
@@ -57,27 +71,45 @@ async function concatTakes(inputPaths: string[], outputPath: string, includeAudi
     return;
   }
 
-  // Pra múltiplos inputs: aplica FORCE_VERTICAL_FILTER em cada stream antes
-  // do concat. Cadeia: [0:v]filter[v0];[1:v]filter[v1];...;[v0][v1]...concat[vout]
+  const n = inputPaths.length;
+  // Vertical-force em cada input
   const vFilters = inputPaths.map((_, i) => `[${i}:v]${FORCE_VERTICAL_FILTER}[v${i}]`).join(";");
-  const vLabels = inputPaths.map((_, i) => `[v${i}]`).join("");
 
-  let filter: string;
+  // Cadeia de xfade encadeado:
+  // [v0][v1]xfade=...:offset=7.75[xv1]
+  // [xv1][v2]xfade=...:offset=15.5[xv2]
+  // ... até [vout]
+  let xfadeChain = "";
+  let prevLabel = "v0";
+  let accumulated = TAKE_DURATION_SECS;
+  for (let i = 1; i < n; i++) {
+    const offset = (accumulated - CROSSFADE_SECS).toFixed(3);
+    const outLabel = i === n - 1 ? "vout" : `xv${i}`;
+    xfadeChain += `;[${prevLabel}][v${i}]xfade=transition=fade:duration=${CROSSFADE_SECS}:offset=${offset}[${outLabel}]`;
+    prevLabel = outLabel;
+    accumulated += TAKE_DURATION_SECS - CROSSFADE_SECS;
+  }
+
+  let filter = `${vFilters}${xfadeChain}`;
   let mapArgs: string[];
   let codecArgs: string[];
 
   if (includeAudio) {
-    // Normaliza áudio de cada take pra evitar mismatch de sample rate / channels
-    // entre takes do Veo. asetpts garante timestamps consecutivos.
-    const aFilters = inputPaths
-      .map((_, i) => `[${i}:a]aresample=44100,aformat=sample_fmts=fltp:channel_layouts=stereo,asetpts=N/SR/TB[a${i}]`)
+    // Áudio: cadeia de acrossfade pareada com o xfade visual.
+    const aPrep = inputPaths
+      .map((_, i) => `[${i}:a]aresample=44100,aformat=sample_fmts=fltp:channel_layouts=stereo[a${i}]`)
       .join(";");
-    const concatPairs = inputPaths.map((_, i) => `[v${i}][a${i}]`).join("");
-    filter = `${vFilters};${aFilters};${concatPairs}concat=n=${inputPaths.length}:v=1:a=1[vout][aout]`;
+    let acrossfadeChain = "";
+    let aPrev = "a0";
+    for (let i = 1; i < n; i++) {
+      const outLabel = i === n - 1 ? "aout" : `xa${i}`;
+      acrossfadeChain += `;[${aPrev}][a${i}]acrossfade=d=${CROSSFADE_SECS}[${outLabel}]`;
+      aPrev = outLabel;
+    }
+    filter = `${vFilters};${aPrep}${xfadeChain}${acrossfadeChain}`;
     mapArgs = ["-map", "[vout]", "-map", "[aout]"];
     codecArgs = ["-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart"];
   } else {
-    filter = `${vFilters};${vLabels}concat=n=${inputPaths.length}:v=1:a=0[vout]`;
     mapArgs = ["-map", "[vout]"];
     codecArgs = ["-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p", "-movflags", "+faststart", "-an"];
   }

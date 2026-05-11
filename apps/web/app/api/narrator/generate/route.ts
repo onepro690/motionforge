@@ -154,62 +154,45 @@ export async function POST(request: NextRequest) {
         avatarImage = await fetchImageForVeo(avatarImageUrl!);
       }
 
-      let segState: NarratorSegmentState[];
-
-      if (hasAvatar && avatarImage) {
-        // Avatar mode: take 0 com a foto, demais QUEUED.
-        const firstPrompt =
-          audioMode === "veo_native"
-            ? buildAvatarSpeechPrompt(segments[0].text, gender, vibe, 0, language)
-            : buildAvatarSilentPrompt(vibe, 0);
-        let firstOpName: string | null = null;
-        let firstError: string | null = null;
-        try {
-          const r = await submitVeoWithImage(firstPrompt, avatarImage, accessToken);
-          firstOpName = r.opName;
-        } catch (e) {
-          firstError = e instanceof Error ? e.message : String(e);
-        }
-        segState = segments.map((seg, i) => ({
-          index: i,
-          text: seg.text,
-          visualPrompt: seg.visualPrompt,
-          opName: i === 0 ? firstOpName : null,
-          status: i === 0 ? (firstOpName ? "PROCESSING" : "FAILED") : "QUEUED",
-          videoUrl: null,
-          errorMessage: i === 0 ? firstError : null,
-        }));
-      } else {
-        // B-roll mode: paralelo (sem chaining — todos text-only).
-        const submitResults = await Promise.allSettled(
-          segments.map((seg) =>
-            submitVeoTextOnly(buildBrollPrompt(seg.visualPrompt, vibe, 0), accessToken),
-          ),
-        );
-        segState = segments.map((seg, i) => {
-          const r = submitResults[i];
-          if (r.status === "fulfilled") {
-            return {
-              index: i,
-              text: seg.text,
-              visualPrompt: seg.visualPrompt,
-              opName: r.value.opName,
-              status: "PROCESSING" as const,
-              videoUrl: null,
-              errorMessage: null,
-            };
+      // Todos os takes em paralelo. No modo avatar, cada take começa da MESMA
+      // foto original — zero drift de identidade/cor. Cortes secos visuais
+      // são suavizados depois via crossfade no assembly.
+      const submitResults = await Promise.allSettled(
+        segments.map((seg) => {
+          if (hasAvatar && avatarImage) {
+            const prompt =
+              audioMode === "veo_native"
+                ? buildAvatarSpeechPrompt(seg.text, gender, vibe, 0, language)
+                : buildAvatarSilentPrompt(vibe, 0);
+            return submitVeoWithImage(prompt, avatarImage, accessToken);
           }
+          return submitVeoTextOnly(buildBrollPrompt(seg.visualPrompt, vibe, 0), accessToken);
+        }),
+      );
+
+      const segState: NarratorSegmentState[] = segments.map((seg, i) => {
+        const r = submitResults[i];
+        if (r.status === "fulfilled") {
           return {
             index: i,
             text: seg.text,
             visualPrompt: seg.visualPrompt,
-            opName: null,
-            status: "FAILED" as const,
+            opName: r.value.opName,
+            status: "PROCESSING" as const,
             videoUrl: null,
-            errorMessage: r.reason instanceof Error ? r.reason.message : String(r.reason),
+            errorMessage: null,
           };
-        });
-      }
+        }
+        return {
+          index: i,
+          text: seg.text,
+          visualPrompt: seg.visualPrompt,
+          opName: null,
+          status: "FAILED" as const,
+          videoUrl: null,
+          errorMessage: r.reason instanceof Error ? r.reason.message : String(r.reason),
+        };
+      });
 
       const state: NarratorJobState = {
         kind: "narrator-v1",

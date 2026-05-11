@@ -15,7 +15,6 @@ import {
   submitVeoWithImage,
   submitVeoTextOnly,
   fetchImageForVeo,
-  extractLastFrameAsVeoImage,
   type VeoImageInput,
 } from "@/lib/narrator/veo";
 import { assembleNarratorVideo } from "@/lib/narrator/assemble";
@@ -176,36 +175,6 @@ export async function GET(
         } catch (err) {
           seg.status = "FAILED";
           seg.errorMessage = err instanceof Error ? err.message : String(err);
-        }
-      }
-
-      // LAST-FRAME CHAINING: pra cada take QUEUED cujo anterior está COMPLETED,
-      // extrai o último frame do anterior e submete com ele como image input.
-      // Isso elimina cortes secos — o avatar continua exatamente da pose final
-      // do take anterior em vez de "snap" pra foto original.
-      if (state.avatarImageUrl) {
-        for (let i = 1; i < state.segments.length; i++) {
-          const seg = state.segments[i];
-          const prev = state.segments[i - 1];
-          if (seg.status !== "QUEUED") continue;
-          if (prev.status !== "COMPLETED" || !prev.videoUrl) continue;
-
-          try {
-            const lastFrame = await extractLastFrameAsVeoImage(prev.videoUrl);
-            const prompt =
-              state.audioMode === "veo_native"
-                ? buildAvatarSpeechPrompt(seg.text, state.gender, undefined, 0, language)
-                : buildAvatarSilentPrompt(undefined, 0);
-            const { opName } = await submitVeoWithImage(prompt, lastFrame, accessToken);
-            seg.opName = opName;
-            seg.status = "PROCESSING";
-            seg.errorMessage = null;
-          } catch (chainErr) {
-            seg.status = "FAILED";
-            seg.errorMessage = `Falha no chaining take ${i}: ${chainErr instanceof Error ? chainErr.message : String(chainErr)}`;
-          }
-          // Submete um por iteração pra não sobrecarregar — próximos QUEUED viram na próxima passada.
-          break;
         }
       }
 
