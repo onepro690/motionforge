@@ -101,45 +101,62 @@ const PREPROCESS_AUDIO_FILTER = "aresample=44100,aformat=sample_fmts=fltp:channe
 // acrossfade pareado pra manter sync com xfade visual. includeAudio=false
 // descarta áudio (B-roll / TTS overlay — áudio é narração muxada depois).
 // Pré-processa um take: aplica normalize de vídeo + áudio + trim na duração
-// detectada. Output: MP4 pronto pra filter complex simples (xfade only).
+// detectada + (opcional) fade-in no início e fade-out no fim. Output: MP4
+// pronto pra concat demuxer (mesmos codecs/fps/sar).
 //
-// Quando audioOverridePath é fornecido, descarta o áudio original do take e
-// usa o MP3 fornecido — usado em modo misturado pros takes broll receberem
-// o TTS específico daquele trecho.
+// fadeIn/fadeOut: quando true, aplica fade visual e de áudio nos extremos —
+// usado pra suavizar transição entre takes no concat demuxer (sem xfade
+// complex pesado).
+//
+// audioOverridePath: substitui áudio do take pelo MP3 fornecido (usado em
+// mixed mode pros takes broll receberem TTS daquele trecho).
 async function preprocessTake(
   inputPath: string,
   outputPath: string,
   duration: number,
   includeAudio: boolean,
   audioOverridePath: string | null = null,
+  fadeIn = false,
+  fadeOut = false,
 ): Promise<void> {
+  // Constrói filtros condicionais com fades.
+  const fadeDur = 0.25;
+  let vFilter = PREPROCESS_VIDEO_FILTER;
+  if (fadeIn) vFilter += `,fade=t=in:st=0:d=${fadeDur}`;
+  if (fadeOut) vFilter += `,fade=t=out:st=${(duration - fadeDur).toFixed(3)}:d=${fadeDur}`;
+
+  let aFilter = PREPROCESS_AUDIO_FILTER;
+  if (fadeIn) aFilter += `,afade=t=in:st=0:d=${fadeDur}`;
+  if (fadeOut) aFilter += `,afade=t=out:st=${(duration - fadeDur).toFixed(3)}:d=${fadeDur}`;
+
   const args = ["-y", "-hide_banner", "-i", inputPath];
   if (audioOverridePath) args.push("-i", audioOverridePath);
   args.push("-t", duration.toFixed(3));
-  args.push("-vf", PREPROCESS_VIDEO_FILTER);
+  args.push("-vf", vFilter);
   if (audioOverridePath) {
-    // Mapeia vídeo do input 0, áudio do input 1 (override). Trim no áudio
-    // também via -t global.
     args.push("-map", "0:v", "-map", "1:a");
-    args.push("-af", PREPROCESS_AUDIO_FILTER);
-    args.push("-c:a", "aac", "-b:a", "192k");
+    args.push("-af", aFilter);
+    args.push("-c:a", "aac", "-b:a", "192k", "-ar", "44100");
   } else if (includeAudio) {
-    args.push("-af", PREPROCESS_AUDIO_FILTER);
-    args.push("-c:a", "aac", "-b:a", "192k");
+    args.push("-af", aFilter);
+    args.push("-c:a", "aac", "-b:a", "192k", "-ar", "44100");
   } else {
     args.push("-an");
   }
+  // Codec/params idênticos em todos os takes pra concat demuxer aceitar.
   args.push(
-    "-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p", "-movflags", "+faststart",
+    "-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p",
+    "-profile:v", "high", "-level", "4.0",
+    "-r", "30",
+    "-movflags", "+faststart",
     outputPath,
   );
   await execFileP(FFMPEG_MODERN_PATH, args, { maxBuffer: 100 * 1024 * 1024, timeout: 60_000 });
 }
 
-// Limite de concorrência para ffmpegs simultâneos. Vercel Lambda default tem
-// 1 vCPU e 1024MB — rodar 8 ffmpegs em paralelo satura e dá timeout. 2 é o
-// sweet spot: roda 2 enquanto outros 6 esperam, mantém Lambda responsiva.
-const FFMPEG_CONCURRENCY = 2;
+// Limite de concorrência para ffmpegs simultâneos. Vercel Lambda 1024MB/1vCPU
+// não aguenta nem 2 ffmpegs paralelos com filter pesado — fica sequencial.
+const FFMPEG_CONCURRENCY = 1;
 
 // Executa fn(item, idx) em chunks de `limit` por vez. Preserva ordem do array
 // resultante e propaga o primeiro erro.
@@ -173,89 +190,67 @@ async function concatTakes(inputPaths: string[], outputPath: string, includeAudi
   const tmpDir = dirname(outputPath);
   const runId = randomBytes(4).toString("hex");
 
-  // 1. Pre-process cada take com concorrência limitada. Cada chamada é um
-  // ffmpeg single-input. No Lambda, 8 ffmpegs em paralelo travavam por
-  // saturação de CPU/RAM. Com concorrência=2 fica estável.
+  // 1. Pre-process cada take SEQUENCIALMENTE com fade-in/out aplicado nos
+  // extremos (exceto primeiro/último). Codec/params idênticos pra concat
+  // demuxer aceitar. fade-out + fade-in nas bordas dá uma transição
+  // fade-to-black de ~0.5s que substitui o xfade complex.
+  const n = inputPaths.length;
   const normalizedPaths: string[] = new Array(inputPaths.length);
   await mapWithConcurrency(inputPaths, FFMPEG_CONCURRENCY, async (input, i) => {
     const out = join(tmpDir, `narrator-norm-${runId}-${i}.mp4`);
     const audioOverride = audioOverridePaths[i] ?? null;
-    console.log(`[narrator/assemble] preprocess take ${i} (dur=${trimDurations[i].toFixed(2)}s)${audioOverride ? " [audio override]" : ""}`);
-    await preprocessTake(input, out, trimDurations[i], includeAudio, audioOverride);
+    const fadeIn = i > 0;          // não fade-in no primeiro take
+    const fadeOut = i < n - 1;     // não fade-out no último take
+    console.log(`[narrator/assemble] preprocess take ${i} (dur=${trimDurations[i].toFixed(2)}s)${audioOverride ? " [audio override]" : ""}${fadeIn ? " fadeIn" : ""}${fadeOut ? " fadeOut" : ""}`);
+    await preprocessTake(input, out, trimDurations[i], includeAudio, audioOverride, fadeIn, fadeOut);
     normalizedPaths[i] = out;
   });
 
   try {
     if (normalizedPaths.length === 1) {
-      // 1 take só → renomeia o pre-processed pro outputPath.
+      // 1 take só — renomeia o pre-processed pro outputPath.
       const { rename } = await import("fs/promises");
       await rename(normalizedPaths[0], outputPath);
-      normalizedPaths[0] = ""; // já consumido, não deletar
+      normalizedPaths[0] = "";
       return;
     }
 
-    const n = normalizedPaths.length;
-    // 2. Filter complex SIMPLES: só xfade/acrossfade. Sem normalize, sem trim.
-    // Inputs já estão prontos (mesma fps/sar/duration esperada).
-    const vFilters = normalizedPaths
-      .map((_, i) => `[${i}:v]setpts=PTS-STARTPTS[v${i}]`)
-      .join(";");
+    // 2. Concat via demuxer com stream copy. Como os takes têm codec/fps/sar
+    // idênticos (forçados no pre-process), o demuxer aceita sem re-encode.
+    // Operação é IO-bound (segundos), não CPU-bound. Resolve o travamento do
+    // filter complex pesado em Vercel Lambda.
+    const concatList = join(tmpDir, `concat-${runId}.txt`);
+    const listContent = normalizedPaths
+      .map((p) => `file '${p.replace(/\\/g, "/")}'`)
+      .join("\n");
+    const { writeFile: writeFilePromise } = await import("fs/promises");
+    await writeFilePromise(concatList, listContent);
 
-    let xfadeChain = "";
-    let prevLabel = "v0";
-    let accumulated = trimDurations[0];
-    for (let i = 1; i < n; i++) {
-      const offset = (accumulated - CROSSFADE_SECS).toFixed(3);
-      const outLabel = i === n - 1 ? "vout" : `xv${i}`;
-      xfadeChain += `;[${prevLabel}][v${i}]xfade=transition=fade:duration=${CROSSFADE_SECS}:offset=${offset}[${outLabel}]`;
-      prevLabel = outLabel;
-      accumulated += trimDurations[i] - CROSSFADE_SECS;
-    }
-
-    let filter = `${vFilters}${xfadeChain}`;
-    let mapArgs: string[];
-    let codecArgs: string[];
-
-    if (includeAudio) {
-      const aPrep = normalizedPaths.map((_, i) => `[${i}:a]asetpts=N/SR/TB[a${i}]`).join(";");
-      let acrossfadeChain = "";
-      let aPrev = "a0";
-      for (let i = 1; i < n; i++) {
-        const outLabel = i === n - 1 ? "aout" : `xa${i}`;
-        acrossfadeChain += `;[${aPrev}][a${i}]acrossfade=d=${CROSSFADE_SECS}[${outLabel}]`;
-        aPrev = outLabel;
-      }
-      filter = `${vFilters};${aPrep}${xfadeChain}${acrossfadeChain}`;
-      mapArgs = ["-map", "[vout]", "-map", "[aout]"];
-      codecArgs = ["-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart"];
-    } else {
-      mapArgs = ["-map", "[vout]"];
-      codecArgs = ["-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p", "-movflags", "+faststart", "-an"];
-    }
-
-    const args: string[] = ["-y", "-hide_banner"];
-    for (const p of normalizedPaths) {
-      args.push("-i", p);
-    }
-    args.push("-filter_complex", filter, ...mapArgs, ...codecArgs, outputPath);
-
-    console.log(`[narrator/assemble] xfade final (${n} takes), filter len=${filter.length}`);
+    const args = [
+      "-y", "-hide_banner",
+      "-f", "concat", "-safe", "0",
+      "-i", concatList,
+      "-c", "copy",
+      "-movflags", "+faststart",
+      outputPath,
+    ];
+    console.log(`[narrator/assemble] concat demuxer (${n} takes)`);
     try {
       const { stderr } = await execFileP(FFMPEG_MODERN_PATH, args, {
         maxBuffer: 100 * 1024 * 1024,
-        timeout: 180_000,
+        timeout: 60_000,
       });
       const tail = stderr.split("\n").slice(-5).join("\n");
-      console.log("[narrator/assemble] xfade done. tail:\n", tail);
+      console.log("[narrator/assemble] concat done. tail:\n", tail);
     } catch (err) {
       const e = err as { stderr?: string; message?: string };
-      console.error("[narrator/assemble] xfade FAILED:", e.message);
-      console.error("[narrator/assemble] xfade filter:", filter);
-      console.error("[narrator/assemble] xfade stderr:", e.stderr?.slice(-3000));
+      console.error("[narrator/assemble] concat FAILED:", e.message);
+      console.error("[narrator/assemble] concat stderr:", e.stderr?.slice(-3000));
       throw err;
+    } finally {
+      await unlink(concatList).catch(() => {});
     }
   } finally {
-    // Limpa pré-processados temporários
     for (const p of normalizedPaths) {
       if (p) await unlink(p).catch(() => {});
     }
