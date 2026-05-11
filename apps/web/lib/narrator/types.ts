@@ -13,6 +13,10 @@ export interface NarratorSegmentState {
   // Quantas vezes esse take já foi re-submetido após bloqueio RAI (default 0).
   // Quando bate MAX_RAI_RETRIES, último retry cai pra text-only sem imagem.
   retryCount?: number;
+  // Epoch ms da última submissão pro Veo. Usado pra detectar takes pendurados
+  // (Vertex AI às vezes não retorna done=true mesmo após minutos). Reset a cada
+  // resubmit. Permite stuck-retry sem confundir com retry RAI.
+  lastSubmittedAt?: number;
   // True quando o take rodou em fallback text-only (sem foto do avatar) porque
   // todos os retries com imagem foram bloqueados pelo filtro RAI. UI deve
   // sinalizar isso pro user.

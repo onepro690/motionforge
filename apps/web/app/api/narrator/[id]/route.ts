@@ -93,21 +93,66 @@ export async function GET(
       });
     }
 
-    // Timeout de take: se ficou >10min em PROCESSING, marca FAILED.
-    // Veo 3 Fast tipicamente leva 30-120s; >10min = travou.
-    const TAKE_TIMEOUT_MS = 10 * 60 * 1000;
+    // Setup compartilhado entre stuck-retry e polling.
+    const STUCK_THRESHOLD_MS = 6 * 60 * 1000;
     const jobStartedAt = job.startedAt?.getTime() ?? Date.now();
-    const elapsedMs = Date.now() - jobStartedAt;
-    if (elapsedMs > TAKE_TIMEOUT_MS) {
-      let anyTimedOut = false;
+    const accessToken = await getVertexAccessToken();
+    const language = state.language ?? "pt-BR";
+
+    // Cache lazy da imagem do avatar — só baixa se algum retry precisar.
+    let cachedAvatarImage: VeoImageInput | null = null;
+    const getAvatarImage = async (): Promise<VeoImageInput | null> => {
+      if (!state.avatarImageUrl) return null;
+      if (cachedAvatarImage) return cachedAvatarImage;
+      cachedAvatarImage = await fetchImageForVeo(state.avatarImageUrl);
+      return cachedAvatarImage;
+    };
+
+    // Detecção e RETRY de takes "stuck": Vertex AI às vezes não retorna
+    // done=true mesmo após muitos minutos. Se um take está PROCESSING há mais
+    // de STUCK_THRESHOLD_MS, re-submete (incrementando retryCount).
+    {
+      let anyChanged = false;
       for (const seg of state.segments) {
-        if (seg.status === "PROCESSING") {
+        if (seg.status !== "PROCESSING") continue;
+        const submittedAt = seg.lastSubmittedAt ?? jobStartedAt;
+        const stuckMs = Date.now() - submittedAt;
+        if (stuckMs < STUCK_THRESHOLD_MS) continue;
+
+        const currentRetry = seg.retryCount ?? 0;
+        if (currentRetry >= MAX_RAI_RETRIES) {
           seg.status = "FAILED";
-          seg.errorMessage = `Take ${seg.index + 1} excedeu ${TAKE_TIMEOUT_MS / 60000}min em PROCESSING — Veo timeout.`;
-          anyTimedOut = true;
+          seg.errorMessage = `Take ${seg.index + 1} ficou stuck no Veo por ${Math.round(stuckMs / 60000)}min após ${MAX_RAI_RETRIES} retries — desistindo.`;
+          anyChanged = true;
+          continue;
+        }
+
+        const nextAttempt = currentRetry + 1;
+        const isFinalFallback = nextAttempt === MAX_RAI_RETRIES && Boolean(state.avatarImageUrl);
+        try {
+          console.log(`[narrator/[id]] take ${seg.index + 1} stuck for ${Math.round(stuckMs / 60000)}min, resubmitting (attempt ${nextAttempt})`);
+          const { opName: newOp, usedFallback } = await resubmitSegment(
+            seg,
+            state,
+            nextAttempt,
+            isFinalFallback,
+            accessToken,
+            getAvatarImage,
+          );
+          seg.opName = newOp;
+          seg.retryCount = nextAttempt;
+          seg.lastSubmittedAt = Date.now();
+          seg.usedFallback = seg.usedFallback || usedFallback;
+          seg.errorMessage = null;
+          anyChanged = true;
+        } catch (err) {
+          seg.status = "FAILED";
+          seg.errorMessage = `Resubmit stuck take falhou: ${err instanceof Error ? err.message : String(err)}`;
+          anyChanged = true;
         }
       }
-      if (anyTimedOut) {
+
+      if (anyChanged) {
         await prisma.generationJob.update({
           where: { id: job.id },
           data: { generatedPrompt: JSON.stringify(state) },
@@ -116,8 +161,6 @@ export async function GET(
     }
 
     // Polling: pra cada segmento PROCESSING, chama fetchPredictOperation
-    const accessToken = await getVertexAccessToken();
-    const language = state.language ?? "pt-BR";
     const pendingIdx = state.segments.map((s, i) => (s.status === "PROCESSING" && s.opName ? i : -1)).filter((i) => i >= 0);
 
     if (pendingIdx.length > 0) {
@@ -129,15 +172,6 @@ export async function GET(
       // stripa — precisamos preservar pra usar no assembly. Caso contrário (B-roll
       // ou avatar mudo com TTS overlay), removemos pra trocar pela TTS depois.
       const preserveVeoAudio = state.audioMode === "veo_native";
-
-      // Cache lazy da imagem do avatar — só baixa se algum retry precisar.
-      let cachedAvatarImage: VeoImageInput | null = null;
-      const getAvatarImage = async (): Promise<VeoImageInput | null> => {
-        if (!state.avatarImageUrl) return null;
-        if (cachedAvatarImage) return cachedAvatarImage;
-        cachedAvatarImage = await fetchImageForVeo(state.avatarImageUrl);
-        return cachedAvatarImage;
-      };
 
       for (const { idx, r } of polls) {
         if (!r.done) continue;
@@ -162,6 +196,7 @@ export async function GET(
               );
               seg.opName = newOp;
               seg.retryCount = nextAttempt;
+              seg.lastSubmittedAt = Date.now();
               seg.usedFallback = seg.usedFallback || usedFallback;
               seg.status = "PROCESSING";
               seg.errorMessage = null;

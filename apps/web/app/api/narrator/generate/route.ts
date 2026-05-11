@@ -170,6 +170,7 @@ export async function POST(request: NextRequest) {
         }),
       );
 
+      const submittedAt = Date.now();
       const segState: NarratorSegmentState[] = segments.map((seg, i) => {
         const r = submitResults[i];
         if (r.status === "fulfilled") {
@@ -181,6 +182,7 @@ export async function POST(request: NextRequest) {
             status: "PROCESSING" as const,
             videoUrl: null,
             errorMessage: null,
+            lastSubmittedAt: submittedAt,
           };
         }
         return {
