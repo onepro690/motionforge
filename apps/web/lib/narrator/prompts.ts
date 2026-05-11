@@ -25,8 +25,10 @@ function pronunciationLock(text: string, language: NarratorLanguage): string {
   return [
     `PRONUNCIATION LOCK — ${lang} ONLY. Articulate clearly, syllable by syllable, at a slightly slower than conversational pace if needed to be intelligible.`,
     `Pronounce EVERY SINGLE WORD exactly as written. DO NOT skip, omit, shorten, contract, mumble, swallow, slur, or paraphrase any word. DO NOT add interjections, sighs, fillers ("hum", "uh", "like", "you know"), or any extra sound. DO NOT improvise — read the text verbatim.`,
+    `VERBATIM LOCK: treat the text below as a LEGAL TRANSCRIPT to be read WORD-FOR-WORD. DO NOT add ANY word that is not present. DO NOT remove ANY word that is present. DO NOT substitute words with synonyms or rephrase. DO NOT change word order. DO NOT add filler or connective words. The output spoken sentence must match the written text 100% verbatim, period.`,
+    `CONTINUOUS DELIVERY LOCK: Speak the entire text CONTINUOUSLY from start to end of the take, with even pacing and NO long pauses, NO silent staring, NO frozen frames, NO trailing silence at the end. Begin speaking immediately (within first 0.3 seconds of the take). End the take naturally right after the last word — do not stare into the camera afterwards. If the text is short, fill the remaining time with a brief natural facial expression (gentle smile, subtle nod) — never with empty silence.`,
     `If a word is uncommon or seems foreign, read it letter-by-letter following standard ${lang} phonetic rules. Treat every word as essential — no word can be left out or unclear.`,
-    `The complete sentence that MUST be heard, in full, with every word audible and correctly pronounced in ${lang}:`,
+    `The EXACT VERBATIM sentence that MUST be spoken, in ${lang}, with every word in this exact order, NOTHING added, NOTHING removed:`,
     `"${text}"`,
   ].join(" ");
 }

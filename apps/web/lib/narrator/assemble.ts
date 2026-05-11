@@ -48,6 +48,35 @@ const FORCE_VERTICAL_FILTER = "scale=1080:1920:force_original_aspect_ratio=incre
 // B-roll/TTS overlay — áudio é a narração que será muxada depois).
 // Duração de cada take Veo 3 Fast (sempre 8s).
 const TAKE_DURATION_SECS = 8;
+// Mínimo aceitável após trim de silêncio (se a "fala" for muito curta, é
+// provável que o silencedetect tenha pego falso positivo — mantém take inteiro).
+const MIN_TAKE_AFTER_TRIM = 2.0;
+// Margem após o fim da fala detectada — evita cortar a última sílaba.
+const SPEECH_END_PADDING = 0.3;
+
+// Detecta onde o silêncio "longo" começa no fim do áudio. Retorna o timestamp
+// (segundos) onde devemos truncar o take. Se não houver silêncio longo, devolve
+// a duração inteira do take (8s).
+async function detectSpeechEnd(audioPath: string): Promise<number> {
+  try {
+    // silencedetect=n=-35dB:d=0.4 → marca silêncios >=0.4s abaixo de -35dB.
+    // Saída no stderr: "silence_start: 5.234" e "silence_end: 5.789".
+    const { stderr } = await execFileP(
+      FFMPEG_MODERN_PATH,
+      ["-hide_banner", "-i", audioPath, "-af", "silencedetect=n=-35dB:d=0.4", "-f", "null", "-"],
+      { maxBuffer: 10 * 1024 * 1024, timeout: 30_000 },
+    );
+    // Pega o MAIOR silence_start (último silêncio antes do fim do clip)
+    const matches = [...stderr.matchAll(/silence_start:\s*([\d.]+)/g)];
+    if (matches.length === 0) return TAKE_DURATION_SECS;
+    const lastSilenceStart = parseFloat(matches[matches.length - 1][1]);
+    const trimAt = Math.min(TAKE_DURATION_SECS, lastSilenceStart + SPEECH_END_PADDING);
+    if (trimAt < MIN_TAKE_AFTER_TRIM) return TAKE_DURATION_SECS;
+    return trimAt;
+  } catch {
+    return TAKE_DURATION_SECS;
+  }
+}
 // Duração do crossfade entre takes — suaviza snap visual sem comprometer fala.
 // 0.25s é curto o suficiente pra ficar imperceptível no áudio quando a quebra
 // é em fronteira de pontuação (split por sentence).
@@ -70,36 +99,47 @@ const XFADE_AUDIO_NORMALIZE = "aresample=44100,aformat=sample_fmts=fltp:channel_
 // acrossfade pareado pra manter sync com xfade visual. includeAudio=false
 // descarta áudio (B-roll / TTS overlay — áudio é narração muxada depois).
 async function concatTakes(inputPaths: string[], outputPath: string, includeAudio: boolean): Promise<void> {
+  // Detecta onde a fala termina em cada take (modo includeAudio). Cada take
+  // vai ser truncado nesse ponto pra eliminar o "olhando parado" depois da
+  // última palavra. Sem áudio (B-roll/TTS overlay), usa 8s fixo.
+  const trimDurations = includeAudio
+    ? await Promise.all(inputPaths.map((p) => detectSpeechEnd(p)))
+    : inputPaths.map(() => TAKE_DURATION_SECS);
+  console.log(`[narrator/assemble] take durations (after silence trim):`, trimDurations.map((d) => d.toFixed(2)));
+
   if (inputPaths.length === 1) {
-    const opts = includeAudio
-      ? ["-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart"]
-      : ["-an", "-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p", "-movflags", "+faststart"];
-    await new Promise<void>((resolve, reject) => {
-      ffmpeg(inputPaths[0])
-        .videoFilter(FORCE_VERTICAL_FILTER)
-        .outputOptions(opts)
-        .output(outputPath)
-        .on("end", () => resolve())
-        .on("error", (err: Error) => reject(err))
-        .run();
-    });
+    const dur = trimDurations[0];
+    const audioFilter = includeAudio ? `${XFADE_AUDIO_NORMALIZE},atrim=duration=${dur},asetpts=N/SR/TB` : "";
+    const videoFilter = `${XFADE_VIDEO_NORMALIZE},trim=duration=${dur},setpts=PTS-STARTPTS`;
+    const args: string[] = ["-y", "-hide_banner", "-i", inputPaths[0], "-filter_complex"];
+    if (includeAudio) {
+      args.push(`[0:v]${videoFilter}[v];[0:a]${audioFilter}[a]`, "-map", "[v]", "-map", "[a]",
+        "-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart");
+    } else {
+      args.push(`[0:v]${videoFilter}[v]`, "-map", "[v]",
+        "-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p", "-movflags", "+faststart", "-an");
+    }
+    args.push(outputPath);
+    await execFileP(FFMPEG_MODERN_PATH, args, { maxBuffer: 100 * 1024 * 1024, timeout: 240_000 });
     return;
   }
 
   const n = inputPaths.length;
-  // Normaliza cada input (fps + sar + setpts) pra xfade não reclamar.
-  const vFilters = inputPaths.map((_, i) => `[${i}:v]${XFADE_VIDEO_NORMALIZE}[v${i}]`).join(";");
+  // Normaliza E truncа cada input no ponto detectado (fim da fala).
+  const vFilters = inputPaths
+    .map((_, i) => `[${i}:v]${XFADE_VIDEO_NORMALIZE},trim=duration=${trimDurations[i]},setpts=PTS-STARTPTS[v${i}]`)
+    .join(";");
 
-  // Cadeia de xfade encadeado.
+  // Cadeia de xfade encadeado com offsets baseados na duração real de cada take.
   let xfadeChain = "";
   let prevLabel = "v0";
-  let accumulated = TAKE_DURATION_SECS;
+  let accumulated = trimDurations[0];
   for (let i = 1; i < n; i++) {
     const offset = (accumulated - CROSSFADE_SECS).toFixed(3);
     const outLabel = i === n - 1 ? "vout" : `xv${i}`;
     xfadeChain += `;[${prevLabel}][v${i}]xfade=transition=fade:duration=${CROSSFADE_SECS}:offset=${offset}[${outLabel}]`;
     prevLabel = outLabel;
-    accumulated += TAKE_DURATION_SECS - CROSSFADE_SECS;
+    accumulated += trimDurations[i] - CROSSFADE_SECS;
   }
 
   let filter = `${vFilters}${xfadeChain}`;
@@ -107,7 +147,9 @@ async function concatTakes(inputPaths: string[], outputPath: string, includeAudi
   let codecArgs: string[];
 
   if (includeAudio) {
-    const aPrep = inputPaths.map((_, i) => `[${i}:a]${XFADE_AUDIO_NORMALIZE}[a${i}]`).join(";");
+    const aPrep = inputPaths
+      .map((_, i) => `[${i}:a]${XFADE_AUDIO_NORMALIZE},atrim=duration=${trimDurations[i]},asetpts=N/SR/TB[a${i}]`)
+      .join(";");
     let acrossfadeChain = "";
     let aPrev = "a0";
     for (let i = 1; i < n; i++) {
