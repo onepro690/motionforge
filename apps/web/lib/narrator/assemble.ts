@@ -120,28 +120,53 @@ async function preprocessTake(
   await execFileP(FFMPEG_MODERN_PATH, args, { maxBuffer: 100 * 1024 * 1024, timeout: 60_000 });
 }
 
+// Limite de concorrência para ffmpegs simultâneos. Vercel Lambda default tem
+// 1 vCPU e 1024MB — rodar 8 ffmpegs em paralelo satura e dá timeout. 2 é o
+// sweet spot: roda 2 enquanto outros 6 esperam, mantém Lambda responsiva.
+const FFMPEG_CONCURRENCY = 2;
+
+// Executa fn(item, idx) em chunks de `limit` por vez. Preserva ordem do array
+// resultante e propaga o primeiro erro.
+async function mapWithConcurrency<T, R>(
+  items: T[],
+  limit: number,
+  fn: (item: T, idx: number) => Promise<R>,
+): Promise<R[]> {
+  const results: R[] = new Array(items.length);
+  let nextIdx = 0;
+  async function worker() {
+    while (true) {
+      const i = nextIdx++;
+      if (i >= items.length) return;
+      results[i] = await fn(items[i], i);
+    }
+  }
+  const workers = Array.from({ length: Math.min(limit, items.length) }, () => worker());
+  await Promise.all(workers);
+  return results;
+}
+
 async function concatTakes(inputPaths: string[], outputPath: string, includeAudio: boolean): Promise<void> {
-  // Detecta fim da fala em cada take (modo includeAudio).
+  // Detecta fim da fala em cada take (modo includeAudio). Concorrência limitada
+  // também aqui pra não atropelar o Lambda.
   const trimDurations = includeAudio
-    ? await Promise.all(inputPaths.map((p) => detectSpeechEnd(p)))
+    ? await mapWithConcurrency(inputPaths, FFMPEG_CONCURRENCY, (p) => detectSpeechEnd(p))
     : inputPaths.map(() => TAKE_DURATION_SECS);
   console.log(`[narrator/assemble] take durations (after silence trim):`, trimDurations.map((d) => d.toFixed(2)));
 
   const tmpDir = dirname(outputPath);
   const runId = randomBytes(4).toString("hex");
 
-  // 1. Pre-process cada take EM PARALELO. Cada chamada é um ffmpeg single-input
-  // leve. Resultado: arquivos `narrator-norm-{runId}-{i}.mp4` já com áudio
-  // limpo, trimmed e em 1080x1920 30fps.
-  const normalizedPaths: string[] = [];
-  await Promise.all(
-    inputPaths.map(async (input, i) => {
-      const out = join(tmpDir, `narrator-norm-${runId}-${i}.mp4`);
-      console.log(`[narrator/assemble] preprocess take ${i} (dur=${trimDurations[i].toFixed(2)}s)`);
-      await preprocessTake(input, out, trimDurations[i], includeAudio);
-      normalizedPaths[i] = out;
-    }),
-  );
+  // 1. Pre-process cada take com concorrência limitada. Cada chamada é um
+  // ffmpeg single-input. No Lambda, 8 ffmpegs em paralelo travavam por
+  // saturação de CPU/RAM. Com concorrência=2 fica estável.
+  const normalizedPaths: string[] = new Array(inputPaths.length);
+  await mapWithConcurrency(inputPaths, FFMPEG_CONCURRENCY, async (input, i) => {
+    const out = join(tmpDir, `narrator-norm-${runId}-${i}.mp4`);
+    console.log(`[narrator/assemble] preprocess take ${i} (dur=${trimDurations[i].toFixed(2)}s)`);
+    await preprocessTake(input, out, trimDurations[i], includeAudio);
+    normalizedPaths[i] = out;
+  });
 
   try {
     if (normalizedPaths.length === 1) {
