@@ -19,6 +19,7 @@ const nextConfig: NextConfig = {
     "@anthropic-ai/sdk",
     "fluent-ffmpeg",
     "@ffmpeg-installer/ffmpeg",
+    "ffmpeg-static",
     "google-auth-library",
     "tiktok-live-connector",
   ],
@@ -30,10 +31,14 @@ const nextConfig: NextConfig = {
       ],
     },
   },
-  // Garante que a fonte do narrator vai pro bundle serverless (Next 15 trace
-  // não inclui assets binários por default).
+  // Garante que a fonte do narrator e o binário ffmpeg-static (necessário pro
+  // filtro xfade) vão pro bundle serverless. Next 15 trace não inclui assets
+  // binários por default.
   outputFileTracingIncludes: {
-    "/api/narrator/**": ["./lib/narrator/fonts/**"],
+    "/api/narrator/**": [
+      "./lib/narrator/fonts/**",
+      "../../node_modules/ffmpeg-static/**",
+    ],
   },
   images: {
     remotePatterns: [

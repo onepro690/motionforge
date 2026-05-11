@@ -6,6 +6,7 @@
 // então cortamos o vídeo final exatamente na duração do TTS.
 
 import ffmpegInstaller from "@ffmpeg-installer/ffmpeg";
+import ffmpegStaticPath from "ffmpeg-static";
 import ffmpeg from "fluent-ffmpeg";
 import { writeFile, readFile, unlink, mkdir, rmdir } from "fs/promises";
 import { join } from "path";
@@ -17,6 +18,11 @@ import { generateCaptionsAss, type DrawtextChunk } from "./captions";
 
 ffmpeg.setFfmpegPath(ffmpegInstaller.path);
 const execFileP = promisify(execFile);
+
+// Binário moderno de ffmpeg (versão 6.0) — necessário pro filtro `xfade` que
+// não existe no @ffmpeg-installer (binário de 2018, ffmpeg N-92722). Usado
+// só pelo concatTakes; resto da pipeline continua no fluent-ffmpeg padrão.
+const FFMPEG_MODERN_PATH = (ffmpegStaticPath ?? ffmpegInstaller.path) as string;
 
 async function downloadToFile(url: string, destPath: string): Promise<void> {
   const res = await fetch(url, { signal: AbortSignal.timeout(120_000) });
@@ -80,10 +86,7 @@ async function concatTakes(inputPaths: string[], outputPath: string, includeAudi
   // Normaliza cada input (fps + sar + setpts) pra xfade não reclamar.
   const vFilters = inputPaths.map((_, i) => `[${i}:v]${XFADE_VIDEO_NORMALIZE}[v${i}]`).join(";");
 
-  // Cadeia de xfade encadeado:
-  // [v0][v1]xfade=...:offset=7.75[xv1]
-  // [xv1][v2]xfade=...:offset=15.5[xv2]
-  // ... até [vout]
+  // Cadeia de xfade encadeado.
   let xfadeChain = "";
   let prevLabel = "v0";
   let accumulated = TAKE_DURATION_SECS;
@@ -100,7 +103,6 @@ async function concatTakes(inputPaths: string[], outputPath: string, includeAudi
   let codecArgs: string[];
 
   if (includeAudio) {
-    // Áudio: cadeia de acrossfade pareada com o xfade visual.
     const aPrep = inputPaths.map((_, i) => `[${i}:a]${XFADE_AUDIO_NORMALIZE}[a${i}]`).join(";");
     let acrossfadeChain = "";
     let aPrev = "a0";
@@ -117,21 +119,29 @@ async function concatTakes(inputPaths: string[], outputPath: string, includeAudi
     codecArgs = ["-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p", "-movflags", "+faststart", "-an"];
   }
 
-  console.log(`[narrator/assemble] complex filter (${n} takes):`, filter.slice(0, 500));
-  await new Promise<void>((resolve, reject) => {
-    const cmd = ffmpeg();
-    for (const p of inputPaths) cmd.input(p);
-    cmd
-      .complexFilter(filter)
-      .outputOptions([...mapArgs, ...codecArgs])
-      .output(outputPath)
-      .on("stderr", (line: string) => {
-        if (/error|invalid|fail/i.test(line)) console.error("[narrator/assemble][ffmpeg]", line);
-      })
-      .on("end", () => resolve())
-      .on("error", (err: Error) => reject(err))
-      .run();
-  });
+  // CRÍTICO: xfade não existe no @ffmpeg-installer (binário de 2018). Usamos
+  // o ffmpeg-static (6.0) via execFile direto pra essa chamada específica.
+  const args: string[] = ["-y", "-hide_banner"];
+  for (const p of inputPaths) {
+    args.push("-i", p);
+  }
+  args.push("-filter_complex", filter, ...mapArgs, ...codecArgs, outputPath);
+
+  console.log(`[narrator/assemble] ffmpeg-static xfade (${n} takes), filter len=${filter.length}`);
+  try {
+    const { stderr } = await execFileP(FFMPEG_MODERN_PATH, args, {
+      maxBuffer: 100 * 1024 * 1024,
+      timeout: 240_000,
+    });
+    const tail = stderr.split("\n").slice(-5).join("\n");
+    console.log("[narrator/assemble] xfade done. tail:\n", tail);
+  } catch (err) {
+    const e = err as { stderr?: string; message?: string };
+    console.error("[narrator/assemble] xfade FAILED:", e.message);
+    console.error("[narrator/assemble] xfade filter:", filter);
+    console.error("[narrator/assemble] xfade stderr:", e.stderr?.slice(-3000));
+    throw err;
+  }
 }
 
 // Acha a fonte Anton.ttf que embarcamos em lib/narrator/fonts/. Em prod,
