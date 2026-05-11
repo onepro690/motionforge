@@ -19,6 +19,7 @@ import {
 } from "@/lib/narrator/veo";
 import { detectLanguage } from "@/lib/narrator/language";
 import { buildAvatarSpeechPrompt, buildAvatarSilentPrompt, buildBrollPrompt } from "@/lib/narrator/prompts";
+import { assembleNarratorVideo } from "@/lib/narrator/assemble";
 import type { NarratorSegmentState } from "@/lib/narrator/types";
 
 const SECRET = "motionforge2026";
@@ -27,7 +28,7 @@ function unauth() {
   return NextResponse.json({ error: "unauthorized" }, { status: 401 });
 }
 
-export const maxDuration = 120;
+export const maxDuration = 300;
 
 export async function GET(request: NextRequest) {
   const sp = request.nextUrl.searchParams;
@@ -35,6 +36,65 @@ export async function GET(request: NextRequest) {
 
   const jobId = sp.get("jobId");
   const action = sp.get("action");
+
+  // Força execução do assembly final pra um job que tem todos os takes
+  // COMPLETED mas o assembly travou. Retorna erro detalhado (incluindo stderr
+  // do ffmpeg) no response pra debug sem precisar de logs Vercel.
+  if (action === "force-assemble" && jobId) {
+    const job = await prisma.generationJob.findUnique({ where: { id: jobId } });
+    if (!job) return NextResponse.json({ error: "not found" }, { status: 404 });
+    if (!job.generatedPrompt) return NextResponse.json({ error: "no state" }, { status: 400 });
+    const state: NarratorJobState = JSON.parse(job.generatedPrompt);
+
+    const takeUrls = state.segments.map((s) => s.videoUrl).filter((u): u is string => Boolean(u));
+    if (takeUrls.length === 0) return NextResponse.json({ error: "no take videos" }, { status: 400 });
+
+    // Limpa lock pra permitir retry
+    state.assemblyStartedAt = null;
+    await prisma.generationJob.update({
+      where: { id: jobId },
+      data: { generatedPrompt: JSON.stringify(state) },
+    });
+
+    const t0 = Date.now();
+    try {
+      const result = await assembleNarratorVideo({
+        takeUrls,
+        narrationAudioUrl: state.narrationAudioUrl,
+        narrationSeconds: state.narrationDurationSeconds,
+        jobId: job.id,
+        audioMode: state.audioMode,
+      });
+      state.finalVideoUrl = result.finalVideoUrl;
+      await prisma.generationJob.update({
+        where: { id: jobId },
+        data: {
+          status: "COMPLETED",
+          outputVideoUrl: result.finalVideoUrl,
+          completedAt: new Date(),
+          generatedPrompt: JSON.stringify(state),
+        },
+      });
+      return NextResponse.json({
+        ok: true,
+        elapsedMs: Date.now() - t0,
+        finalVideoUrl: result.finalVideoUrl,
+        durationSeconds: result.durationSeconds,
+      });
+    } catch (err) {
+      const e = err as { stderr?: string; stdout?: string; message?: string; code?: number; signal?: string };
+      return NextResponse.json({
+        ok: false,
+        elapsedMs: Date.now() - t0,
+        message: e.message,
+        code: e.code,
+        signal: e.signal,
+        stderrTail: e.stderr?.slice(-4000),
+        stdoutTail: e.stdout?.slice(-1500),
+        takeUrls,
+      }, { status: 500 });
+    }
+  }
 
   if (jobId) {
     const job = await prisma.generationJob.findUnique({ where: { id: jobId } });
