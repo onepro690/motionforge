@@ -9,7 +9,7 @@ import ffmpegInstaller from "@ffmpeg-installer/ffmpeg";
 import ffmpegStaticPath from "ffmpeg-static";
 import ffmpeg from "fluent-ffmpeg";
 import { writeFile, readFile, unlink, mkdir, rmdir } from "fs/promises";
-import { join } from "path";
+import { join, dirname } from "path";
 import { randomBytes } from "crypto";
 import { put } from "@vercel/blob";
 import { execFile } from "child_process";
@@ -82,11 +82,11 @@ const CROSSFADE_SECS = 0.25;
 // Filtro de normalização aplicado a cada take ANTES do xfade. fps e
 // setpts=PTS-STARTPTS são obrigatórios pra xfade não dar "Invalid argument" —
 // streams precisam ter timebase e fps idênticos.
-const XFADE_VIDEO_NORMALIZE = "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1,fps=30,setpts=PTS-STARTPTS";
-// Áudio: normalização leve. loudnorm (EBU R128) era pesado e travava o filter
-// complex em filter graphs longos. dynaudnorm é dynamic / single-pass e roda
-// real-time. highpass corta bass <100Hz pra atenuar música de fundo.
-const XFADE_AUDIO_NORMALIZE = "aresample=44100,aformat=sample_fmts=fltp:channel_layouts=stereo,asetpts=N/SR/TB,highpass=f=100,dynaudnorm=f=200:g=15";
+// Filtros aplicados no PRE-PROCESS de cada take (1 input ffmpeg por take, leve).
+// O pre-process produz arquivos /tmp/norm_i.mp4 já normalizados, trimmed e com
+// áudio limpo. O filter complex final então só precisa fazer xfade entre eles.
+const PREPROCESS_VIDEO_FILTER = "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1,fps=30";
+const PREPROCESS_AUDIO_FILTER = "aresample=44100,aformat=sample_fmts=fltp:channel_layouts=stereo,highpass=f=100,dynaudnorm=f=200:g=15";
 
 // Concat ou crossfade os takes em sequência. Quando N > 1, usa xfade visual
 // pra eliminar "snap" entre takes (cada take parte da mesma foto, então sem
@@ -95,95 +95,128 @@ const XFADE_AUDIO_NORMALIZE = "aresample=44100,aformat=sample_fmts=fltp:channel_
 // includeAudio=true preserva o áudio dos takes (modo Veo nativo) e aplica
 // acrossfade pareado pra manter sync com xfade visual. includeAudio=false
 // descarta áudio (B-roll / TTS overlay — áudio é narração muxada depois).
+// Pré-processa um take: aplica normalize de vídeo, normalize de áudio (se
+// includeAudio), e trim na duração detectada. Output é um MP4 pronto pra ser
+// alimentado num filter complex simples (xfade only) sem precisar de mais
+// filtros pesados.
+async function preprocessTake(
+  inputPath: string,
+  outputPath: string,
+  duration: number,
+  includeAudio: boolean,
+): Promise<void> {
+  const args = ["-y", "-hide_banner", "-i", inputPath, "-t", duration.toFixed(3)];
+  args.push("-vf", PREPROCESS_VIDEO_FILTER);
+  if (includeAudio) {
+    args.push("-af", PREPROCESS_AUDIO_FILTER);
+    args.push("-c:a", "aac", "-b:a", "192k");
+  } else {
+    args.push("-an");
+  }
+  args.push(
+    "-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p", "-movflags", "+faststart",
+    outputPath,
+  );
+  await execFileP(FFMPEG_MODERN_PATH, args, { maxBuffer: 100 * 1024 * 1024, timeout: 60_000 });
+}
+
 async function concatTakes(inputPaths: string[], outputPath: string, includeAudio: boolean): Promise<void> {
-  // Detecta onde a fala termina em cada take (modo includeAudio). Cada take
-  // vai ser truncado nesse ponto pra eliminar o "olhando parado" depois da
-  // última palavra. Sem áudio (B-roll/TTS overlay), usa 8s fixo.
+  // Detecta fim da fala em cada take (modo includeAudio).
   const trimDurations = includeAudio
     ? await Promise.all(inputPaths.map((p) => detectSpeechEnd(p)))
     : inputPaths.map(() => TAKE_DURATION_SECS);
   console.log(`[narrator/assemble] take durations (after silence trim):`, trimDurations.map((d) => d.toFixed(2)));
 
-  if (inputPaths.length === 1) {
-    const dur = trimDurations[0];
-    const audioFilter = includeAudio ? `${XFADE_AUDIO_NORMALIZE},atrim=duration=${dur},asetpts=N/SR/TB` : "";
-    const videoFilter = `${XFADE_VIDEO_NORMALIZE},trim=duration=${dur},setpts=PTS-STARTPTS`;
-    const args: string[] = ["-y", "-hide_banner", "-i", inputPaths[0], "-filter_complex"];
-    if (includeAudio) {
-      args.push(`[0:v]${videoFilter}[v];[0:a]${audioFilter}[a]`, "-map", "[v]", "-map", "[a]",
-        "-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart");
-    } else {
-      args.push(`[0:v]${videoFilter}[v]`, "-map", "[v]",
-        "-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p", "-movflags", "+faststart", "-an");
-    }
-    args.push(outputPath);
-    await execFileP(FFMPEG_MODERN_PATH, args, { maxBuffer: 100 * 1024 * 1024, timeout: 240_000 });
-    return;
-  }
+  const tmpDir = dirname(outputPath);
+  const runId = randomBytes(4).toString("hex");
 
-  const n = inputPaths.length;
-  // Normaliza E truncа cada input no ponto detectado (fim da fala).
-  const vFilters = inputPaths
-    .map((_, i) => `[${i}:v]${XFADE_VIDEO_NORMALIZE},trim=duration=${trimDurations[i]},setpts=PTS-STARTPTS[v${i}]`)
-    .join(";");
+  // 1. Pre-process cada take EM PARALELO. Cada chamada é um ffmpeg single-input
+  // leve. Resultado: arquivos `narrator-norm-{runId}-{i}.mp4` já com áudio
+  // limpo, trimmed e em 1080x1920 30fps.
+  const normalizedPaths: string[] = [];
+  await Promise.all(
+    inputPaths.map(async (input, i) => {
+      const out = join(tmpDir, `narrator-norm-${runId}-${i}.mp4`);
+      console.log(`[narrator/assemble] preprocess take ${i} (dur=${trimDurations[i].toFixed(2)}s)`);
+      await preprocessTake(input, out, trimDurations[i], includeAudio);
+      normalizedPaths[i] = out;
+    }),
+  );
 
-  // Cadeia de xfade encadeado com offsets baseados na duração real de cada take.
-  let xfadeChain = "";
-  let prevLabel = "v0";
-  let accumulated = trimDurations[0];
-  for (let i = 1; i < n; i++) {
-    const offset = (accumulated - CROSSFADE_SECS).toFixed(3);
-    const outLabel = i === n - 1 ? "vout" : `xv${i}`;
-    xfadeChain += `;[${prevLabel}][v${i}]xfade=transition=fade:duration=${CROSSFADE_SECS}:offset=${offset}[${outLabel}]`;
-    prevLabel = outLabel;
-    accumulated += trimDurations[i] - CROSSFADE_SECS;
-  }
-
-  let filter = `${vFilters}${xfadeChain}`;
-  let mapArgs: string[];
-  let codecArgs: string[];
-
-  if (includeAudio) {
-    const aPrep = inputPaths
-      .map((_, i) => `[${i}:a]${XFADE_AUDIO_NORMALIZE},atrim=duration=${trimDurations[i]},asetpts=N/SR/TB[a${i}]`)
-      .join(";");
-    let acrossfadeChain = "";
-    let aPrev = "a0";
-    for (let i = 1; i < n; i++) {
-      const outLabel = i === n - 1 ? "aout" : `xa${i}`;
-      acrossfadeChain += `;[${aPrev}][a${i}]acrossfade=d=${CROSSFADE_SECS}[${outLabel}]`;
-      aPrev = outLabel;
-    }
-    filter = `${vFilters};${aPrep}${xfadeChain}${acrossfadeChain}`;
-    mapArgs = ["-map", "[vout]", "-map", "[aout]"];
-    codecArgs = ["-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart"];
-  } else {
-    mapArgs = ["-map", "[vout]"];
-    codecArgs = ["-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p", "-movflags", "+faststart", "-an"];
-  }
-
-  // CRÍTICO: xfade não existe no @ffmpeg-installer (binário de 2018). Usamos
-  // o ffmpeg-static (6.0) via execFile direto pra essa chamada específica.
-  const args: string[] = ["-y", "-hide_banner"];
-  for (const p of inputPaths) {
-    args.push("-i", p);
-  }
-  args.push("-filter_complex", filter, ...mapArgs, ...codecArgs, outputPath);
-
-  console.log(`[narrator/assemble] ffmpeg-static xfade (${n} takes), filter len=${filter.length}`);
   try {
-    const { stderr } = await execFileP(FFMPEG_MODERN_PATH, args, {
-      maxBuffer: 100 * 1024 * 1024,
-      timeout: 240_000,
-    });
-    const tail = stderr.split("\n").slice(-5).join("\n");
-    console.log("[narrator/assemble] xfade done. tail:\n", tail);
-  } catch (err) {
-    const e = err as { stderr?: string; message?: string };
-    console.error("[narrator/assemble] xfade FAILED:", e.message);
-    console.error("[narrator/assemble] xfade filter:", filter);
-    console.error("[narrator/assemble] xfade stderr:", e.stderr?.slice(-3000));
-    throw err;
+    if (normalizedPaths.length === 1) {
+      // 1 take só → renomeia o pre-processed pro outputPath.
+      const { rename } = await import("fs/promises");
+      await rename(normalizedPaths[0], outputPath);
+      normalizedPaths[0] = ""; // já consumido, não deletar
+      return;
+    }
+
+    const n = normalizedPaths.length;
+    // 2. Filter complex SIMPLES: só xfade/acrossfade. Sem normalize, sem trim.
+    // Inputs já estão prontos (mesma fps/sar/duration esperada).
+    const vFilters = normalizedPaths
+      .map((_, i) => `[${i}:v]setpts=PTS-STARTPTS[v${i}]`)
+      .join(";");
+
+    let xfadeChain = "";
+    let prevLabel = "v0";
+    let accumulated = trimDurations[0];
+    for (let i = 1; i < n; i++) {
+      const offset = (accumulated - CROSSFADE_SECS).toFixed(3);
+      const outLabel = i === n - 1 ? "vout" : `xv${i}`;
+      xfadeChain += `;[${prevLabel}][v${i}]xfade=transition=fade:duration=${CROSSFADE_SECS}:offset=${offset}[${outLabel}]`;
+      prevLabel = outLabel;
+      accumulated += trimDurations[i] - CROSSFADE_SECS;
+    }
+
+    let filter = `${vFilters}${xfadeChain}`;
+    let mapArgs: string[];
+    let codecArgs: string[];
+
+    if (includeAudio) {
+      const aPrep = normalizedPaths.map((_, i) => `[${i}:a]asetpts=N/SR/TB[a${i}]`).join(";");
+      let acrossfadeChain = "";
+      let aPrev = "a0";
+      for (let i = 1; i < n; i++) {
+        const outLabel = i === n - 1 ? "aout" : `xa${i}`;
+        acrossfadeChain += `;[${aPrev}][a${i}]acrossfade=d=${CROSSFADE_SECS}[${outLabel}]`;
+        aPrev = outLabel;
+      }
+      filter = `${vFilters};${aPrep}${xfadeChain}${acrossfadeChain}`;
+      mapArgs = ["-map", "[vout]", "-map", "[aout]"];
+      codecArgs = ["-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart"];
+    } else {
+      mapArgs = ["-map", "[vout]"];
+      codecArgs = ["-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p", "-movflags", "+faststart", "-an"];
+    }
+
+    const args: string[] = ["-y", "-hide_banner"];
+    for (const p of normalizedPaths) {
+      args.push("-i", p);
+    }
+    args.push("-filter_complex", filter, ...mapArgs, ...codecArgs, outputPath);
+
+    console.log(`[narrator/assemble] xfade final (${n} takes), filter len=${filter.length}`);
+    try {
+      const { stderr } = await execFileP(FFMPEG_MODERN_PATH, args, {
+        maxBuffer: 100 * 1024 * 1024,
+        timeout: 180_000,
+      });
+      const tail = stderr.split("\n").slice(-5).join("\n");
+      console.log("[narrator/assemble] xfade done. tail:\n", tail);
+    } catch (err) {
+      const e = err as { stderr?: string; message?: string };
+      console.error("[narrator/assemble] xfade FAILED:", e.message);
+      console.error("[narrator/assemble] xfade filter:", filter);
+      console.error("[narrator/assemble] xfade stderr:", e.stderr?.slice(-3000));
+      throw err;
+    }
+  } finally {
+    // Limpa pré-processados temporários
+    for (const p of normalizedPaths) {
+      if (p) await unlink(p).catch(() => {});
+    }
   }
 }
 
