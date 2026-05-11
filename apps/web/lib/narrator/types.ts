@@ -1,11 +1,13 @@
 export type NarratorAudioMode = "veo_native" | "tts_overlay";
+export type NarratorLanguageCode = "pt-BR" | "en" | "es";
 
 export interface NarratorSegmentState {
   index: number;
   text: string;
   visualPrompt: string;
   opName: string | null;
-  status: "PROCESSING" | "COMPLETED" | "FAILED";
+  // QUEUED = aguardando last-frame do take anterior pra ser submetido (chaining).
+  status: "QUEUED" | "PROCESSING" | "COMPLETED" | "FAILED";
   videoUrl: string | null;
   errorMessage: string | null;
   // Quantas vezes esse take já foi re-submetido após bloqueio RAI (default 0).
@@ -27,6 +29,9 @@ export interface NarratorJobState {
   // ou se fica mudo e TTS é sobreposta.
   avatarImageUrl: string | null;
   audioMode: NarratorAudioMode;
+  // Idioma detectado da copy. Aplicado aos prompts do Veo e à voz TTS.
+  // Default "pt-BR" pra compatibilidade com jobs antigos sem esse campo.
+  language?: NarratorLanguageCode;
   // null quando audioMode === "veo_native" (não tem TTS).
   narrationAudioUrl: string | null;
   narrationDurationSeconds: number;

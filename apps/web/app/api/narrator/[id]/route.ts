@@ -15,6 +15,7 @@ import {
   submitVeoWithImage,
   submitVeoTextOnly,
   fetchImageForVeo,
+  extractLastFrameAsVeoImage,
   type VeoImageInput,
 } from "@/lib/narrator/veo";
 import { assembleNarratorVideo } from "@/lib/narrator/assemble";
@@ -95,6 +96,7 @@ export async function GET(
 
     // Polling: pra cada segmento PROCESSING, chama fetchPredictOperation
     const accessToken = await getVertexAccessToken();
+    const language = state.language ?? "pt-BR";
     const pendingIdx = state.segments.map((s, i) => (s.status === "PROCESSING" && s.opName ? i : -1)).filter((i) => i >= 0);
 
     if (pendingIdx.length > 0) {
@@ -174,6 +176,36 @@ export async function GET(
         } catch (err) {
           seg.status = "FAILED";
           seg.errorMessage = err instanceof Error ? err.message : String(err);
+        }
+      }
+
+      // LAST-FRAME CHAINING: pra cada take QUEUED cujo anterior está COMPLETED,
+      // extrai o último frame do anterior e submete com ele como image input.
+      // Isso elimina cortes secos — o avatar continua exatamente da pose final
+      // do take anterior em vez de "snap" pra foto original.
+      if (state.avatarImageUrl) {
+        for (let i = 1; i < state.segments.length; i++) {
+          const seg = state.segments[i];
+          const prev = state.segments[i - 1];
+          if (seg.status !== "QUEUED") continue;
+          if (prev.status !== "COMPLETED" || !prev.videoUrl) continue;
+
+          try {
+            const lastFrame = await extractLastFrameAsVeoImage(prev.videoUrl);
+            const prompt =
+              state.audioMode === "veo_native"
+                ? buildAvatarSpeechPrompt(seg.text, state.gender, undefined, 0, language)
+                : buildAvatarSilentPrompt(undefined, 0);
+            const { opName } = await submitVeoWithImage(prompt, lastFrame, accessToken);
+            seg.opName = opName;
+            seg.status = "PROCESSING";
+            seg.errorMessage = null;
+          } catch (chainErr) {
+            seg.status = "FAILED";
+            seg.errorMessage = `Falha no chaining take ${i}: ${chainErr instanceof Error ? chainErr.message : String(chainErr)}`;
+          }
+          // Submete um por iteração pra não sobrecarregar — próximos QUEUED viram na próxima passada.
+          break;
         }
       }
 
@@ -289,6 +321,7 @@ async function resubmitSegment(
   getAvatarImage: () => Promise<VeoImageInput | null>,
 ): Promise<{ opName: string; usedFallback: boolean }> {
   const hasAvatar = Boolean(state.avatarImageUrl);
+  const language = state.language ?? "pt-BR";
 
   // FALLBACK: avatar não responde a prompt safer. Cai pra text-only descrevendo
   // pessoa genérica falando o texto. Só aplica em audioMode = veo_native — no
@@ -297,7 +330,7 @@ async function resubmitSegment(
   if (hasAvatar && isFallback) {
     const prompt =
       state.audioMode === "veo_native"
-        ? buildAvatarFallbackTextOnlyPrompt(seg.text, state.gender)
+        ? buildAvatarFallbackTextOnlyPrompt(seg.text, state.gender, language)
         : buildBrollPrompt(
             "A young adult person stands in a softly lit minimal interior, looking at the camera neutrally.",
             undefined,
@@ -312,7 +345,7 @@ async function resubmitSegment(
     if (!image) throw new Error("Avatar image não encontrada pra retry");
     const prompt =
       state.audioMode === "veo_native"
-        ? buildAvatarSpeechPrompt(seg.text, state.gender, undefined, attempt)
+        ? buildAvatarSpeechPrompt(seg.text, state.gender, undefined, attempt, language)
         : buildAvatarSilentPrompt(undefined, attempt);
     const res = await submitVeoWithImage(prompt, image, accessToken);
     return { opName: res.opName, usedFallback: false };

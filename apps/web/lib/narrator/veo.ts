@@ -72,6 +72,38 @@ export interface VeoImageInput {
   mimeType: string;
 }
 
+// Extrai o último frame de um vídeo MP4 (URL pública) como JPEG 1080x1920.
+// Usado pra last-frame chaining: cada take começa do frame final do anterior,
+// resultando em transição visual sem corte seco.
+export async function extractLastFrameAsVeoImage(videoUrl: string): Promise<VeoImageInput> {
+  const id = randomBytes(8).toString("hex");
+  const inPath = join("/tmp", `narrator-lastframe-in-${id}.mp4`);
+  const outPath = join("/tmp", `narrator-lastframe-out-${id}.jpg`);
+  try {
+    const res = await fetch(videoUrl, { signal: AbortSignal.timeout(120_000) });
+    if (!res.ok) throw new Error(`Falha ao baixar take pra extrair last frame: ${res.status}`);
+    await writeFile(inPath, Buffer.from(await res.arrayBuffer()));
+    // -sseof -0.1 pega o último frame; -frames:v 1 escreve 1 frame.
+    // Aplica o mesmo crop 9:16 do forceImageTo916 pra garantir que a imagem
+    // resultante já está em 1080x1920 (caso o Veo tenha gerado em outro aspect).
+    await new Promise<void>((resolve, reject) => {
+      ffmpeg(inPath)
+        .inputOptions(["-sseof", "-0.1"])
+        .videoFilter("scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1")
+        .outputOptions(["-frames:v", "1", "-q:v", "2"])
+        .output(outPath)
+        .on("end", () => resolve())
+        .on("error", (err: Error) => reject(err))
+        .run();
+    });
+    const buffer = await readFile(outPath);
+    return { bytesBase64Encoded: buffer.toString("base64"), mimeType: "image/jpeg" };
+  } finally {
+    await unlink(inPath).catch(() => {});
+    await unlink(outPath).catch(() => {});
+  }
+}
+
 // Converte qualquer imagem (square, landscape, vertical não-padrão) pra
 // 1080x1920 JPEG via ffmpeg center-crop. Necessário porque Veo image-to-video
 // respeita o aspect ratio da imagem de entrada e ignora `aspectRatio:"9:16"`

@@ -21,6 +21,7 @@ import {
   buildAvatarSilentPrompt,
   buildBrollPrompt,
 } from "@/lib/narrator/prompts";
+import { detectLanguage } from "@/lib/narrator/language";
 import type { NarratorJobState, NarratorSegmentState, NarratorAudioMode } from "@/lib/narrator/types";
 
 export const maxDuration = 120;
@@ -118,7 +119,10 @@ export async function POST(request: NextRequest) {
     });
 
     try {
-      // 2. Duração da narração
+      // 2. Detecta idioma da copy (pt-BR, en, es) — aplicado nos prompts do Veo.
+      const language = detectLanguage(copy);
+
+      // 3. Duração da narração
       //    - Modo TTS overlay (com ou sem avatar): gera TTS pra medir e usar como áudio.
       //    - Modo Veo nativo: estima via word count (não há TTS).
       let narrationDuration: number;
@@ -132,58 +136,80 @@ export async function POST(request: NextRequest) {
         narrationDuration = estimateNarrationSeconds(copy);
       }
 
-      // 3. Calcula N takes e planeja segmentos
+      // 4. Calcula N takes e planeja segmentos
       const takeCount = computeTakeCount(narrationDuration);
       const segments = hasAvatar
         ? planAvatarSegments(copy, takeCount)
         : await planNarratorSegments({ copy, takeCount, vibe });
 
-      // 4. Submete N Veos paralelos
+      // 5. Submete Veos. Estratégia depende do modo:
+      //    - Avatar: submete SÓ take 0 com a foto original. Takes 1+ ficam QUEUED
+      //      e o polling submete cada um com o last-frame do anterior, eliminando
+      //      cortes secos (last-frame chaining).
+      //    - B-roll (sem avatar): submete todos em paralelo (comportamento legado).
       const accessToken = await getVertexAccessToken();
 
-      // No modo avatar, todos os takes começam da MESMA foto original (zero drift).
-      // Baixamos uma vez e reutilizamos o base64 em todos os submits.
       let avatarImage: VeoImageInput | null = null;
       if (hasAvatar) {
         avatarImage = await fetchImageForVeo(avatarImageUrl!);
       }
 
-      const submitResults = await Promise.allSettled(
-        segments.map((seg) => {
-          if (hasAvatar && avatarImage) {
-            const prompt =
-              audioMode === "veo_native"
-                ? buildAvatarSpeechPrompt(seg.text, gender, vibe)
-                : buildAvatarSilentPrompt(vibe);
-            return submitVeoWithImage(prompt, avatarImage, accessToken);
-          }
-          return submitVeoTextOnly(buildBrollPrompt(seg.visualPrompt, vibe), accessToken);
-        })
-      );
+      let segState: NarratorSegmentState[];
 
-      const segState: NarratorSegmentState[] = segments.map((seg, i) => {
-        const r = submitResults[i];
-        if (r.status === "fulfilled") {
+      if (hasAvatar && avatarImage) {
+        // Avatar mode: take 0 com a foto, demais QUEUED.
+        const firstPrompt =
+          audioMode === "veo_native"
+            ? buildAvatarSpeechPrompt(segments[0].text, gender, vibe, 0, language)
+            : buildAvatarSilentPrompt(vibe, 0);
+        let firstOpName: string | null = null;
+        let firstError: string | null = null;
+        try {
+          const r = await submitVeoWithImage(firstPrompt, avatarImage, accessToken);
+          firstOpName = r.opName;
+        } catch (e) {
+          firstError = e instanceof Error ? e.message : String(e);
+        }
+        segState = segments.map((seg, i) => ({
+          index: i,
+          text: seg.text,
+          visualPrompt: seg.visualPrompt,
+          opName: i === 0 ? firstOpName : null,
+          status: i === 0 ? (firstOpName ? "PROCESSING" : "FAILED") : "QUEUED",
+          videoUrl: null,
+          errorMessage: i === 0 ? firstError : null,
+        }));
+      } else {
+        // B-roll mode: paralelo (sem chaining — todos text-only).
+        const submitResults = await Promise.allSettled(
+          segments.map((seg) =>
+            submitVeoTextOnly(buildBrollPrompt(seg.visualPrompt, vibe, 0), accessToken),
+          ),
+        );
+        segState = segments.map((seg, i) => {
+          const r = submitResults[i];
+          if (r.status === "fulfilled") {
+            return {
+              index: i,
+              text: seg.text,
+              visualPrompt: seg.visualPrompt,
+              opName: r.value.opName,
+              status: "PROCESSING" as const,
+              videoUrl: null,
+              errorMessage: null,
+            };
+          }
           return {
             index: i,
             text: seg.text,
             visualPrompt: seg.visualPrompt,
-            opName: r.value.opName,
-            status: "PROCESSING",
+            opName: null,
+            status: "FAILED" as const,
             videoUrl: null,
-            errorMessage: null,
+            errorMessage: r.reason instanceof Error ? r.reason.message : String(r.reason),
           };
-        }
-        return {
-          index: i,
-          text: seg.text,
-          visualPrompt: seg.visualPrompt,
-          opName: null,
-          status: "FAILED",
-          videoUrl: null,
-          errorMessage: r.reason instanceof Error ? r.reason.message : String(r.reason),
-        };
-      });
+        });
+      }
 
       const state: NarratorJobState = {
         kind: "narrator-v1",
@@ -192,6 +218,7 @@ export async function POST(request: NextRequest) {
         gender,
         avatarImageUrl: avatarImageUrl ?? null,
         audioMode,
+        language,
         narrationAudioUrl: audioUrl,
         narrationDurationSeconds: narrationDuration,
         segments: segState,
