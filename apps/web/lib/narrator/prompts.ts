@@ -31,6 +31,29 @@ function pronunciationLock(text: string, language: NarratorLanguage): string {
   ].join(" ");
 }
 
+// Voice descriptor super específico pra reduzir variação de timbre entre takes.
+// Veo nativo escolhe voz por take, então quanto mais constraints, menor a
+// chance de o timbre mudar.
+function voiceLock(gender: "male" | "female", language: NarratorLanguage): string {
+  const lang = languageLabel(language);
+  const profile = gender === "male"
+    ? `deep warm baritone ${lang} male voice, approximately 30 years old, slight gravelly texture, intimate confident UGC creator tone`
+    : `warm mellow ${lang} female voice, approximately 26 years old, soft breathy texture, intimate confident UGC creator tone`;
+  return [
+    `VOICE LOCK: ${profile}.`,
+    `Pace: slow-to-medium conversational, ~140 words per minute. Pitch: consistent and steady throughout.`,
+    `SAME voice characteristics across the entire video — same pitch, same timbre, same pace, same energy. NEVER change voice mid-sentence or between segments. Imagine ONE single creator recording everything in a single continuous take.`,
+  ].join(" ");
+}
+
+// NEGATIVE LOCK pra áudio: bloqueia música, SFX, ruído ambiente. Voz seca.
+function audioNegativeLock(): string {
+  return [
+    `AUDIO NEGATIVE LOCK: ABSOLUTELY NO music of any kind. NO instrumental. NO soundtrack. NO background music. NO score. NO ambient sound. NO room tone. NO sound effects. NO foley. NO other voices. NO crowd noise. NO nature sounds. NO synth pads. NO drone. NO whoosh. NO impact. NO transition sound.`,
+    `The audio track must contain ONLY the dry spoken voice — as if it were a raw phone voice memo recorded in a silent room with zero processing, zero post-production, zero background.`,
+  ].join(" ");
+}
+
 // Prompt do Veo quando o avatar DEVE falar (audioMode = veo_native).
 export function buildAvatarSpeechPrompt(
   text: string,
@@ -39,20 +62,21 @@ export function buildAvatarSpeechPrompt(
   attempt: number = 0,
   language: NarratorLanguage = "pt-BR",
 ): string {
-  const voiceLabel = gender === "male" ? "male" : "female";
   const styleSuffix = vibe?.trim() ? ` Tone: ${vibe.trim()}.` : "";
   const lang = languageLabel(language);
   return [
     safetyPrefix(attempt),
     `The person in the image speaks DIRECTLY into the camera (frontal selfie framing, like a UGC creator) saying EXACTLY these words in ${lang} and NOTHING ELSE: "${text}".`,
     pronunciationLock(text, language),
-    `Voice: natural ${lang} ${voiceLabel} voice, intimate UGC narrator tone, slightly slower than conversational pace for clarity.${styleSuffix}`,
+    voiceLock(gender, language),
+    audioNegativeLock(),
+    styleSuffix ? `Visual tone: ${styleSuffix.trim()}.` : "",
     "Identity, hair, skin tone, outfit, lighting, background and framing stay EXACTLY identical to the source image — do not change anything except the lips, eyes and natural micro head movement required to speak.",
     `Lips MUST be in tight sync with the spoken ${lang} words. No camera movement other than gentle handheld micro-shake.`,
     "STRICTLY VERTICAL 9:16, 1080x1920, full-frame portrait, no letterboxing, no pillarboxing, no black bars.",
-    `Audio is ONLY the spoken sentence in ${lang} — NO music, NO ambient sound effects, NO other voices.`,
     `STRICT NEGATIVE: no subtitles, no captions, no on-screen text, no watermarks, no logos. ${forbiddenLanguagesClause(language)} If you cannot pronounce the exact text, stay silent rather than improvise.`,
-    `FINAL PRONUNCIATION LOCK: every word of "${text}" must be spoken IN FULL, in ${lang}, audibly and correctly. NO word may be omitted, skipped, shortened, or mumbled.`,
+    audioNegativeLock(),
+    `FINAL PRONUNCIATION LOCK: every word of "${text}" must be spoken IN FULL, in ${lang}, audibly and correctly. NO word may be omitted, skipped, shortened, or mumbled. ${audioNegativeLock()}`,
   ].filter(Boolean).join(" ");
 }
 
@@ -96,18 +120,18 @@ export function buildAvatarFallbackTextOnlyPrompt(
   gender: "male" | "female",
   language: NarratorLanguage = "pt-BR",
 ): string {
-  const voiceLabel = gender === "male" ? "male" : "female";
+  const subject = gender === "male" ? "young adult man" : "young adult woman";
   const lang = languageLabel(language);
   return [
     "Wholesome, family-friendly, safe-for-all-audiences UGC video.",
-    `A casual everyday ${voiceLabel === "male" ? "young adult man" : "young adult woman"} looks directly at the camera in selfie framing, speaks naturally in ${lang} saying EXACTLY these words and nothing else: "${text}".`,
+    `A casual everyday ${subject} looks directly at the camera in selfie framing, speaks naturally in ${lang} saying EXACTLY these words and nothing else: "${text}".`,
     pronunciationLock(text, language),
-    `Voice: natural ${lang} ${voiceLabel} voice, intimate UGC narrator tone, slightly slower than conversational pace for clarity.`,
+    voiceLock(gender, language),
+    audioNegativeLock(),
     "Modest casual modern clothing. Neutral friendly facial expression. Soft natural daylight. Plain minimalist indoor background, slightly out of focus.",
     `Lips MUST be in tight sync with the spoken ${lang} words. No camera movement other than handheld micro-shake.`,
     "STRICTLY VERTICAL 9:16, 1080x1920, full-frame portrait, no letterboxing, no pillarboxing, no black bars.",
-    `Audio is ONLY the spoken sentence in ${lang} — NO music, NO ambient sound effects, NO other voices.`,
     `NO subtitles, NO captions, NO on-screen text, NO watermarks. ${forbiddenLanguagesClause(language)}`,
-    `FINAL PRONUNCIATION LOCK: every word of "${text}" must be spoken IN FULL, in ${lang}, audibly and correctly. NO word may be omitted, skipped, shortened, or mumbled.`,
+    `FINAL PRONUNCIATION LOCK: every word of "${text}" must be spoken IN FULL, in ${lang}, audibly and correctly. NO word may be omitted, skipped, shortened, or mumbled. ${audioNegativeLock()}`,
   ].join(" ");
 }

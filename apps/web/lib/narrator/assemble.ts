@@ -56,7 +56,11 @@ const CROSSFADE_SECS = 0.25;
 // setpts=PTS-STARTPTS são obrigatórios pra xfade não dar "Invalid argument" —
 // streams precisam ter timebase e fps idênticos.
 const XFADE_VIDEO_NORMALIZE = "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1,fps=30,setpts=PTS-STARTPTS";
-const XFADE_AUDIO_NORMALIZE = "aresample=44100,aformat=sample_fmts=fltp:channel_layouts=stereo,asetpts=N/SR/TB";
+// Áudio: normalização de sample rate + filtro pra atenuar música/ruído de
+// fundo (highpass corta bass <100Hz onde reside a maior parte da música) +
+// loudnorm (EBU R128) padroniza o volume entre takes pra voz soar consistente
+// do começo ao fim.
+const XFADE_AUDIO_NORMALIZE = "aresample=44100,aformat=sample_fmts=fltp:channel_layouts=stereo,asetpts=N/SR/TB,highpass=f=100,loudnorm=I=-16:TP=-1.5:LRA=11";
 
 // Concat ou crossfade os takes em sequência. Quando N > 1, usa xfade visual
 // pra eliminar "snap" entre takes (cada take parte da mesma foto, então sem
