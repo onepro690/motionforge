@@ -8,6 +8,9 @@ export interface NarratorSegmentState {
   status: "PROCESSING" | "COMPLETED" | "FAILED";
   videoUrl: string | null;
   errorMessage: string | null;
+  // Quantas vezes esse take já foi re-submetido após bloqueio RAI (default 0).
+  // Quando bate MAX_RAI_RETRIES (2), marcamos FAILED definitivo.
+  retryCount?: number;
 }
 
 export interface NarratorJobState {

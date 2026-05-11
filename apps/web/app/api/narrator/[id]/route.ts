@@ -8,9 +8,23 @@ import ffmpeg from "fluent-ffmpeg";
 import { writeFile, readFile, unlink } from "fs/promises";
 import { join } from "path";
 import { randomBytes } from "crypto";
-import { pollVeoOperation, downloadVeoVideo, getVertexAccessToken } from "@/lib/narrator/veo";
+import {
+  pollVeoOperation,
+  downloadVeoVideo,
+  getVertexAccessToken,
+  submitVeoWithImage,
+  submitVeoTextOnly,
+  fetchImageForVeo,
+  type VeoImageInput,
+} from "@/lib/narrator/veo";
 import { assembleNarratorVideo } from "@/lib/narrator/assemble";
-import type { NarratorJobState } from "@/lib/narrator/types";
+import {
+  buildAvatarSpeechPrompt,
+  buildAvatarSilentPrompt,
+  buildBrollPrompt,
+  MAX_RAI_RETRIES,
+} from "@/lib/narrator/prompts";
+import type { NarratorJobState, NarratorSegmentState } from "@/lib/narrator/types";
 
 ffmpeg.setFfmpegPath(ffmpegInstaller.path);
 
@@ -92,9 +106,45 @@ export async function GET(
       // ou avatar mudo com TTS overlay), removemos pra trocar pela TTS depois.
       const preserveVeoAudio = state.audioMode === "veo_native";
 
+      // Cache lazy da imagem do avatar — só baixa se algum retry precisar.
+      let cachedAvatarImage: VeoImageInput | null = null;
+      const getAvatarImage = async (): Promise<VeoImageInput | null> => {
+        if (!state.avatarImageUrl) return null;
+        if (cachedAvatarImage) return cachedAvatarImage;
+        cachedAvatarImage = await fetchImageForVeo(state.avatarImageUrl);
+        return cachedAvatarImage;
+      };
+
       for (const { idx, r } of polls) {
         if (!r.done) continue;
         const seg = state.segments[idx];
+
+        // Bloqueio por RAI: tenta de novo com prompt cada vez mais "safe" até
+        // MAX_RAI_RETRIES. Filtro Vertex é meio aleatório com fotos realistas;
+        // costuma destravar na 2ª tentativa.
+        if (r.raiBlocked) {
+          const currentRetry = seg.retryCount ?? 0;
+          if (currentRetry < MAX_RAI_RETRIES) {
+            const nextAttempt = currentRetry + 1;
+            try {
+              const newOp = await resubmitSegment(seg, state, nextAttempt, accessToken, getAvatarImage);
+              seg.opName = newOp;
+              seg.retryCount = nextAttempt;
+              seg.status = "PROCESSING";
+              seg.errorMessage = null;
+              continue;
+            } catch (retryErr) {
+              seg.status = "FAILED";
+              seg.errorMessage = `Retry RAI falhou: ${retryErr instanceof Error ? retryErr.message : String(retryErr)}`;
+              continue;
+            }
+          }
+          // Esgotou retries
+          seg.status = "FAILED";
+          seg.errorMessage = `Bloqueado pelo filtro de segurança Vertex AI após ${MAX_RAI_RETRIES} retries. ${r.errorMessage ?? ""}`.trim();
+          continue;
+        }
+
         if (r.errorMessage) {
           seg.status = "FAILED";
           seg.errorMessage = r.errorMessage;
@@ -215,4 +265,29 @@ export async function GET(
       { status: 500 }
     );
   }
+}
+
+// Re-submete um segmento após bloqueio RAI com prompt cada vez mais "safe"
+// (attempt 1 → moderado, 2 → máximo). Devolve o novo opName.
+async function resubmitSegment(
+  seg: NarratorSegmentState,
+  state: NarratorJobState,
+  attempt: number,
+  accessToken: string,
+  getAvatarImage: () => Promise<VeoImageInput | null>,
+): Promise<string> {
+  const hasAvatar = Boolean(state.avatarImageUrl);
+  if (hasAvatar) {
+    const image = await getAvatarImage();
+    if (!image) throw new Error("Avatar image não encontrada pra retry");
+    const prompt =
+      state.audioMode === "veo_native"
+        ? buildAvatarSpeechPrompt(seg.text, state.gender, undefined, attempt)
+        : buildAvatarSilentPrompt(undefined, attempt);
+    const res = await submitVeoWithImage(prompt, image, accessToken);
+    return res.opName;
+  }
+  const prompt = buildBrollPrompt(seg.visualPrompt, undefined, attempt);
+  const res = await submitVeoTextOnly(prompt, accessToken);
+  return res.opName;
 }

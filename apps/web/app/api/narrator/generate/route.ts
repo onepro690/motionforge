@@ -16,6 +16,11 @@ import {
   type VeoImageInput,
 } from "@/lib/narrator/veo";
 import { ffmpegProbeDuration } from "@/lib/narrator/assemble";
+import {
+  buildAvatarSpeechPrompt,
+  buildAvatarSilentPrompt,
+  buildBrollPrompt,
+} from "@/lib/narrator/prompts";
 import type { NarratorJobState, NarratorSegmentState, NarratorAudioMode } from "@/lib/narrator/types";
 
 export const maxDuration = 120;
@@ -76,48 +81,6 @@ async function generateTtsToBlob(script: string, voice: string, jobId: string): 
 function estimateNarrationSeconds(copy: string): number {
   const words = copy.split(/\s+/).filter(Boolean).length;
   return Math.max(2, words / 2.8);
-}
-
-// Prompt do Veo quando o avatar DEVE falar (audioMode = veo_native).
-function buildAvatarSpeechPrompt(text: string, gender: "male" | "female", vibe?: string): string {
-  const voiceLabel = gender === "male" ? "male" : "female";
-  const styleSuffix = vibe?.trim() ? ` Tone: ${vibe.trim()}.` : "";
-  return [
-    `The person in the image speaks DIRECTLY into the camera (frontal selfie framing, like a UGC creator) saying EXACTLY these words in Brazilian Portuguese and NOTHING ELSE: "${text}".`,
-    `Voice: natural Brazilian Portuguese ${voiceLabel} voice, intimate UGC narrator tone, conversational pace.${styleSuffix}`,
-    "Identity, hair, skin tone, outfit, lighting, background and framing stay EXACTLY identical to the source image — do not change anything except the lips, eyes and natural micro head movement required to speak.",
-    "Lips MUST be in tight sync with the spoken Brazilian Portuguese words. No camera movement other than gentle handheld micro-shake.",
-    "STRICTLY VERTICAL 9:16, 1080x1920, full-frame portrait, no letterboxing, no pillarboxing, no black bars.",
-    "Audio is ONLY the spoken sentence in Brazilian Portuguese — NO music, NO ambient sound effects, NO other voices.",
-    "STRICT NEGATIVE: no subtitles, no captions, no on-screen text, no watermarks, no logos. Do NOT speak in English, Mandarin, Spanish or any language other than Brazilian Portuguese. If you cannot pronounce the exact text, stay silent rather than improvise.",
-  ].join(" ");
-}
-
-// Prompt do Veo quando o avatar fica MUDO (audioMode = tts_overlay).
-function buildAvatarSilentPrompt(vibe?: string): string {
-  const styleSuffix = vibe?.trim() ? ` Tone: ${vibe.trim()}.` : "";
-  return [
-    "The person in the image stays SILENT — closed mouth or relaxed neutral expression, NO talking, NO lip movement that suggests speech.",
-    "Allow only subtle natural micro movement: gentle blinking, slow head turn, soft breathing. No big gestures.",
-    `Identity, hair, skin tone, outfit, lighting, background and framing stay EXACTLY identical to the source image.${styleSuffix}`,
-    "No camera movement other than handheld micro-shake.",
-    "STRICTLY VERTICAL 9:16, 1080x1920, full-frame portrait, no letterboxing, no pillarboxing, no black bars.",
-    "Audio must be completely silent — no voice, no music, no ambient sound. NO subtitles, NO captions, NO on-screen text.",
-  ].join(" ");
-}
-
-// Prompt do Veo no modo B-roll (sem avatar) — mantém comportamento legado.
-function buildBrollPrompt(visualPrompt: string, vibe?: string): string {
-  const styleSuffix = vibe?.trim() ? ` Style: ${vibe.trim()}.` : "";
-  return [
-    visualPrompt,
-    "The audio track must be completely silent — no voice, no speech, no music.",
-    "No people speaking on camera. No subtitles. No text overlays. No on-screen captions.",
-    "Mystical astrology and tarot atmosphere: deep cosmic blacks, violet and indigo tones with gold accents, volumetric god rays, smoke particles, lens flares, anamorphic light streaks.",
-    "Dynamic revealing camera movement throughout — fast push-in, snap zoom, orbiting camera, crane reveal, vertigo zoom. Never static.",
-    "STRICTLY VERTICAL portrait orientation, 9:16 aspect ratio, 1080x1920 mobile vertical full-frame composition, the subject and action FILL the entire vertical frame from top to bottom, no letterboxing, no pillarboxing, no black bars, no horizontal-style framing, framed for TikTok/Reels/Shorts.",
-    `Cinematic premium B-roll, sharp focus, dramatic high-contrast color grading, suspenseful and revelatory pacing.${styleSuffix}`,
-  ].join(" ");
 }
 
 export async function POST(request: NextRequest) {
