@@ -1,3 +1,5 @@
+export type NarratorAudioMode = "veo_native" | "tts_overlay";
+
 export interface NarratorSegmentState {
   index: number;
   text: string;
@@ -13,7 +15,13 @@ export interface NarratorJobState {
   copy: string;
   voice: string;
   gender: "male" | "female";
-  narrationAudioUrl: string;
+  // Quando avatar não é usado, narration sempre é TTS overlay.
+  // Quando avatar é usado, audioMode decide se Veo gera áudio nativo (lip-sync)
+  // ou se fica mudo e TTS é sobreposta.
+  avatarImageUrl: string | null;
+  audioMode: NarratorAudioMode;
+  // null quando audioMode === "veo_native" (não tem TTS).
+  narrationAudioUrl: string | null;
   narrationDurationSeconds: number;
   segments: NarratorSegmentState[];
   finalVideoUrl: string | null;

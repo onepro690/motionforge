@@ -87,6 +87,11 @@ export async function GET(
         pendingIdx.map((i) => pollVeoOperation(state.segments[i].opName!, accessToken).then((r) => ({ idx: i, r })))
       );
 
+      // Quando o áudio do Veo É a narração final (avatar falando lip-sync), NÃO
+      // stripa — precisamos preservar pra usar no assembly. Caso contrário (B-roll
+      // ou avatar mudo com TTS overlay), removemos pra trocar pela TTS depois.
+      const preserveVeoAudio = state.audioMode === "veo_native";
+
       for (const { idx, r } of polls) {
         if (!r.done) continue;
         const seg = state.segments[idx];
@@ -97,8 +102,8 @@ export async function GET(
         }
         try {
           const rawBuffer = await downloadVeoVideo({ uri: r.videoUri, base64: r.videoBase64 }, accessToken);
-          const stripped = await stripAudio(rawBuffer);
-          const blob = await put(`narrator-${job.id}-take-${idx}.mp4`, stripped, {
+          const finalBuffer = preserveVeoAudio ? rawBuffer : await stripAudio(rawBuffer);
+          const blob = await put(`narrator-${job.id}-take-${idx}.mp4`, finalBuffer, {
             access: "public",
             contentType: "video/mp4",
             addRandomSuffix: false,
@@ -167,6 +172,7 @@ export async function GET(
           narrationAudioUrl: state.narrationAudioUrl,
           narrationSeconds: state.narrationDurationSeconds,
           jobId: job.id,
+          audioMode: state.audioMode,
         });
         state.finalVideoUrl = result.finalVideoUrl;
         await prisma.generationJob.update({

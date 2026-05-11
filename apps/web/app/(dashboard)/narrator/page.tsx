@@ -1,13 +1,15 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { Mic, Loader2, Download, Sparkles } from "lucide-react";
+import { Mic, Loader2, Download, Sparkles, Upload, X, User, Volume2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { toast } from "sonner";
 import { cn } from "@/lib/utils";
+import { upload } from "@vercel/blob/client";
 
 type Phase = "idle" | "submitting" | "polling" | "done" | "error";
+type AudioMode = "veo_native" | "tts_overlay";
 
 interface SegmentSummary {
   index: number;
@@ -41,6 +43,13 @@ export default function NarratorPage() {
   const [error, setError] = useState<string | null>(null);
   const [narrationDuration, setNarrationDuration] = useState<number | null>(null);
   const [downloading, setDownloading] = useState(false);
+
+  // Avatar (opcional)
+  const [avatarUrl, setAvatarUrl] = useState<string | null>(null);
+  const [uploadingAvatar, setUploadingAvatar] = useState(false);
+  const [audioMode, setAudioMode] = useState<AudioMode>("veo_native");
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+
   const pollRef = useRef<NodeJS.Timeout | null>(null);
 
   // Polling loop
@@ -86,6 +95,37 @@ export default function NarratorPage() {
     };
   }, [phase, jobId]);
 
+  const handleAvatarSelect = async (file: File) => {
+    if (!file.type.startsWith("image/")) {
+      toast.error("Selecione uma imagem (jpg, png, webp)");
+      return;
+    }
+    if (file.size > 20 * 1024 * 1024) {
+      toast.error("Imagem grande demais (máx 20MB)");
+      return;
+    }
+    setUploadingAvatar(true);
+    try {
+      const ext = file.name.split(".").pop()?.toLowerCase() || "jpg";
+      const blob = await upload(`narrator-avatar-${Date.now()}.${ext}`, file, {
+        access: "public",
+        handleUploadUrl: "/api/upload",
+      });
+      setAvatarUrl(blob.url);
+      toast.success("Avatar carregado");
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Erro ao subir avatar";
+      toast.error(msg);
+    } finally {
+      setUploadingAvatar(false);
+    }
+  };
+
+  const handleAvatarRemove = () => {
+    setAvatarUrl(null);
+    if (fileInputRef.current) fileInputRef.current.value = "";
+  };
+
   const handleSubmit = async () => {
     const trimmed = copy.trim();
     if (trimmed.length < 20) {
@@ -106,7 +146,12 @@ export default function NarratorPage() {
       const res = await fetch("/api/narrator/generate", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ copy: trimmed, gender }),
+        body: JSON.stringify({
+          copy: trimmed,
+          gender,
+          avatarImageUrl: avatarUrl ?? undefined,
+          audioMode: avatarUrl ? audioMode : undefined,
+        }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error ?? "Erro ao iniciar geração");
@@ -165,6 +210,11 @@ export default function NarratorPage() {
   const total = progress?.total ?? segments.length;
   const pct = total > 0 ? Math.round((completed / total) * 100) : 0;
 
+  const veoNativeMode = Boolean(avatarUrl) && audioMode === "veo_native";
+  const voiceLabel = veoNativeMode ? "Gênero da voz pedido ao Veo" : "Voz do narrador";
+  const maleLabel = veoNativeMode ? "Masculina" : "Homem · Onyx";
+  const femaleLabel = veoNativeMode ? "Feminina" : "Mulher · Nova";
+
   return (
     <div className="max-w-2xl mx-auto space-y-5">
       <div>
@@ -173,16 +223,110 @@ export default function NarratorPage() {
           Narrador IA
         </h1>
         <p className="text-white/40 text-sm mt-1">
-          Cole sua copy. Escolha a voz. Receba um vídeo com B-roll cinematográfico narrado por cima.
+          Cole sua copy. Opcionalmente envie a foto de um avatar pra ele falar a copy diretamente, ou deixe sem avatar pra gerar B-roll cinematográfico narrado.
         </p>
       </div>
 
       <Card className="bg-white/[0.03] border-white/[0.08]">
         <CardContent className="p-5 space-y-4">
-          {/* Voz */}
+          {/* Avatar (opcional) */}
+          <div>
+            <label className="text-xs uppercase tracking-wider text-white/50 font-medium mb-2 flex items-center justify-between">
+              <span className="flex items-center gap-1.5"><User className="w-3.5 h-3.5" /> Avatar (opcional)</span>
+              {avatarUrl && (
+                <button
+                  onClick={handleAvatarRemove}
+                  disabled={isLocked}
+                  className="text-white/40 hover:text-white/80 text-[10px] normal-case tracking-normal flex items-center gap-1"
+                >
+                  <X className="w-3 h-3" /> remover
+                </button>
+              )}
+            </label>
+            {avatarUrl ? (
+              <div className="flex items-center gap-3 bg-white/[0.02] border border-white/[0.08] rounded-lg p-2">
+                <img
+                  src={avatarUrl}
+                  alt="Avatar"
+                  className="w-16 h-16 rounded-md object-cover border border-white/10"
+                />
+                <div className="flex-1 min-w-0">
+                  <p className="text-white/80 text-sm font-medium truncate">Avatar carregado</p>
+                  <p className="text-white/40 text-xs">A foto vai ser o frame inicial de cada take — fundo e identidade ficam idênticos.</p>
+                </div>
+              </div>
+            ) : (
+              <label
+                className={cn(
+                  "flex items-center justify-center gap-2 px-4 py-4 rounded-lg border border-dashed border-white/[0.12] bg-white/[0.02] text-white/50 text-sm cursor-pointer hover:bg-white/[0.04] hover:text-white/70 transition",
+                  isLocked && "opacity-50 cursor-not-allowed",
+                  uploadingAvatar && "opacity-60 cursor-wait"
+                )}
+              >
+                {uploadingAvatar ? (
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                ) : (
+                  <Upload className="w-4 h-4" />
+                )}
+                <span>{uploadingAvatar ? "Subindo foto..." : "Subir foto do avatar"}</span>
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  accept="image/*"
+                  className="hidden"
+                  disabled={isLocked || uploadingAvatar}
+                  onChange={(e) => {
+                    const f = e.target.files?.[0];
+                    if (f) handleAvatarSelect(f);
+                  }}
+                />
+              </label>
+            )}
+          </div>
+
+          {/* Modo de áudio (só quando há avatar) */}
+          {avatarUrl && (
+            <div>
+              <label className="text-xs uppercase tracking-wider text-white/50 font-medium mb-2 flex items-center gap-1.5">
+                <Volume2 className="w-3.5 h-3.5" /> Como o avatar fala
+              </label>
+              <div className="grid grid-cols-2 gap-2">
+                <button
+                  onClick={() => setAudioMode("veo_native")}
+                  disabled={isLocked}
+                  className={cn(
+                    "px-3 py-3 rounded-lg border text-sm font-medium transition-all text-left",
+                    audioMode === "veo_native"
+                      ? "bg-violet-500/20 border-violet-500/50 text-violet-200"
+                      : "bg-white/[0.02] border-white/[0.08] text-white/60 hover:bg-white/[0.05]",
+                    isLocked && "opacity-50 cursor-not-allowed"
+                  )}
+                >
+                  <div className="font-semibold">Veo nativo · lip-sync</div>
+                  <div className="text-[11px] text-white/40 mt-0.5">Voz gerada pelo Veo, lábios sincronizados.</div>
+                </button>
+                <button
+                  onClick={() => setAudioMode("tts_overlay")}
+                  disabled={isLocked}
+                  className={cn(
+                    "px-3 py-3 rounded-lg border text-sm font-medium transition-all text-left",
+                    audioMode === "tts_overlay"
+                      ? "bg-violet-500/20 border-violet-500/50 text-violet-200"
+                      : "bg-white/[0.02] border-white/[0.08] text-white/60 hover:bg-white/[0.05]",
+                    isLocked && "opacity-50 cursor-not-allowed"
+                  )}
+                >
+                  <div className="font-semibold">TTS por cima</div>
+                  <div className="text-[11px] text-white/40 mt-0.5">Voz Onyx/Nova; avatar fica mudo. Sem lip-sync.</div>
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* Voz: rótulo muda dependendo se vai virar TTS Onyx/Nova ou instrução pro Veo */}
           <div>
             <label className="text-xs uppercase tracking-wider text-white/50 font-medium mb-2 block">
-              Voz do narrador
+              {voiceLabel}
             </label>
             <div className="grid grid-cols-2 gap-2">
               <button
@@ -196,7 +340,7 @@ export default function NarratorPage() {
                   isLocked && "opacity-50 cursor-not-allowed"
                 )}
               >
-                Homem · Onyx
+                {maleLabel}
               </button>
               <button
                 onClick={() => setGender("female")}
@@ -209,9 +353,14 @@ export default function NarratorPage() {
                   isLocked && "opacity-50 cursor-not-allowed"
                 )}
               >
-                Mulher · Nova
+                {femaleLabel}
               </button>
             </div>
+            {veoNativeMode && (
+              <p className="text-[11px] text-white/30 mt-1.5">
+                Veo escolhe um timbre dentro do gênero pedido — pode variar entre takes.
+              </p>
+            )}
           </div>
 
           {/* Copy */}
@@ -231,7 +380,9 @@ export default function NarratorPage() {
               className="w-full bg-white/[0.02] border border-white/[0.08] rounded-lg px-4 py-3 text-white placeholder-white/20 text-sm leading-relaxed focus:outline-none focus:border-violet-500/40 resize-none disabled:opacity-60"
             />
             <p className="text-xs text-white/30 mt-1.5">
-              A cada 8s de narração geramos 1 take Veo 3 Fast. A copy é sempre narrada por inteiro.
+              {avatarUrl
+                ? "A cada ~7.5s de fala geramos 1 take Veo 3 Fast com o avatar falando o trecho. Cada take parte da mesma foto."
+                : "A cada 8s de narração geramos 1 take Veo 3 Fast. A copy é sempre narrada por inteiro."}
             </p>
           </div>
 
@@ -239,11 +390,11 @@ export default function NarratorPage() {
           {phase === "idle" || phase === "error" ? (
             <Button
               onClick={handleSubmit}
-              disabled={copy.trim().length < 20}
+              disabled={copy.trim().length < 20 || uploadingAvatar}
               className="w-full bg-violet-500 hover:bg-violet-600 text-white font-semibold py-6"
             >
               <Sparkles className="w-4 h-4 mr-2" />
-              Gerar vídeo narrado
+              {avatarUrl ? "Gerar vídeo com avatar falando" : "Gerar vídeo narrado"}
             </Button>
           ) : (
             <Button onClick={handleReset} variant="outline" className="w-full">

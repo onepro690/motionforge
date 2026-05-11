@@ -36,12 +36,19 @@ const FORCE_VERTICAL_FILTER = "scale=1080:1920:force_original_aspect_ratio=incre
 // timestamps/parâmetros levemente diferentes — concat demuxer falharia).
 // Cada take passa pelo FORCE_VERTICAL_FILTER antes do concat pra garantir
 // que TODOS estão em 1080x1920 puro.
-async function concatVideoOnly(inputPaths: string[], outputPath: string): Promise<void> {
+//
+// includeAudio=true preserva o áudio dos takes (usado no modo Veo nativo onde
+// o lip-sync vem direto do Veo). includeAudio=false descarta áudio (modo
+// B-roll/TTS overlay — áudio é a narração que será muxada depois).
+async function concatTakes(inputPaths: string[], outputPath: string, includeAudio: boolean): Promise<void> {
   if (inputPaths.length === 1) {
+    const opts = includeAudio
+      ? ["-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart"]
+      : ["-an", "-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p", "-movflags", "+faststart"];
     await new Promise<void>((resolve, reject) => {
       ffmpeg(inputPaths[0])
         .videoFilter(FORCE_VERTICAL_FILTER)
-        .outputOptions(["-an", "-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p", "-movflags", "+faststart"])
+        .outputOptions(opts)
         .output(outputPath)
         .on("end", () => resolve())
         .on("error", (err: Error) => reject(err))
@@ -52,25 +59,35 @@ async function concatVideoOnly(inputPaths: string[], outputPath: string): Promis
 
   // Pra múltiplos inputs: aplica FORCE_VERTICAL_FILTER em cada stream antes
   // do concat. Cadeia: [0:v]filter[v0];[1:v]filter[v1];...;[v0][v1]...concat[vout]
-  const perInputFilters = inputPaths
-    .map((_, i) => `[${i}:v]${FORCE_VERTICAL_FILTER}[v${i}]`)
-    .join(";");
-  const concatLabels = inputPaths.map((_, i) => `[v${i}]`).join("");
-  const filter = `${perInputFilters};${concatLabels}concat=n=${inputPaths.length}:v=1:a=0[vout]`;
+  const vFilters = inputPaths.map((_, i) => `[${i}:v]${FORCE_VERTICAL_FILTER}[v${i}]`).join(";");
+  const vLabels = inputPaths.map((_, i) => `[v${i}]`).join("");
+
+  let filter: string;
+  let mapArgs: string[];
+  let codecArgs: string[];
+
+  if (includeAudio) {
+    // Normaliza áudio de cada take pra evitar mismatch de sample rate / channels
+    // entre takes do Veo. asetpts garante timestamps consecutivos.
+    const aFilters = inputPaths
+      .map((_, i) => `[${i}:a]aresample=44100,aformat=sample_fmts=fltp:channel_layouts=stereo,asetpts=N/SR/TB[a${i}]`)
+      .join(";");
+    const concatPairs = inputPaths.map((_, i) => `[v${i}][a${i}]`).join("");
+    filter = `${vFilters};${aFilters};${concatPairs}concat=n=${inputPaths.length}:v=1:a=1[vout][aout]`;
+    mapArgs = ["-map", "[vout]", "-map", "[aout]"];
+    codecArgs = ["-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart"];
+  } else {
+    filter = `${vFilters};${vLabels}concat=n=${inputPaths.length}:v=1:a=0[vout]`;
+    mapArgs = ["-map", "[vout]"];
+    codecArgs = ["-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p", "-movflags", "+faststart", "-an"];
+  }
 
   await new Promise<void>((resolve, reject) => {
     const cmd = ffmpeg();
     for (const p of inputPaths) cmd.input(p);
     cmd
       .complexFilter(filter)
-      .outputOptions([
-        "-map", "[vout]",
-        "-c:v", "libx264",
-        "-preset", "veryfast",
-        "-pix_fmt", "yuv420p",
-        "-movflags", "+faststart",
-        "-an",
-      ])
+      .outputOptions([...mapArgs, ...codecArgs])
       .output(outputPath)
       .on("end", () => resolve())
       .on("error", (err: Error) => reject(err))
@@ -249,10 +266,11 @@ async function muxNoCaptions(videoPath: string, audioPath: string, narrationSeco
 }
 
 export interface AssembleNarratorArgs {
-  takeUrls: string[];           // URLs dos N takes Veo (ordem)
-  narrationAudioUrl: string;    // URL do MP3 do TTS
-  narrationSeconds: number;     // duração da narração
-  jobId: string;                // pra nomear o blob
+  takeUrls: string[];                   // URLs dos N takes Veo (ordem)
+  narrationAudioUrl: string | null;     // URL do MP3 do TTS (null no modo Veo nativo)
+  narrationSeconds: number;             // duração estimada/real da narração
+  jobId: string;                        // pra nomear o blob
+  audioMode: "veo_native" | "tts_overlay";
 }
 
 export interface AssembleNarratorResult {
@@ -281,10 +299,33 @@ export async function assembleNarratorVideo(args: AssembleNarratorArgs): Promise
       })
     );
 
+    // ───────── Modo Veo nativo ─────────
+    // Áudio (fala + lip-sync) vem direto dos takes. Concat preservando áudio,
+    // sem TTS overlay, sem captions. Duração final = soma dos takes.
+    if (args.audioMode === "veo_native") {
+      await concatTakes(takePaths, finalPath, true);
+      const buffer = await readFile(finalPath);
+      const blob = await put(`narrator-${args.jobId}.mp4`, buffer, {
+        access: "public",
+        contentType: "video/mp4",
+        addRandomSuffix: false,
+        allowOverwrite: true,
+      });
+      const actualDuration = await ffmpegProbeDuration(finalPath);
+      return {
+        finalVideoUrl: blob.url,
+        durationSeconds: actualDuration > 0 ? actualDuration : takePaths.length * 8,
+      };
+    }
+
+    // ───────── Modo TTS overlay (B-roll OU avatar mudo) ─────────
+    if (!args.narrationAudioUrl) {
+      throw new Error("narrationAudioUrl é obrigatório no modo tts_overlay");
+    }
     await downloadToFile(args.narrationAudioUrl, audioPath);
 
     // Concatena vídeos (sem áudio — takes já vêm sem áudio do strip)
-    await concatVideoOnly(takePaths, concatPath);
+    await concatTakes(takePaths, concatPath, false);
 
     // Gera ASS + chunks (whisper). Se Whisper falhar, segue sem legenda.
     const captionsResult = await generateCaptionsAss(audioPath, args.narrationSeconds, assPath);

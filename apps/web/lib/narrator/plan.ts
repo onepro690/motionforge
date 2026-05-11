@@ -170,4 +170,15 @@ function defaultVisualPrompt(_text: string, vibe?: string): string {
   return `Vertical 9:16 ${style}, dynamic camera movement, rich color grading, no people speaking, no text on screen, no subtitles, ambient documentary tone.`;
 }
 
+// Modo avatar: só dividimos a copy em N segmentos contíguos. O "visual" é a
+// foto do avatar (reusada em todos os takes), portanto não precisamos de
+// visualPrompt cinematográfico — o prompt do Veo é construído no caller a
+// partir do `text` + voice/gender/audioMode.
+export function planAvatarSegments(copy: string, takeCount: number): NarratorSegment[] {
+  return splitCopyDeterministic(copy, takeCount).map((text) => ({
+    text,
+    visualPrompt: "",
+  }));
+}
+
 export const NARRATOR_SECONDS_PER_TAKE = SECONDS_PER_TAKE;

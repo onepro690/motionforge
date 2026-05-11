@@ -60,6 +60,61 @@ export async function submitVeoTextOnly(prompt: string, accessToken?: string): P
   return { opName: data.name };
 }
 
+export interface VeoImageInput {
+  bytesBase64Encoded: string;
+  mimeType: string;
+}
+
+// Baixa uma URL HTTPS e devolve {bytesBase64Encoded, mimeType} pronto pra
+// Vertex AI. mimeType vem do Content-Type da resposta (ou heurística no path).
+export async function fetchImageForVeo(url: string): Promise<VeoImageInput> {
+  const res = await fetch(url, { signal: AbortSignal.timeout(30_000) });
+  if (!res.ok) throw new Error(`Falha ao baixar imagem do avatar (${res.status})`);
+  const contentType = res.headers.get("content-type")?.split(";")[0]?.trim() ?? "";
+  const ext = url.split("?")[0].split(".").pop()?.toLowerCase() ?? "";
+  const mimeType =
+    contentType.startsWith("image/")
+      ? contentType
+      : ext === "png" ? "image/png"
+      : ext === "webp" ? "image/webp"
+      : ext === "heic" ? "image/heic"
+      : "image/jpeg";
+  const buffer = Buffer.from(await res.arrayBuffer());
+  return { bytesBase64Encoded: buffer.toString("base64"), mimeType };
+}
+
+// Submete um Veo 3 Fast image-to-video. Foto do avatar como starting frame.
+// Áudio: Veo gera áudio nativo (fala/lip-sync) quando o prompt pedir; quando
+// pedir silêncio, o áudio sai limpo (ainda assim sai uma faixa silenciosa).
+export async function submitVeoWithImage(
+  prompt: string,
+  image: VeoImageInput,
+  accessToken?: string,
+): Promise<VeoSubmitResult> {
+  const token = accessToken ?? (await getVertexAccessToken());
+  const res = await fetch(`${VERTEX_BASE}/${VEO_MODEL_ID}:predictLongRunning`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${token}`,
+    },
+    body: JSON.stringify({
+      instances: [{ prompt, image }],
+      parameters: {
+        aspectRatio: "9:16",
+        durationSeconds: 8,
+        sampleCount: 1,
+        personGeneration: "allow_adult",
+      },
+    }),
+  });
+  const data = (await res.json()) as { name?: string; error?: { message: string } };
+  if (!res.ok || !data.name) {
+    throw new Error(`Veo submit (avatar) failed: ${data.error?.message ?? JSON.stringify(data)}`);
+  }
+  return { opName: data.name };
+}
+
 export interface VeoPollResult {
   done: boolean;
   videoBase64?: string;
