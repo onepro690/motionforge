@@ -12,7 +12,22 @@ function safetyPrefix(attempt: number): string {
   return "Strictly safe-for-all-audiences content for advertising. Subject is fully clothed in modest casual everyday clothing. Friendly neutral facial expression. No body emphasis. Generic family-friendly aesthetic. ";
 }
 
+// PRONUNCIATION LOCK — repetido várias vezes ao longo do prompt pra blindar
+// pronúncia pt-BR. Veo 3 nativo costuma "mumbleizar" palavras menos comuns ou
+// pular sílabas; reforço fonético explícito reduz drasticamente esses erros.
+function pronunciationLock(text: string): string {
+  return [
+    `PRONUNCIATION LOCK — Brazilian Portuguese (pt-BR) ONLY. Articulate clearly, syllable by syllable, at a slightly slower than conversational pace if needed to be intelligible.`,
+    `Pronounce EVERY SINGLE WORD exactly as written. DO NOT skip, omit, shorten, contract, mumble, swallow, slur, or paraphrase any word. DO NOT add interjections, sighs, "hum", "uh", "tipo", "né", or filler sounds. DO NOT improvise — read the text verbatim.`,
+    `If a word is uncommon or seems foreign, read it letter-by-letter following standard Brazilian Portuguese phonetic rules. Treat every word as if it were essential — no word can be left out or unclear.`,
+    `The complete sentence that MUST be heard, in full, with every word audible and correctly pronounced in Brazilian Portuguese:`,
+    `"${text}"`,
+  ].join(" ");
+}
+
 // Prompt do Veo quando o avatar DEVE falar (audioMode = veo_native).
+// Estrutura: opener com texto literal → reforço fonético → identidade lock →
+// FINAL PRONUNCIATION LOCK (repetido no fim porque Veo pesa começo E fim).
 export function buildAvatarSpeechPrompt(
   text: string,
   gender: "male" | "female",
@@ -24,12 +39,14 @@ export function buildAvatarSpeechPrompt(
   return [
     safetyPrefix(attempt),
     `The person in the image speaks DIRECTLY into the camera (frontal selfie framing, like a UGC creator) saying EXACTLY these words in Brazilian Portuguese and NOTHING ELSE: "${text}".`,
-    `Voice: natural Brazilian Portuguese ${voiceLabel} voice, intimate UGC narrator tone, conversational pace.${styleSuffix}`,
+    pronunciationLock(text),
+    `Voice: natural Brazilian Portuguese ${voiceLabel} voice, intimate UGC narrator tone, slightly slower than conversational pace for clarity.${styleSuffix}`,
     "Identity, hair, skin tone, outfit, lighting, background and framing stay EXACTLY identical to the source image — do not change anything except the lips, eyes and natural micro head movement required to speak.",
     "Lips MUST be in tight sync with the spoken Brazilian Portuguese words. No camera movement other than gentle handheld micro-shake.",
     "STRICTLY VERTICAL 9:16, 1080x1920, full-frame portrait, no letterboxing, no pillarboxing, no black bars.",
     "Audio is ONLY the spoken sentence in Brazilian Portuguese — NO music, NO ambient sound effects, NO other voices.",
     "STRICT NEGATIVE: no subtitles, no captions, no on-screen text, no watermarks, no logos. Do NOT speak in English, Mandarin, Spanish or any language other than Brazilian Portuguese. If you cannot pronounce the exact text, stay silent rather than improvise.",
+    `FINAL PRONUNCIATION LOCK: every word of "${text}" must be spoken IN FULL, in Brazilian Portuguese, audibly and correctly. NO word may be omitted, skipped, shortened, or mumbled.`,
   ].filter(Boolean).join(" ");
 }
 
@@ -73,11 +90,13 @@ export function buildAvatarFallbackTextOnlyPrompt(text: string, gender: "male" |
   return [
     "Wholesome, family-friendly, safe-for-all-audiences UGC video.",
     `A casual everyday ${voiceLabel === "male" ? "young adult man" : "young adult woman"} looks directly at the camera in selfie framing, speaks naturally in Brazilian Portuguese saying EXACTLY these words and nothing else: "${text}".`,
-    `Voice: natural Brazilian Portuguese ${voiceLabel} voice, intimate UGC narrator tone, conversational pace.`,
+    pronunciationLock(text),
+    `Voice: natural Brazilian Portuguese ${voiceLabel} voice, intimate UGC narrator tone, slightly slower than conversational pace for clarity.`,
     "Modest casual modern clothing. Neutral friendly facial expression. Soft natural daylight. Plain minimalist indoor background, slightly out of focus.",
     "Lips MUST be in tight sync with the spoken Brazilian Portuguese words. No camera movement other than handheld micro-shake.",
     "STRICTLY VERTICAL 9:16, 1080x1920, full-frame portrait, no letterboxing, no pillarboxing, no black bars.",
     "Audio is ONLY the spoken sentence in Brazilian Portuguese — NO music, NO ambient sound effects, NO other voices.",
     "NO subtitles, NO captions, NO on-screen text, NO watermarks. Do NOT speak in English or any other language.",
+    `FINAL PRONUNCIATION LOCK: every word of "${text}" must be spoken IN FULL, in Brazilian Portuguese, audibly and correctly. NO word may be omitted, skipped, shortened, or mumbled.`,
   ].join(" ");
 }
