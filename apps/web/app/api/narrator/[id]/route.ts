@@ -248,12 +248,22 @@ export async function GET(
     }
 
     if (allOk) {
-      // GUARD contra re-entry: polling roda a cada 8s e assembly demora 30s+.
-      // Sem guard, várias instâncias do assembly rodam em paralelo, saturando
-      // ffmpeg/IO e às vezes travando. Se assembly começou recentemente
-      // (<5min), retorna PROCESSING sem retrigger; se >5min, assume travou.
+      // GUARD contra re-entry + circuit breaker
       const now = Date.now();
       const ASSEMBLY_LOCK_MS = 5 * 60 * 1000;
+      const MAX_ASSEMBLY_ATTEMPTS = 3;
+
+      // Circuit breaker: se já tentou 3x sem sucesso, desiste.
+      if ((state.assemblyAttempts ?? 0) >= MAX_ASSEMBLY_ATTEMPTS) {
+        const msg = `Assembly final falhou ${MAX_ASSEMBLY_ATTEMPTS} vezes consecutivas — desistindo. Último erro: ${state.finalErrorMessage ?? "timeout/desconhecido"}`;
+        state.finalErrorMessage = msg;
+        await prisma.generationJob.update({
+          where: { id: job.id },
+          data: { status: "FAILED", errorMessage: msg, completedAt: new Date(), generatedPrompt: JSON.stringify(state) },
+        });
+        return NextResponse.json({ id: job.id, status: "FAILED", errorMessage: msg });
+      }
+
       if (state.assemblyStartedAt && now - state.assemblyStartedAt < ASSEMBLY_LOCK_MS) {
         return NextResponse.json({
           id: job.id,
@@ -266,8 +276,10 @@ export async function GET(
           },
         });
       }
-      // Marca início do assembly e persiste ANTES de chamar ffmpeg.
+      // Marca início do assembly + incrementa contador. Persiste ANTES de
+      // chamar ffmpeg pra evitar race com polls concorrentes.
       state.assemblyStartedAt = now;
+      state.assemblyAttempts = (state.assemblyAttempts ?? 0) + 1;
       await prisma.generationJob.update({
         where: { id: job.id },
         data: { generatedPrompt: JSON.stringify(state) },

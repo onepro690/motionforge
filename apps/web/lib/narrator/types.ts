@@ -43,4 +43,7 @@ export interface NarratorJobState {
   // Se != null e < 5min atrás, polling não retrigger; se > 5min, assume travou
   // e libera pra nova tentativa.
   assemblyStartedAt?: number | null;
+  // Quantas vezes o assembly final foi tentado. Se passar de 3, marca FAILED
+  // definitivo (evita loop infinito quando ffmpeg trava persistentemente).
+  assemblyAttempts?: number;
 }
