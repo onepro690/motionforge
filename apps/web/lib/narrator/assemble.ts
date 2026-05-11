@@ -86,7 +86,12 @@ const CROSSFADE_SECS = 0.25;
 // O pre-process produz arquivos /tmp/norm_i.mp4 já normalizados, trimmed e com
 // áudio limpo. O filter complex final então só precisa fazer xfade entre eles.
 const PREPROCESS_VIDEO_FILTER = "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1,fps=30";
-const PREPROCESS_AUDIO_FILTER = "aresample=44100,aformat=sample_fmts=fltp:channel_layouts=stereo,highpass=f=100,dynaudnorm=f=200:g=15";
+// Áudio: cadeia agressiva pra eliminar música/SFX de fundo e manter só a voz.
+// - highpass=100Hz: corta bass (a maior parte da música tá lá)
+// - afftdn nr=12: denoiser FFT — remove ruído tonal estável (música/ambient)
+// - lowpass=7500Hz: corta agudos onde residem efeitos sonoros estilizados
+// - dynaudnorm: padroniza volume entre takes
+const PREPROCESS_AUDIO_FILTER = "aresample=44100,aformat=sample_fmts=fltp:channel_layouts=stereo,highpass=f=100,afftdn=nr=12:nt=w,lowpass=f=7500,dynaudnorm=f=200:g=15";
 
 // Concat ou crossfade os takes em sequência. Quando N > 1, usa xfade visual
 // pra eliminar "snap" entre takes (cada take parte da mesma foto, então sem

@@ -51,8 +51,20 @@ function voiceLock(gender: "male" | "female", language: NarratorLanguage): strin
 // NEGATIVE LOCK pra áudio: bloqueia música, SFX, ruído ambiente. Voz seca.
 function audioNegativeLock(): string {
   return [
-    `AUDIO NEGATIVE LOCK: ABSOLUTELY NO music of any kind. NO instrumental. NO soundtrack. NO background music. NO score. NO ambient sound. NO room tone. NO sound effects. NO foley. NO other voices. NO crowd noise. NO nature sounds. NO synth pads. NO drone. NO whoosh. NO impact. NO transition sound.`,
-    `The audio track must contain ONLY the dry spoken voice — as if it were a raw phone voice memo recorded in a silent room with zero processing, zero post-production, zero background.`,
+    `AUDIO PURITY LOCK — ZERO TOLERANCE: the audio track contains EXCLUSIVELY the dry spoken human voice. NOTHING ELSE under any circumstance.`,
+    `ABSOLUTELY FORBIDDEN in the audio: music (any genre), instrumental, soundtrack, background music, score, melody, beat, rhythm, drums, piano, synth, pad, drone, ambient sound, room tone, atmosphere, reverb tail, sound effects, foley, whoosh, swoosh, impact, transition sound, sting, riser, sweep, sparkle, chime, bell, click, breath SFX, applause, crowd, nature sounds, wind, water, birds, dog, cat, any animal, traffic, machine.`,
+    `Treat the deliverable as a raw phone voice memo recorded in a silent treated room with zero processing, zero post-production, zero background — JUST the voice, nothing layered underneath, nothing on top, nothing in the gaps between words.`,
+  ].join(" ");
+}
+
+// Bloqueia animações estilizadas / transições / overlays gráficos. Veo às vezes
+// adiciona "efeitos" tipo cortina de luz, partículas brilhantes, scene wipes
+// entre cortes — não queremos NADA disso. Avatar steady, sem firulas.
+function visualPurityLock(): string {
+  return [
+    `VISUAL PURITY LOCK: this is a SINGLE STEADY portrait shot of a person talking. NO animated graphics of any kind.`,
+    `ABSOLUTELY FORBIDDEN visuals: animated transitions, scene wipes, curtain reveals, light streaks added in post, lens flares added, particle effects, sparkles, dust particles, smoke overlays, fog overlays, glow overlays, motion graphics, animated text, lower thirds, captions, subtitles, watermarks, logos, brand bumpers, intro/outro animations, color animation, animated gradients, animated lighting changes, animated shapes, animated icons, animated emojis, drawn elements, illustrated overlays, cartoon elements, anime style effects, anime lines, manga elements, comic effects, vignette animation, zoom punch effect, glitch, datamosh, RGB split, motion blur effect, speed ramp.`,
+    `The shot must look like ONE continuous take from a phone selfie camera: steady framing, natural ambient room light, person talking to camera. Nothing more.`,
   ].join(" ");
 }
 
@@ -72,13 +84,15 @@ export function buildAvatarSpeechPrompt(
     pronunciationLock(text, language),
     voiceLock(gender, language),
     audioNegativeLock(),
+    visualPurityLock(),
     styleSuffix ? `Visual tone: ${styleSuffix.trim()}.` : "",
     "Identity, hair, skin tone, outfit, lighting, background and framing stay EXACTLY identical to the source image — do not change anything except the lips, eyes and natural micro head movement required to speak.",
     `Lips MUST be in tight sync with the spoken ${lang} words. No camera movement other than gentle handheld micro-shake.`,
     "STRICTLY VERTICAL 9:16, 1080x1920, full-frame portrait, no letterboxing, no pillarboxing, no black bars.",
     `STRICT NEGATIVE: no subtitles, no captions, no on-screen text, no watermarks, no logos. ${forbiddenLanguagesClause(language)} If you cannot pronounce the exact text, stay silent rather than improvise.`,
     audioNegativeLock(),
-    `FINAL PRONUNCIATION LOCK: every word of "${text}" must be spoken IN FULL, in ${lang}, audibly and correctly. NO word may be omitted, skipped, shortened, or mumbled. ${audioNegativeLock()}`,
+    visualPurityLock(),
+    `FINAL PRONUNCIATION LOCK: every word of "${text}" must be spoken IN FULL, in ${lang}, audibly and correctly. NO word may be omitted, skipped, shortened, or mumbled. ${audioNegativeLock()} ${visualPurityLock()}`,
   ].filter(Boolean).join(" ");
 }
 
@@ -130,10 +144,11 @@ export function buildAvatarFallbackTextOnlyPrompt(
     pronunciationLock(text, language),
     voiceLock(gender, language),
     audioNegativeLock(),
+    visualPurityLock(),
     "Modest casual modern clothing. Neutral friendly facial expression. Soft natural daylight. Plain minimalist indoor background, slightly out of focus.",
     `Lips MUST be in tight sync with the spoken ${lang} words. No camera movement other than handheld micro-shake.`,
     "STRICTLY VERTICAL 9:16, 1080x1920, full-frame portrait, no letterboxing, no pillarboxing, no black bars.",
     `NO subtitles, NO captions, NO on-screen text, NO watermarks. ${forbiddenLanguagesClause(language)}`,
-    `FINAL PRONUNCIATION LOCK: every word of "${text}" must be spoken IN FULL, in ${lang}, audibly and correctly. NO word may be omitted, skipped, shortened, or mumbled. ${audioNegativeLock()}`,
+    `FINAL PRONUNCIATION LOCK: every word of "${text}" must be spoken IN FULL, in ${lang}, audibly and correctly. NO word may be omitted, skipped, shortened, or mumbled. ${audioNegativeLock()} ${visualPurityLock()}`,
   ].join(" ");
 }
