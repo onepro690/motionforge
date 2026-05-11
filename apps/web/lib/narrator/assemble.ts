@@ -51,8 +51,9 @@ const TAKE_DURATION_SECS = 8;
 // Mínimo aceitável após trim de silêncio (se a "fala" for muito curta, é
 // provável que o silencedetect tenha pego falso positivo — mantém take inteiro).
 const MIN_TAKE_AFTER_TRIM = 2.0;
-// Margem após o fim da fala detectada — evita cortar a última sílaba.
-const SPEECH_END_PADDING = 0.3;
+// Margem após o fim da fala detectada — evita cortar a última sílaba mas
+// mantém o gap mínimo pra próximo take começar limpo.
+const SPEECH_END_PADDING = 0.15;
 
 // Detecta onde o silêncio "longo" começa no fim do áudio. Retorna o timestamp
 // (segundos) onde devemos truncar o take. Se não houver silêncio longo, devolve
@@ -72,6 +73,21 @@ async function detectSpeechEnd(audioPath: string): Promise<number> {
     return trimAt;
   } catch (err) {
     console.warn("[narrator/assemble] detectSpeechEnd failed, using full duration:", err instanceof Error ? err.message : err);
+    return TAKE_DURATION_SECS;
+  }
+}
+
+// Calcula a duração ideal pra trim do take em modo broll com TTS override:
+// usa a duração do MP3 do TTS + padding pequeno. Garante que o take dura
+// EXATAMENTE o tempo da fala, sem cauda silenciosa entrando no próximo take.
+async function detectOverlayDuration(overlayPath: string): Promise<number> {
+  try {
+    const d = await ffmpegProbeDuration(overlayPath);
+    if (!Number.isFinite(d) || d <= 0) return TAKE_DURATION_SECS;
+    const padded = Math.min(TAKE_DURATION_SECS, d + SPEECH_END_PADDING);
+    if (padded < MIN_TAKE_AFTER_TRIM) return TAKE_DURATION_SECS;
+    return padded;
+  } catch {
     return TAKE_DURATION_SECS;
   }
 }
@@ -119,15 +135,17 @@ async function preprocessTake(
   fadeIn = false,
   fadeOut = false,
 ): Promise<void> {
-  // Constrói filtros condicionais com fades.
-  const fadeDur = 0.25;
+  // Fade visual curto pra esconder "snap" de pose entre takes. Áudio NÃO leva
+  // fade — o trim já corta o áudio exatamente no fim da fala (com 0.15s de
+  // padding), então sobrepor um afade aqui faria a última palavra somar com
+  // a primeira do próximo take. Áudio termina seco e o vídeo dá o fade visual.
+  const fadeDur = 0.15;
   let vFilter = PREPROCESS_VIDEO_FILTER;
   if (fadeIn) vFilter += `,fade=t=in:st=0:d=${fadeDur}`;
   if (fadeOut) vFilter += `,fade=t=out:st=${(duration - fadeDur).toFixed(3)}:d=${fadeDur}`;
 
-  let aFilter = PREPROCESS_AUDIO_FILTER;
-  if (fadeIn) aFilter += `,afade=t=in:st=0:d=${fadeDur}`;
-  if (fadeOut) aFilter += `,afade=t=out:st=${(duration - fadeDur).toFixed(3)}:d=${fadeDur}`;
+  // Áudio: SEM fade (só normalize). O trim no -t global corta antes.
+  const aFilter = PREPROCESS_AUDIO_FILTER;
 
   const args = ["-y", "-hide_banner", "-i", inputPath];
   if (audioOverridePath) args.push("-i", audioOverridePath);
@@ -180,12 +198,19 @@ async function mapWithConcurrency<T, R>(
 }
 
 async function concatTakes(inputPaths: string[], outputPath: string, includeAudio: boolean, audioOverridePaths: (string | null)[] = []): Promise<void> {
-  // Detecta fim da fala em cada take (modo includeAudio). Concorrência limitada
-  // também aqui pra não atropelar o Lambda.
-  const trimDurations = includeAudio
-    ? await mapWithConcurrency(inputPaths, FFMPEG_CONCURRENCY, (p) => detectSpeechEnd(p))
-    : inputPaths.map(() => TAKE_DURATION_SECS);
-  console.log(`[narrator/assemble] take durations (after silence trim):`, trimDurations.map((d) => d.toFixed(2)));
+  // Detecta a duração que cada take deve ter:
+  //  - Sem áudio (B-roll legacy / TTS overlay global): usa duração total fixa.
+  //  - Com audio override (broll em mixed): duração do MP3 do TTS daquele
+  //    segmento (vídeo do Veo é mudo de 8s, irrelevante; o que conta é o
+  //    áudio final que vai entrar).
+  //  - Com áudio Veo (avatar/cutout): detecta fim da fala via silencedetect.
+  const trimDurations = !includeAudio
+    ? inputPaths.map(() => TAKE_DURATION_SECS)
+    : await mapWithConcurrency(inputPaths, FFMPEG_CONCURRENCY, (videoPath, i) => {
+        const overlay = audioOverridePaths[i];
+        return overlay ? detectOverlayDuration(overlay) : detectSpeechEnd(videoPath);
+      });
+  console.log(`[narrator/assemble] take durations:`, trimDurations.map((d) => d.toFixed(2)));
 
   const tmpDir = dirname(outputPath);
   const runId = randomBytes(4).toString("hex");
