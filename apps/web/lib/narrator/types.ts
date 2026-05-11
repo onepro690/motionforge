@@ -1,5 +1,9 @@
 export type NarratorAudioMode = "veo_native" | "tts_overlay";
 export type NarratorLanguageCode = "pt-BR" | "en" | "es";
+// Estilo visual de cada take. Default 'avatar' quando há foto; 'broll' quando não.
+// 'mixed' (no NarratorJobState) é o ROTEIRO geral que mistura os 3 estilos.
+export type NarratorSegmentStyle = "avatar" | "broll" | "avatar_cutout";
+export type NarratorMixMode = "avatar" | "broll" | "mixed";
 
 export interface NarratorSegmentState {
   index: number;
@@ -21,6 +25,12 @@ export interface NarratorSegmentState {
   // todos os retries com imagem foram bloqueados pelo filtro RAI. UI deve
   // sinalizar isso pro user.
   usedFallback?: boolean;
+  // Estilo visual escolhido pra esse segmento (em modo misto). 'avatar' usa a
+  // foto original; 'broll' é text-only cinematográfico; 'avatar_cutout' usa
+  // foto editada (Nano Banana troca o fundo).
+  style?: NarratorSegmentStyle;
+  // URL da foto editada por Nano Banana — só pra style='avatar_cutout'.
+  editedImageUrl?: string | null;
 }
 
 export interface NarratorJobState {
@@ -36,6 +46,10 @@ export interface NarratorJobState {
   // Idioma detectado da copy. Aplicado aos prompts do Veo e à voz TTS.
   // Default "pt-BR" pra compatibilidade com jobs antigos sem esse campo.
   language?: NarratorLanguageCode;
+  // Modo de produção. 'avatar': só avatar falando. 'broll': só cenários sem
+  // pessoa. 'mixed': LLM intercala avatar / broll / avatar_cutout.
+  // Default 'avatar' quando há foto; 'broll' quando não.
+  mixMode?: NarratorMixMode;
   // null quando audioMode === "veo_native" (não tem TTS).
   narrationAudioUrl: string | null;
   narrationDurationSeconds: number;

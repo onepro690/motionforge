@@ -232,4 +232,124 @@ export function planAvatarSegments(copy: string, takeCount: number): NarratorSeg
   }));
 }
 
+// ─── MODO MISTURADO ────────────────────────────────────────────────────────
+// LLM classifica cada segmento em "avatar" | "broll" | "avatar_cutout" e
+// gera, quando necessário, descrição do cenário B-roll ou do background pra
+// cutout. Resultado: roteiro completo pra o pipeline de geração.
+
+export type MixedSegmentStyle = "avatar" | "broll" | "avatar_cutout";
+
+export interface MixedSegment {
+  text: string;
+  style: MixedSegmentStyle;
+  // Visual prompt cinematográfico — usado pra style="broll".
+  visualPrompt: string;
+  // Descrição do cenário pra style="avatar_cutout" (Nano Banana edita o fundo
+  // da foto do avatar pra esse cenário).
+  backgroundDescription: string;
+}
+
+interface PlanMixedArgs {
+  copy: string;
+  takeCount: number;
+  language: "pt-BR" | "en" | "es";
+}
+
+export async function planMixedSegments({ copy, takeCount, language }: PlanMixedArgs): Promise<MixedSegment[]> {
+  const apiKey = process.env.OPENAI_API_KEY;
+  if (!apiKey) {
+    // Fallback determinístico: alterna avatar/broll, sem cutout
+    return splitCopyBySentences(copy, takeCount).map((text, i) => ({
+      text,
+      style: (i % 2 === 0 ? "avatar" : "broll") as MixedSegmentStyle,
+      visualPrompt: defaultVisualPrompt(text, undefined),
+      backgroundDescription: "soft minimalist indoor scene with warm natural light",
+    }));
+  }
+
+  const langName = language === "pt-BR" ? "Brazilian Portuguese" : language === "es" ? "Spanish" : "English";
+
+  const system = [
+    "You are a UGC video director for short-form content (TikTok/Reels/Shorts).",
+    "Task: split a narration copy into N segments AND for EACH segment, choose ONE of 3 visual styles that best fits the meaning of that specific segment, and generate any needed visual prompt(s).",
+    "",
+    "═══ THE 3 STYLES ═══",
+    "1. 'avatar' — a real person (the creator) speaks this segment directly to the camera in selfie framing. BEST for: personal claims, opinions, intimate confessions, emotional beats, direct address ('I'll tell you', 'listen', 'I know how it feels').",
+    "2. 'broll' — a cinematic B-roll shot WITHOUT any person. Pure cinematic imagery illustrating what is being said. BEST for: abstract concepts, metaphors, objects, places, mood-setters, descriptive narration. NO people in the shot.",
+    "3. 'avatar_cutout' — the SAME creator (from the avatar photo) appears in a NEW custom background that illustrates the segment's meaning. BEST for: 'imagine yourself doing X' moments, transitions between two ideas, or when you want the creator visible but in a thematic environment that supports the words.",
+    "",
+    "═══ RULES ═══",
+    "1. Concatenating the `text` fields IN ORDER must reproduce the original copy word-for-word — keep punctuation and spaces. DO NOT add/remove/paraphrase anything.",
+    "2. Return EXACTLY the requested number of segments. Each segment ~7.5s spoken (≈18-22 words). Break at natural punctuation boundaries (. ! ? ;).",
+    "3. Mix the styles — avoid more than 3 consecutive 'avatar' segments. Use 'broll' for the most descriptive/abstract parts. Use 'avatar_cutout' sparingly (1-2 times max in a typical 5-take video) for high-impact moments.",
+    "4. NEVER produce a sequence of all 'avatar' or all 'broll' segments. Final result should feel cinematic and varied.",
+    "5. The `text` field MUST stay in the original language of the copy.",
+    "6. `visualPrompt` and `backgroundDescription` MUST be in ENGLISH (Veo prompt language).",
+    "",
+    "═══ visualPrompt (style='broll' only) ═══",
+    "Cinematic, vertical 9:16, photographic realism, soft cinematic depth-of-field, dramatic natural lighting. Describe an objective shot (no people, no text) that DIRECTLY illustrates what the segment is saying. Include subject, camera move, mood lighting, atmosphere. ~25-40 words.",
+    "Example: for segment 'time keeps passing and nothing changes': 'extreme close-up of a vintage analog clock hands ticking slowly on a wooden desk, late afternoon golden hour light streaming through dusty window blinds, slow push-in, melancholic, shallow depth of field, anamorphic flare'.",
+    "",
+    "═══ backgroundDescription (style='avatar_cutout' only) ═══",
+    "Describe ONLY the BACKGROUND/environment that surrounds the creator (no people other than the creator, no description of the creator). Should be a real-looking scene that thematically supports the segment. Slightly out-of-focus / cinematic. ~15-30 words.",
+    "Example: for segment 'standing at the crossroads of your life': 'wide open desert highway at golden hour stretching into the horizon, soft warm light, distant mountains, dust particles in the air, shallow depth of field'.",
+    "",
+    "═══ For style='avatar' ═══",
+    "Leave visualPrompt and backgroundDescription as EMPTY STRINGS. The pipeline will use the avatar photo as-is.",
+    "",
+    "═══ OUTPUT SCHEMA (strict JSON) ═══",
+    `{"segments": [{"text": "...", "style": "avatar"|"broll"|"avatar_cutout", "visualPrompt": "...", "backgroundDescription": "..."}, ...]}`,
+    `Copy language for text: ${langName}.`,
+  ].join("\n");
+
+  const user = JSON.stringify({ copy, takeCount });
+
+  const res = await fetch("https://api.openai.com/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      model: "gpt-4o-mini",
+      response_format: { type: "json_object" },
+      temperature: 0.6,
+      messages: [
+        { role: "system", content: system },
+        { role: "user", content: user },
+      ],
+    }),
+    signal: AbortSignal.timeout(60_000),
+  });
+
+  if (!res.ok) {
+    const errText = await res.text();
+    throw new Error(`OpenAI plan-mixed error: ${res.status} ${errText.slice(0, 300)}`);
+  }
+
+  const data = (await res.json()) as { choices?: Array<{ message?: { content?: string } }> };
+  const content = data.choices?.[0]?.message?.content ?? "";
+  const parsed = JSON.parse(content) as { segments?: Array<Partial<MixedSegment>> };
+  const segments = parsed.segments ?? [];
+
+  // Validação: se concat dos texts não bate, faz fallback determinístico
+  const reconstructed = segments.map((s) => s.text ?? "").join("").replace(/\s+/g, " ").trim();
+  const expected = copy.replace(/\s+/g, " ").trim();
+  if (segments.length === 0 || reconstructed.length < expected.length * 0.9) {
+    return splitCopyBySentences(copy, takeCount).map((text, i) => ({
+      text,
+      style: (i % 2 === 0 ? "avatar" : "broll") as MixedSegmentStyle,
+      visualPrompt: defaultVisualPrompt(text, undefined),
+      backgroundDescription: "soft minimalist indoor scene with warm natural light",
+    }));
+  }
+
+  return segments.map((s) => ({
+    text: s.text ?? "",
+    style: (s.style ?? "avatar") as MixedSegmentStyle,
+    visualPrompt: s.visualPrompt ?? "",
+    backgroundDescription: s.backgroundDescription ?? "",
+  }));
+}
+
 export const NARRATOR_SECONDS_PER_TAKE = SECONDS_PER_TAKE;

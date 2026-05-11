@@ -10,6 +10,7 @@ import { upload } from "@vercel/blob/client";
 
 type Phase = "idle" | "submitting" | "polling" | "done" | "error";
 type AudioMode = "veo_native" | "tts_overlay";
+type MixMode = "avatar" | "broll" | "mixed";
 
 interface SegmentSummary {
   index: number;
@@ -49,6 +50,7 @@ export default function NarratorPage() {
   const [avatarUrl, setAvatarUrl] = useState<string | null>(null);
   const [uploadingAvatar, setUploadingAvatar] = useState(false);
   const [audioMode, setAudioMode] = useState<AudioMode>("veo_native");
+  const [mixMode, setMixMode] = useState<MixMode>("avatar");
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   const pollRef = useRef<NodeJS.Timeout | null>(null);
@@ -152,6 +154,7 @@ export default function NarratorPage() {
           gender,
           avatarImageUrl: avatarUrl ?? undefined,
           audioMode: avatarUrl ? audioMode : undefined,
+          mixMode: avatarUrl ? mixMode : "broll",
         }),
       });
       const data = await res.json();
@@ -211,10 +214,14 @@ export default function NarratorPage() {
   const total = progress?.total ?? segments.length;
   const pct = total > 0 ? Math.round((completed / total) * 100) : 0;
 
-  const veoNativeMode = Boolean(avatarUrl) && audioMode === "veo_native";
+  // Modo misturado força TTS overlay (mais consistente entre estilos)
+  const effectiveAudioMode: AudioMode = mixMode === "mixed" ? "tts_overlay" : audioMode;
+  const veoNativeMode = Boolean(avatarUrl) && effectiveAudioMode === "veo_native";
   const voiceLabel = veoNativeMode ? "Gênero da voz pedido ao Veo" : "Voz do narrador";
   const maleLabel = veoNativeMode ? "Masculina" : "Homem · Onyx";
   const femaleLabel = veoNativeMode ? "Feminina" : "Mulher · Nova";
+  // Toggle de áudio só relevante em modo 'avatar' puro (mixed força TTS)
+  const showAudioModeToggle = Boolean(avatarUrl) && mixMode === "avatar";
 
   return (
     <div className="max-w-2xl mx-auto space-y-5">
@@ -285,8 +292,66 @@ export default function NarratorPage() {
             )}
           </div>
 
-          {/* Modo de áudio (só quando há avatar) */}
+          {/* Modo de produção (só quando há avatar) */}
           {avatarUrl && (
+            <div>
+              <label className="text-xs uppercase tracking-wider text-white/50 font-medium mb-2 block">
+                Modo de produção
+              </label>
+              <div className="grid grid-cols-3 gap-2">
+                <button
+                  onClick={() => setMixMode("avatar")}
+                  disabled={isLocked}
+                  className={cn(
+                    "px-2 py-3 rounded-lg border text-xs font-medium transition-all text-left",
+                    mixMode === "avatar"
+                      ? "bg-violet-500/20 border-violet-500/50 text-violet-200"
+                      : "bg-white/[0.02] border-white/[0.08] text-white/60 hover:bg-white/[0.05]",
+                    isLocked && "opacity-50 cursor-not-allowed"
+                  )}
+                >
+                  <div className="font-semibold text-sm">Só avatar</div>
+                  <div className="text-[10px] text-white/40 mt-0.5">Avatar falando do começo ao fim.</div>
+                </button>
+                <button
+                  onClick={() => setMixMode("mixed")}
+                  disabled={isLocked}
+                  className={cn(
+                    "px-2 py-3 rounded-lg border text-xs font-medium transition-all text-left",
+                    mixMode === "mixed"
+                      ? "bg-violet-500/20 border-violet-500/50 text-violet-200"
+                      : "bg-white/[0.02] border-white/[0.08] text-white/60 hover:bg-white/[0.05]",
+                    isLocked && "opacity-50 cursor-not-allowed"
+                  )}
+                >
+                  <div className="font-semibold text-sm">Misturado</div>
+                  <div className="text-[10px] text-white/40 mt-0.5">Avatar + B-roll + avatar recortado em cenário.</div>
+                </button>
+                <button
+                  onClick={() => setMixMode("broll")}
+                  disabled={isLocked}
+                  className={cn(
+                    "px-2 py-3 rounded-lg border text-xs font-medium transition-all text-left",
+                    mixMode === "broll"
+                      ? "bg-violet-500/20 border-violet-500/50 text-violet-200"
+                      : "bg-white/[0.02] border-white/[0.08] text-white/60 hover:bg-white/[0.05]",
+                    isLocked && "opacity-50 cursor-not-allowed"
+                  )}
+                >
+                  <div className="font-semibold text-sm">Só B-roll</div>
+                  <div className="text-[10px] text-white/40 mt-0.5">Cinematográfico, sem avatar.</div>
+                </button>
+              </div>
+              {mixMode === "mixed" && (
+                <p className="text-[11px] text-white/30 mt-1.5">
+                  Cada trecho da copy escolhe sozinho o estilo (avatar / B-roll / avatar em cenário). Áudio: TTS Onyx/Nova sobreposta.
+                </p>
+              )}
+            </div>
+          )}
+
+          {/* Modo de áudio (só relevante em mixMode='avatar') */}
+          {showAudioModeToggle && (
             <div>
               <label className="text-xs uppercase tracking-wider text-white/50 font-medium mb-2 flex items-center gap-1.5">
                 <Volume2 className="w-3.5 h-3.5" /> Como o avatar fala

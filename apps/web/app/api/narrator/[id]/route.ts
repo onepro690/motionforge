@@ -374,7 +374,12 @@ export async function GET(
 
 // Re-submete um segmento após bloqueio RAI. Quando isFallback=true (último
 // retry com avatar), descarta a foto e gera text-only com pessoa genérica
-// falando o trecho — perde fidelidade do avatar mas garante que o take render.
+// falando o trecho.
+//
+// Respeita seg.style do modo misturado:
+//   - 'broll' → text-only cinematográfico
+//   - 'avatar' / 'avatar_cutout' → image-to-video (avatar_cutout reusa edited
+//     image se disponível, senão cai pra avatar normal)
 async function resubmitSegment(
   seg: NarratorSegmentState,
   state: NarratorJobState,
@@ -385,11 +390,16 @@ async function resubmitSegment(
 ): Promise<{ opName: string; usedFallback: boolean }> {
   const hasAvatar = Boolean(state.avatarImageUrl);
   const language = state.language ?? "pt-BR";
+  const style = seg.style ?? (hasAvatar ? "avatar" : "broll");
 
-  // FALLBACK: avatar não responde a prompt safer. Cai pra text-only descrevendo
-  // pessoa genérica falando o texto. Só aplica em audioMode = veo_native — no
-  // tts_overlay o avatar é meramente decorativo (mudo), então deixa text-only
-  // genérico também.
+  // B-roll: text-only sempre.
+  if (style === "broll") {
+    const prompt = buildBrollPrompt(seg.visualPrompt, undefined, attempt);
+    const res = await submitVeoTextOnly(prompt, accessToken);
+    return { opName: res.opName, usedFallback: false };
+  }
+
+  // FALLBACK final: avatar continua bloqueado mesmo com prompt safer.
   if (hasAvatar && isFallback) {
     const prompt =
       state.audioMode === "veo_native"
@@ -403,8 +413,19 @@ async function resubmitSegment(
     return { opName: res.opName, usedFallback: true };
   }
 
+  // avatar OR avatar_cutout: image-to-video.
   if (hasAvatar) {
-    const image = await getAvatarImage();
+    let image: VeoImageInput | null = null;
+    if (style === "avatar_cutout" && seg.editedImageUrl) {
+      try {
+        image = await fetchImageForVeo(seg.editedImageUrl);
+      } catch {
+        image = null;
+      }
+    }
+    if (!image) {
+      image = await getAvatarImage();
+    }
     if (!image) throw new Error("Avatar image não encontrada pra retry");
     const prompt =
       state.audioMode === "veo_native"
@@ -413,6 +434,8 @@ async function resubmitSegment(
     const res = await submitVeoWithImage(prompt, image, accessToken);
     return { opName: res.opName, usedFallback: false };
   }
+
+  // Sem avatar e style != broll (não deveria acontecer) — cai pra B-roll.
   const prompt = buildBrollPrompt(seg.visualPrompt, undefined, attempt);
   const res = await submitVeoTextOnly(prompt, accessToken);
   return { opName: res.opName, usedFallback: false };
