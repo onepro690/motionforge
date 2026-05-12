@@ -129,6 +129,28 @@ export default function NarratorPage() {
     if (fileInputRef.current) fileInputRef.current.value = "";
   };
 
+  // Colar imagem (Ctrl+V) quando ainda não há avatar — funciona em qualquer foco
+  // pq textarea ignora paste de imagem, então rotear pro avatar é seguro.
+  useEffect(() => {
+    if (avatarUrl || phase === "submitting" || phase === "polling" || uploadingAvatar) return;
+    const onPaste = (e: ClipboardEvent) => {
+      const items = e.clipboardData?.items;
+      if (!items) return;
+      for (const item of Array.from(items)) {
+        if (item.kind === "file" && item.type.startsWith("image/")) {
+          const file = item.getAsFile();
+          if (file) {
+            e.preventDefault();
+            void handleAvatarSelect(file);
+            return;
+          }
+        }
+      }
+    };
+    window.addEventListener("paste", onPaste);
+    return () => window.removeEventListener("paste", onPaste);
+  }, [avatarUrl, phase, uploadingAvatar]);
+
   const handleSubmit = async () => {
     const trimmed = copy.trim();
     if (trimmed.length < 20) {
@@ -276,7 +298,7 @@ export default function NarratorPage() {
                 ) : (
                   <Upload className="w-4 h-4" />
                 )}
-                <span>{uploadingAvatar ? "Subindo foto..." : "Subir foto do avatar"}</span>
+                <span>{uploadingAvatar ? "Subindo foto..." : "Subir foto do avatar (ou Ctrl+V pra colar)"}</span>
                 <input
                   ref={fileInputRef}
                   type="file"
