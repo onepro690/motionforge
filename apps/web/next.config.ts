@@ -39,6 +39,10 @@ const nextConfig: NextConfig = {
       "./lib/narrator/fonts/**",
       "../../node_modules/ffmpeg-static/**",
     ],
+    "/api/captions/**": [
+      "./lib/narrator/fonts/**",
+      "../../node_modules/ffmpeg-static/**",
+    ],
   },
   images: {
     remotePatterns: [
