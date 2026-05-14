@@ -14,6 +14,9 @@ import type { CaptionLine } from "./transcribe";
 interface BuildAssOpts {
   videoWidth: number;
   videoHeight: number;
+  // Posição vertical do CENTRO da legenda, em % da altura do vídeo (0=topo, 100=base).
+  // Default 88 = "embaixo" (legenda fica perto do rodapé, com folga pra safe zone).
+  position?: number;
 }
 
 // ASS time: H:MM:SS.cs
@@ -41,12 +44,6 @@ function pickFontSize(videoHeight: number): number {
   return Math.max(38, Math.min(110, base));
 }
 
-function pickMarginV(videoHeight: number): number {
-  // ~9% da altura — fica acima da safe zone do TikTok/Reels mas não cola no
-  // rodapé. Em vídeo 1080x1920 dá ~170; em 1080p horizontal dá ~97.
-  return Math.max(40, Math.round(videoHeight * 0.09));
-}
-
 function pickOutline(fontSize: number): number {
   return Math.max(3, Math.round(fontSize * 0.08));
 }
@@ -58,9 +55,16 @@ function pickShadow(fontSize: number): number {
 export function buildKaraokeAss(lines: CaptionLine[], opts: BuildAssOpts): string {
   const { videoWidth, videoHeight } = opts;
   const fontSize = pickFontSize(videoHeight);
-  const marginV = pickMarginV(videoHeight);
   const outline = pickOutline(fontSize);
   const shadow = pickShadow(fontSize);
+
+  // Posição vertical do centro da legenda (em px do topo). Clampa pra não
+  // encostar nas bordas — mantém uma margem mínima de half-fontsize.
+  const positionPct = Math.max(0, Math.min(100, opts.position ?? 88));
+  const minY = Math.round(fontSize * 0.7);
+  const maxY = videoHeight - Math.round(fontSize * 0.7);
+  const centerY = Math.max(minY, Math.min(maxY, Math.round((positionPct / 100) * videoHeight)));
+  const centerX = Math.round(videoWidth / 2);
 
   const out: string[] = [];
   out.push("[Script Info]");
@@ -82,7 +86,7 @@ export function buildKaraokeAss(lines: CaptionLine[], opts: BuildAssOpts): strin
   // SecondaryColour (antes):             branco
   // OutlineColour:                       preto
   // BackColour (sombra):                 preto semi-transparente
-  // Alignment 2 = bottom center
+  // Alignment 5 = middle center — combinamos com \pos por linha pra controle exato.
   // Bold 1, BorderStyle 1 (outline+shadow)
   const styleLine =
     `Style: Karaoke,Anton,${fontSize},` +
@@ -90,7 +94,7 @@ export function buildKaraokeAss(lines: CaptionLine[], opts: BuildAssOpts): strin
     `&H00FFFFFF,` +
     `&H00000000,` +
     `&H80000000,` +
-    `1,0,0,0,100,100,0,0,1,${outline},${shadow},2,80,80,${marginV},1`;
+    `1,0,0,0,100,100,0,0,1,${outline},${shadow},5,80,80,0,1`;
   out.push(styleLine);
   out.push("");
 
@@ -124,8 +128,9 @@ export function buildKaraokeAss(lines: CaptionLine[], opts: BuildAssOpts): strin
       parts.push(`{\\kf${kfCs}}${txt}`);
     }
     // Junta com espaços simples — o \kf antes de cada palavra delimita o highlight.
+    // \an5\pos sobrepõe alignment e posiciona o centro da linha em (centerX, centerY).
     // Pop sutil de scale no começo da linha pra dar "vida" sem virar pop-word.
-    const intro = `{\\fad(80,80)\\t(0,140,\\fscx108\\fscy108)\\t(140,260,\\fscx100\\fscy100)}`;
+    const intro = `{\\an5\\pos(${centerX},${centerY})\\fad(80,80)\\t(0,140,\\fscx108\\fscy108)\\t(140,260,\\fscx100\\fscy100)}`;
     const text = intro + parts.join(" ");
     out.push(`Dialogue: 0,${start},${end},Karaoke,,0,0,0,,${text}`);
   }

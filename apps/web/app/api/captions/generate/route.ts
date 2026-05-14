@@ -9,6 +9,7 @@ export const maxDuration = 300;
 
 const schema = z.object({
   videoUrl: z.string().url(),
+  position: z.number().min(0).max(100).optional(),
 });
 
 export async function POST(request: NextRequest) {
@@ -21,7 +22,7 @@ export async function POST(request: NextRequest) {
     if (!parsed.success) {
       return NextResponse.json({ error: "Entrada inválida", details: parsed.error.errors }, { status: 400 });
     }
-    const { videoUrl } = parsed.data;
+    const { videoUrl, position } = parsed.data;
 
     const job = await prisma.generationJob.create({
       data: {
@@ -40,7 +41,7 @@ export async function POST(request: NextRequest) {
     after(async () => {
       try {
         console.log(`[captions/generate] starting pipeline for job ${job.id}`);
-        const result = await runCaptionsPipeline({ videoUrl, jobId: job.id });
+        const result = await runCaptionsPipeline({ videoUrl, jobId: job.id, position });
         await prisma.generationJob.update({
           where: { id: job.id },
           data: {

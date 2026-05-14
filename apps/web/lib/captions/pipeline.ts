@@ -221,6 +221,8 @@ async function burnSubtitlesModern(
 export interface CaptionsPipelineArgs {
   videoUrl: string;
   jobId: string;
+  // Posição vertical do centro da legenda, % da altura do vídeo (0=topo, 100=base).
+  position?: number;
 }
 
 export interface CaptionsPipelineResult {
@@ -261,7 +263,11 @@ export async function runCaptionsPipeline(args: CaptionsPipelineArgs): Promise<C
     if (lines.length === 0) throw new Error("Nenhuma linha de legenda gerada");
     console.log(`[captions/pipeline] grouped into ${lines.length} lines`);
 
-    const ass = buildKaraokeAss(lines, { videoWidth: probe.width, videoHeight: probe.height });
+    const ass = buildKaraokeAss(lines, {
+      videoWidth: probe.width,
+      videoHeight: probe.height,
+      position: args.position,
+    });
     await writeFile(assPath, ass, "utf8");
 
     const fontPath = await findFontPath();
