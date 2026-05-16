@@ -23,7 +23,6 @@ import {
   buildAvatarSpeechPrompt,
   buildAvatarSilentPrompt,
   buildBrollPrompt,
-  buildAvatarFallbackTextOnlyPrompt,
   buildScriptShotPrompt,
   MAX_RAI_RETRIES,
 } from "@/lib/narrator/prompts";
@@ -180,21 +179,22 @@ export async function GET(
         }
 
         const nextAttempt = currentRetry + 1;
-        const isFinalFallback = nextAttempt === MAX_RAI_RETRIES && Boolean(state.avatarImageUrl);
+        // Política: SEMPRE manter a foto original — nunca cair em avatar
+        // genérico. Se Vertex bloquear consistentemente, o take vira FAILED
+        // com mensagem clara (usuário troca a foto).
         try {
           console.log(`[narrator/[id]] take ${seg.index + 1} stuck for ${Math.round(stuckMs / 60000)}min, resubmitting (attempt ${nextAttempt})`);
-          const { opName: newOp, usedFallback } = await resubmitSegment(
+          const { opName: newOp } = await resubmitSegment(
             seg,
             state,
             nextAttempt,
-            isFinalFallback,
+            false,
             accessToken,
             getAvatarImage,
           );
           seg.opName = newOp;
           seg.retryCount = nextAttempt;
           seg.lastSubmittedAt = Date.now();
-          seg.usedFallback = seg.usedFallback || usedFallback;
           seg.errorMessage = null;
           anyChanged = true;
         } catch (err) {
@@ -229,27 +229,26 @@ export async function GET(
         if (!r.done) continue;
         const seg = state.segments[idx];
 
-        // Bloqueio por RAI: tenta de novo com prompt cada vez mais "safe" até
-        // MAX_RAI_RETRIES. Última tentativa cai pra text-only sem foto pra
-        // garantir que o vídeo completa mesmo se a foto disparar face filter.
+        // Bloqueio por RAI: tenta com prompts cada vez mais "safe" mantendo
+        // SEMPRE a foto original. Sem fallback pra avatar genérico — se
+        // Vertex bloquear depois de MAX_RAI_RETRIES, take vira FAILED com
+        // mensagem clara sugerindo trocar a foto.
         if (r.raiBlocked) {
           const currentRetry = seg.retryCount ?? 0;
           if (currentRetry < MAX_RAI_RETRIES) {
             const nextAttempt = currentRetry + 1;
-            const isFinalFallback = nextAttempt === MAX_RAI_RETRIES && Boolean(state.avatarImageUrl);
             try {
-              const { opName: newOp, usedFallback } = await resubmitSegment(
+              const { opName: newOp } = await resubmitSegment(
                 seg,
                 state,
                 nextAttempt,
-                isFinalFallback,
+                false,
                 accessToken,
                 getAvatarImage,
               );
               seg.opName = newOp;
               seg.retryCount = nextAttempt;
               seg.lastSubmittedAt = Date.now();
-              seg.usedFallback = seg.usedFallback || usedFallback;
               seg.status = "PROCESSING";
               seg.errorMessage = null;
               continue;
@@ -259,9 +258,11 @@ export async function GET(
               continue;
             }
           }
-          // Esgotou retries
+          // Esgotou retries — falha definitiva (sem fallback genérico).
           seg.status = "FAILED";
-          seg.errorMessage = `Bloqueado pelo filtro de segurança Vertex AI após ${MAX_RAI_RETRIES} retries. ${r.errorMessage ?? ""}`.trim();
+          seg.errorMessage = state.avatarImageUrl
+            ? `Filtro de segurança Vertex AI bloqueou sua foto neste take após ${MAX_RAI_RETRIES} tentativas. Tente uma foto mais frontal/neutra (sem traços que o filtro possa considerar sensíveis).`
+            : `Bloqueado pelo filtro de segurança Vertex AI após ${MAX_RAI_RETRIES} retries.`;
           continue;
         }
 
@@ -477,19 +478,8 @@ async function resubmitSegment(
     return { opName: res.opName, usedFallback: false };
   }
 
-  // FALLBACK final: avatar continua bloqueado mesmo com prompt safer.
-  if (hasAvatar && isFallback) {
-    const prompt =
-      state.audioMode === "veo_native"
-        ? buildAvatarFallbackTextOnlyPrompt(seg.text, state.gender, language)
-        : buildBrollPrompt(
-            "A young adult person stands in a softly lit minimal interior, looking at the camera neutrally.",
-            undefined,
-            attempt,
-          );
-    const res = await withQuotaRetry(() => submitVeoTextOnly(prompt, accessToken));
-    return { opName: res.opName, usedFallback: true };
-  }
+  // (Antigo fallback "avatar genérico" removido — policy: nunca substituir
+  // a foto do usuário por uma pessoa aleatória. Take falha em vez disso.)
 
   // avatar OR avatar_cutout: image-to-video.
   if (hasAvatar) {
