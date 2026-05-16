@@ -2,8 +2,10 @@ export type NarratorAudioMode = "veo_native" | "tts_overlay";
 export type NarratorLanguageCode = "pt-BR" | "en" | "es";
 // Estilo visual de cada take. Default 'avatar' quando há foto; 'broll' quando não.
 // 'mixed' (no NarratorJobState) é o ROTEIRO geral que mistura os 3 estilos.
-export type NarratorSegmentStyle = "avatar" | "broll" | "avatar_cutout";
-export type NarratorMixMode = "avatar" | "broll" | "mixed";
+// 'conversation' = take de 2 pessoas no mesmo quadro, só o speaker fala.
+export type NarratorSegmentStyle = "avatar" | "broll" | "avatar_cutout" | "conversation";
+export type NarratorMixMode = "avatar" | "broll" | "mixed" | "conversation";
+export type NarratorSpeaker = "A" | "B";
 
 export interface NarratorSegmentState {
   index: number;
@@ -35,6 +37,8 @@ export interface NarratorSegmentState {
   // takes 'broll' (avatar/cutout têm áudio Veo nativo). Quando presente, o
   // assembly substitui o áudio do take por esse TTS.
   audioOverlayUrl?: string | null;
+  // Modo conversation: qual avatar fala nesse take. "A" = esquerda, "B" = direita.
+  speaker?: NarratorSpeaker;
 }
 
 export interface NarratorJobState {
@@ -68,4 +72,15 @@ export interface NarratorJobState {
   // Quantas vezes o assembly final foi tentado. Se passar de 3, marca FAILED
   // definitivo (evita loop infinito quando ffmpeg trava persistentemente).
   assemblyAttempts?: number;
+  // ─── Modo conversation (mixMode='conversation') ───
+  // Gênero de cada pessoa da foto. A = pessoa à esquerda, B = à direita.
+  // Em outros modos, `gender` continua sendo a fonte da verdade.
+  genderA?: "male" | "female";
+  genderB?: "male" | "female";
+  // Descritores breves de cada pessoa, gerados por GPT-4o-mini Vision na
+  // criação do job ("woman with curly dark hair in white shirt"). Usados nos
+  // retries (attempt >= 2) pra desambiguar quando o prompt posicional
+  // left/right não isolou bem o falante.
+  personDescriptorA?: string;
+  personDescriptorB?: string;
 }

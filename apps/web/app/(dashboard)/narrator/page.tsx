@@ -1,16 +1,18 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
-import { Mic, Loader2, Download, Sparkles, Upload, X, User, Volume2 } from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { Mic, Loader2, Download, Sparkles, Upload, X, User, Volume2, MessageSquare } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { toast } from "sonner";
 import { cn } from "@/lib/utils";
 import { upload } from "@vercel/blob/client";
+import { parseConversationTurns } from "@/lib/narrator/parse-conversation";
 
 type Phase = "idle" | "submitting" | "polling" | "done" | "error";
 type AudioMode = "veo_native" | "tts_overlay";
-type MixMode = "avatar" | "broll" | "mixed";
+type MixMode = "avatar" | "broll" | "mixed" | "conversation";
+type Gender = "male" | "female";
 
 interface SegmentSummary {
   index: number;
@@ -51,7 +53,11 @@ export default function NarratorPage() {
   const [uploadingAvatar, setUploadingAvatar] = useState(false);
   const [audioMode, setAudioMode] = useState<AudioMode>("veo_native");
   const [mixMode, setMixMode] = useState<MixMode>("avatar");
+  // Modo conversation: gênero da pessoa à esquerda (A) e à direita (B)
+  const [genderA, setGenderA] = useState<Gender>("male");
+  const [genderB, setGenderB] = useState<Gender>("female");
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const textareaRef = useRef<HTMLTextAreaElement | null>(null);
 
   const pollRef = useRef<NodeJS.Timeout | null>(null);
 
@@ -161,6 +167,16 @@ export default function NarratorPage() {
       toast.error("Copy muito longa (limite 4000 caracteres)");
       return;
     }
+    // Validação extra modo conversation
+    if (avatarUrl && mixMode === "conversation") {
+      const turns = parseConversationTurns(trimmed);
+      const aCount = turns.filter((t) => t.speaker === "A").length;
+      const bCount = turns.filter((t) => t.speaker === "B").length;
+      if (aCount === 0 || bCount === 0) {
+        toast.error("Use [A] e [B] na copy pra marcar quem fala cada linha.");
+        return;
+      }
+    }
     setPhase("submitting");
     setError(null);
     setFinalUrl(null);
@@ -177,6 +193,7 @@ export default function NarratorPage() {
           avatarImageUrl: avatarUrl ?? undefined,
           audioMode: avatarUrl ? audioMode : undefined,
           mixMode: avatarUrl ? mixMode : "broll",
+          ...(avatarUrl && mixMode === "conversation" ? { genderA, genderB } : {}),
         }),
       });
       const data = await res.json();
@@ -242,8 +259,49 @@ export default function NarratorPage() {
   const voiceLabel = veoNativeMode ? "Gênero da voz pedido ao Veo" : "Voz do narrador";
   const maleLabel = veoNativeMode ? "Masculina" : "Homem · Onyx";
   const femaleLabel = veoNativeMode ? "Feminina" : "Mulher · Nova";
-  // Toggle de áudio só relevante em modo 'avatar' puro (mixed força TTS)
+  // Toggle de áudio só relevante em modo 'avatar' puro (mixed/conversation forçam)
   const showAudioModeToggle = Boolean(avatarUrl) && mixMode === "avatar";
+  // Voz genérica única só relevante quando NÃO é conversation (que tem A/B)
+  const showSingleVoice = mixMode !== "conversation";
+
+  // Preview de turnos parseados em tempo real (modo conversation)
+  const conversationPreview = useMemo(() => {
+    if (mixMode !== "conversation") return null;
+    const turns = parseConversationTurns(copy);
+    const aCount = turns.filter((t) => t.speaker === "A").length;
+    const bCount = turns.filter((t) => t.speaker === "B").length;
+    const totalWords = turns.reduce((acc, t) => acc + t.text.split(/\s+/).filter(Boolean).length, 0);
+    const estimatedSecs = Math.round(totalWords / 2.8);
+    return { turns, aCount, bCount, estimatedSecs, takes: turns.length };
+  }, [copy, mixMode]);
+
+  const insertTagAtCursor = (tag: "[A]" | "[B]") => {
+    const ta = textareaRef.current;
+    if (!ta) {
+      setCopy((prev) => `${prev}${prev && !prev.endsWith(" ") ? " " : ""}${tag} `);
+      return;
+    }
+    const start = ta.selectionStart;
+    const end = ta.selectionEnd;
+    const before = copy.slice(0, start);
+    const after = copy.slice(end);
+    const needsSpaceBefore = before.length > 0 && !/\s$/.test(before);
+    const needsSpaceAfter = after.length === 0 || !/^\s/.test(after);
+    const insertion = `${needsSpaceBefore ? " " : ""}${tag}${needsSpaceAfter ? " " : ""}`;
+    const next = `${before}${insertion}${after}`;
+    setCopy(next);
+    // Reposiciona cursor depois do tag (após o RAF do setState)
+    requestAnimationFrame(() => {
+      if (!textareaRef.current) return;
+      const pos = before.length + insertion.length;
+      textareaRef.current.focus();
+      textareaRef.current.setSelectionRange(pos, pos);
+    });
+  };
+
+  const conversationInvalid = mixMode === "conversation" && conversationPreview
+    ? conversationPreview.aCount === 0 || conversationPreview.bCount === 0
+    : false;
 
   return (
     <div className="max-w-2xl mx-auto space-y-5">
@@ -320,7 +378,7 @@ export default function NarratorPage() {
               <label className="text-xs uppercase tracking-wider text-white/50 font-medium mb-2 block">
                 Modo de produção
               </label>
-              <div className="grid grid-cols-3 gap-2">
+              <div className="grid grid-cols-2 gap-2">
                 <button
                   onClick={() => setMixMode("avatar")}
                   disabled={isLocked}
@@ -350,6 +408,20 @@ export default function NarratorPage() {
                   <div className="text-[10px] text-white/40 mt-0.5">Avatar + B-roll + avatar recortado em cenário.</div>
                 </button>
                 <button
+                  onClick={() => setMixMode("conversation")}
+                  disabled={isLocked}
+                  className={cn(
+                    "px-2 py-3 rounded-lg border text-xs font-medium transition-all text-left",
+                    mixMode === "conversation"
+                      ? "bg-violet-500/20 border-violet-500/50 text-violet-200"
+                      : "bg-white/[0.02] border-white/[0.08] text-white/60 hover:bg-white/[0.05]",
+                    isLocked && "opacity-50 cursor-not-allowed"
+                  )}
+                >
+                  <div className="font-semibold text-sm flex items-center gap-1"><MessageSquare className="w-3 h-3" /> Conversa (2 pessoas)</div>
+                  <div className="text-[10px] text-white/40 mt-0.5">Foto com 2 avatares. Tags [A]/[B] na copy.</div>
+                </button>
+                <button
                   onClick={() => setMixMode("broll")}
                   disabled={isLocked}
                   className={cn(
@@ -369,6 +441,83 @@ export default function NarratorPage() {
                   Cada trecho da copy escolhe sozinho o estilo (avatar / B-roll / avatar em cenário). Áudio: TTS Onyx/Nova sobreposta.
                 </p>
               )}
+              {mixMode === "conversation" && (
+                <p className="text-[11px] text-violet-300/70 mt-1.5">
+                  📸 A pessoa à <strong>esquerda</strong> da foto é <strong>A</strong>, à <strong>direita</strong> é <strong>B</strong>. Veo gera lip-sync nativo por take.
+                </p>
+              )}
+            </div>
+          )}
+
+          {/* Gêneros por pessoa — modo conversation */}
+          {avatarUrl && mixMode === "conversation" && (
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className="text-xs uppercase tracking-wider text-white/50 font-medium mb-2 block">
+                  Voz pessoa A (esquerda)
+                </label>
+                <div className="grid grid-cols-2 gap-1.5">
+                  <button
+                    onClick={() => setGenderA("male")}
+                    disabled={isLocked}
+                    className={cn(
+                      "px-2 py-2 rounded-md border text-xs font-medium transition-all",
+                      genderA === "male"
+                        ? "bg-violet-500/20 border-violet-500/50 text-violet-200"
+                        : "bg-white/[0.02] border-white/[0.08] text-white/60 hover:bg-white/[0.05]",
+                      isLocked && "opacity-50 cursor-not-allowed"
+                    )}
+                  >
+                    Masc.
+                  </button>
+                  <button
+                    onClick={() => setGenderA("female")}
+                    disabled={isLocked}
+                    className={cn(
+                      "px-2 py-2 rounded-md border text-xs font-medium transition-all",
+                      genderA === "female"
+                        ? "bg-violet-500/20 border-violet-500/50 text-violet-200"
+                        : "bg-white/[0.02] border-white/[0.08] text-white/60 hover:bg-white/[0.05]",
+                      isLocked && "opacity-50 cursor-not-allowed"
+                    )}
+                  >
+                    Fem.
+                  </button>
+                </div>
+              </div>
+              <div>
+                <label className="text-xs uppercase tracking-wider text-white/50 font-medium mb-2 block">
+                  Voz pessoa B (direita)
+                </label>
+                <div className="grid grid-cols-2 gap-1.5">
+                  <button
+                    onClick={() => setGenderB("male")}
+                    disabled={isLocked}
+                    className={cn(
+                      "px-2 py-2 rounded-md border text-xs font-medium transition-all",
+                      genderB === "male"
+                        ? "bg-violet-500/20 border-violet-500/50 text-violet-200"
+                        : "bg-white/[0.02] border-white/[0.08] text-white/60 hover:bg-white/[0.05]",
+                      isLocked && "opacity-50 cursor-not-allowed"
+                    )}
+                  >
+                    Masc.
+                  </button>
+                  <button
+                    onClick={() => setGenderB("female")}
+                    disabled={isLocked}
+                    className={cn(
+                      "px-2 py-2 rounded-md border text-xs font-medium transition-all",
+                      genderB === "female"
+                        ? "bg-violet-500/20 border-violet-500/50 text-violet-200"
+                        : "bg-white/[0.02] border-white/[0.08] text-white/60 hover:bg-white/[0.05]",
+                      isLocked && "opacity-50 cursor-not-allowed"
+                    )}
+                  >
+                    Fem.
+                  </button>
+                </div>
+              </div>
             </div>
           )}
 
@@ -412,44 +561,46 @@ export default function NarratorPage() {
           )}
 
           {/* Voz: rótulo muda dependendo se vai virar TTS Onyx/Nova ou instrução pro Veo */}
-          <div>
-            <label className="text-xs uppercase tracking-wider text-white/50 font-medium mb-2 block">
-              {voiceLabel}
-            </label>
-            <div className="grid grid-cols-2 gap-2">
-              <button
-                onClick={() => setGender("male")}
-                disabled={isLocked}
-                className={cn(
-                  "px-4 py-3 rounded-lg border text-sm font-medium transition-all",
-                  gender === "male"
-                    ? "bg-violet-500/20 border-violet-500/50 text-violet-200"
-                    : "bg-white/[0.02] border-white/[0.08] text-white/60 hover:bg-white/[0.05]",
-                  isLocked && "opacity-50 cursor-not-allowed"
-                )}
-              >
-                {maleLabel}
-              </button>
-              <button
-                onClick={() => setGender("female")}
-                disabled={isLocked}
-                className={cn(
-                  "px-4 py-3 rounded-lg border text-sm font-medium transition-all",
-                  gender === "female"
-                    ? "bg-violet-500/20 border-violet-500/50 text-violet-200"
-                    : "bg-white/[0.02] border-white/[0.08] text-white/60 hover:bg-white/[0.05]",
-                  isLocked && "opacity-50 cursor-not-allowed"
-                )}
-              >
-                {femaleLabel}
-              </button>
+          {showSingleVoice && (
+            <div>
+              <label className="text-xs uppercase tracking-wider text-white/50 font-medium mb-2 block">
+                {voiceLabel}
+              </label>
+              <div className="grid grid-cols-2 gap-2">
+                <button
+                  onClick={() => setGender("male")}
+                  disabled={isLocked}
+                  className={cn(
+                    "px-4 py-3 rounded-lg border text-sm font-medium transition-all",
+                    gender === "male"
+                      ? "bg-violet-500/20 border-violet-500/50 text-violet-200"
+                      : "bg-white/[0.02] border-white/[0.08] text-white/60 hover:bg-white/[0.05]",
+                    isLocked && "opacity-50 cursor-not-allowed"
+                  )}
+                >
+                  {maleLabel}
+                </button>
+                <button
+                  onClick={() => setGender("female")}
+                  disabled={isLocked}
+                  className={cn(
+                    "px-4 py-3 rounded-lg border text-sm font-medium transition-all",
+                    gender === "female"
+                      ? "bg-violet-500/20 border-violet-500/50 text-violet-200"
+                      : "bg-white/[0.02] border-white/[0.08] text-white/60 hover:bg-white/[0.05]",
+                    isLocked && "opacity-50 cursor-not-allowed"
+                  )}
+                >
+                  {femaleLabel}
+                </button>
+              </div>
+              {veoNativeMode && (
+                <p className="text-[11px] text-white/30 mt-1.5">
+                  Veo escolhe um timbre dentro do gênero pedido — pode variar entre takes.
+                </p>
+              )}
             </div>
-            {veoNativeMode && (
-              <p className="text-[11px] text-white/30 mt-1.5">
-                Veo escolhe um timbre dentro do gênero pedido — pode variar entre takes.
-              </p>
-            )}
-          </div>
+          )}
 
           {/* Copy */}
           <div>
@@ -459,18 +610,64 @@ export default function NarratorPage() {
                 {copy.length} chars · ≈{Math.round(copy.split(/\s+/).filter(Boolean).length / 2.8)}s narrado
               </span>
             </label>
+            {mixMode === "conversation" && avatarUrl && (
+              <div className="flex items-center gap-2 mb-2">
+                <button
+                  onClick={() => insertTagAtCursor("[A]")}
+                  disabled={isLocked}
+                  className={cn(
+                    "px-2.5 py-1 rounded-md border border-violet-500/30 bg-violet-500/10 text-violet-200 text-xs font-mono hover:bg-violet-500/20 transition",
+                    isLocked && "opacity-50 cursor-not-allowed"
+                  )}
+                >
+                  + [A] esquerda
+                </button>
+                <button
+                  onClick={() => insertTagAtCursor("[B]")}
+                  disabled={isLocked}
+                  className={cn(
+                    "px-2.5 py-1 rounded-md border border-violet-500/30 bg-violet-500/10 text-violet-200 text-xs font-mono hover:bg-violet-500/20 transition",
+                    isLocked && "opacity-50 cursor-not-allowed"
+                  )}
+                >
+                  + [B] direita
+                </button>
+                <span className="text-[10px] text-white/30 ml-auto">Tag inicia uma nova fala</span>
+              </div>
+            )}
             <textarea
+              ref={textareaRef}
               value={copy}
               onChange={(e) => setCopy(e.target.value)}
               disabled={isLocked}
               rows={8}
-              placeholder={COPY_EXAMPLES[0]}
+              placeholder={mixMode === "conversation"
+                ? "[A] Voce viu o que aconteceu? [B] Vi sim, foi incrivel. [A] Tambem fiquei chocado."
+                : COPY_EXAMPLES[0]}
               className="w-full bg-white/[0.02] border border-white/[0.08] rounded-lg px-4 py-3 text-white placeholder-white/20 text-sm leading-relaxed focus:outline-none focus:border-violet-500/40 resize-none disabled:opacity-60"
             />
+            {mixMode === "conversation" && conversationPreview && (
+              <div className={cn(
+                "mt-2 rounded-md border px-3 py-2 text-xs",
+                conversationInvalid
+                  ? "border-amber-500/30 bg-amber-500/5 text-amber-300/80"
+                  : "border-white/[0.08] bg-white/[0.02] text-white/60",
+              )}>
+                {conversationInvalid ? (
+                  <span>⚠ Use ao menos uma fala de <strong>[A]</strong> e uma de <strong>[B]</strong> pra montar a conversa.</span>
+                ) : (
+                  <span>
+                    🎬 <strong>{conversationPreview.takes}</strong> takes · <strong>{conversationPreview.aCount}</strong> falas de A · <strong>{conversationPreview.bCount}</strong> falas de B · ≈{conversationPreview.estimatedSecs}s
+                  </span>
+                )}
+              </div>
+            )}
             <p className="text-xs text-white/30 mt-1.5">
-              {avatarUrl
-                ? "A cada ~7.5s de fala geramos 1 take Veo 3 Fast com o avatar falando o trecho. Cada take parte da mesma foto."
-                : "A cada 8s de narração geramos 1 take Veo 3 Fast. A copy é sempre narrada por inteiro."}
+              {mixMode === "conversation"
+                ? "Cada turno marcado com [A] ou [B] vira 1 take Veo com a mesma foto. Só a pessoa marcada mexe a boca."
+                : avatarUrl
+                  ? "A cada ~7.5s de fala geramos 1 take Veo 3 Fast com o avatar falando o trecho. Cada take parte da mesma foto."
+                  : "A cada 8s de narração geramos 1 take Veo 3 Fast. A copy é sempre narrada por inteiro."}
             </p>
           </div>
 
@@ -478,11 +675,15 @@ export default function NarratorPage() {
           {phase === "idle" || phase === "error" ? (
             <Button
               onClick={handleSubmit}
-              disabled={copy.trim().length < 20 || uploadingAvatar}
+              disabled={copy.trim().length < 20 || uploadingAvatar || conversationInvalid}
               className="w-full bg-violet-500 hover:bg-violet-600 text-white font-semibold py-6"
             >
               <Sparkles className="w-4 h-4 mr-2" />
-              {avatarUrl ? "Gerar vídeo com avatar falando" : "Gerar vídeo narrado"}
+              {mixMode === "conversation"
+                ? "Gerar conversa entre os 2 avatares"
+                : avatarUrl
+                  ? "Gerar vídeo com avatar falando"
+                  : "Gerar vídeo narrado"}
             </Button>
           ) : (
             <Button onClick={handleReset} variant="outline" className="w-full">

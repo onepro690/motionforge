@@ -142,6 +142,85 @@ export function buildBrollPromptGeneric(visualPrompt: string, attempt: number = 
   ].filter(Boolean).join(" ");
 }
 
+// ─── MODO CONVERSATION ────────────────────────────────────────────────────
+// Prompt do Veo pra take de conversa: foto tem 2 pessoas, apenas o speaker
+// fala, a outra fica em silêncio absoluto. Risco principal: Veo3 às vezes
+// anima as 2 bocas. Mitigação por attempt progressivo: posicional →
+// reforço repetido 3x → descritor específico da pessoa.
+
+function mouthIsolationLock(
+  speakerSide: "LEFT" | "RIGHT",
+  otherSide: "LEFT" | "RIGHT",
+  attempt: number,
+  descriptorSpeaker?: string,
+  descriptorOther?: string,
+): string {
+  const blocks: string[] = [];
+  blocks.push(
+    `MOUTH ISOLATION LOCK — CRITICAL: Only ONE mouth may move in this entire shot — the mouth of the person on the ${speakerSide}. The mouth of the person on the ${otherSide} is FROZEN CLOSED throughout the entire take. ZERO mouth movement, ZERO jaw movement, ZERO lip parting on the ${otherSide} person.`,
+  );
+  if (attempt >= 1) {
+    // Reforço — repete a restrição em formato diferente.
+    blocks.push(
+      `LISTENER LOCK: The person on the ${otherSide} is LISTENING ONLY. They remain completely silent with closed neutral lips, may blink naturally and may show subtle attentive facial micro-expressions (slight head tilt, occasional small nod), but their mouth NEVER opens, NEVER moves, NEVER speaks. They are NOT speaking. They are NOT talking. They are NOT vocalizing. They contribute ZERO audio to this take.`,
+    );
+    blocks.push(
+      `SPEAKER LOCK: ONLY the person on the ${speakerSide} speaks. Their mouth moves naturally in tight sync with the spoken words. The other person stays quiet.`,
+    );
+  }
+  if (attempt >= 2 && descriptorSpeaker && descriptorOther) {
+    blocks.push(
+      `IDENTITY-BASED LOCK: The ${descriptorSpeaker} (${speakerSide} side) is the one speaking. The ${descriptorOther} (${otherSide} side) stays SILENT with mouth closed — does not speak, does not move lips, does not vocalize.`,
+    );
+  }
+  return blocks.join(" ");
+}
+
+export function buildConversationSpeechPrompt(args: {
+  text: string;
+  speaker: "A" | "B";
+  genderA: "male" | "female";
+  genderB: "male" | "female";
+  language?: NarratorLanguage;
+  attempt?: number;
+  personDescriptorA?: string;
+  personDescriptorB?: string;
+}): string {
+  const {
+    text,
+    speaker,
+    genderA,
+    genderB,
+    language = "pt-BR",
+    attempt = 0,
+    personDescriptorA,
+    personDescriptorB,
+  } = args;
+  const speakerSide = speaker === "A" ? "LEFT" : "RIGHT";
+  const otherSide = speaker === "A" ? "RIGHT" : "LEFT";
+  const speakerGender = speaker === "A" ? genderA : genderB;
+  const descriptorSpeaker = speaker === "A" ? personDescriptorA : personDescriptorB;
+  const descriptorOther = speaker === "A" ? personDescriptorB : personDescriptorA;
+  const lang = languageLabel(language);
+  return [
+    safetyPrefix(attempt),
+    `Two people sit side by side in the source image, both visible in the same vertical frame. The person on the ${speakerSide} side speaks DIRECTLY to camera saying EXACTLY these words in ${lang} and NOTHING ELSE: "${text}". The person on the ${otherSide} side stays silent and listens.`,
+    mouthIsolationLock(speakerSide, otherSide, attempt, descriptorSpeaker, descriptorOther),
+    pronunciationLock(text, language),
+    voiceLock(speakerGender, language),
+    audioNegativeLock(),
+    visualPurityLock(),
+    "Identity, hair, skin tone, clothing, framing, background and lighting of BOTH people stay EXACTLY identical to the source image — change nothing except the speaker's lips, eyes and subtle natural micro head movement required to speak.",
+    `Lips of the ${speakerSide} person MUST be in tight sync with the spoken ${lang} words. The ${otherSide} person's lips MUST stay closed and motionless. No camera movement other than gentle handheld micro-shake.`,
+    "STRICTLY VERTICAL 9:16, 1080x1920, full-frame portrait composition that keeps BOTH people visible. No letterboxing, no pillarboxing, no black bars, no cropping that hides either person.",
+    `STRICT NEGATIVE: no subtitles, no captions, no on-screen text, no watermarks, no logos. ${forbiddenLanguagesClause(language)} If you cannot pronounce the exact text, stay silent rather than improvise.`,
+    audioNegativeLock(),
+    visualPurityLock(),
+    mouthIsolationLock(speakerSide, otherSide, attempt, descriptorSpeaker, descriptorOther),
+    `FINAL PRONUNCIATION LOCK: every word of "${text}" must be spoken IN FULL, in ${lang}, audibly and correctly by the ${speakerSide} person only. NO word may be omitted, skipped, shortened, or mumbled. The ${otherSide} person remains MUTE throughout. ${audioNegativeLock()} ${visualPurityLock()}`,
+  ].filter(Boolean).join(" ");
+}
+
 export const MAX_RAI_RETRIES = 3;
 
 // Fallback FINAL quando todos os retries com imagem falharam por RAI. Gera

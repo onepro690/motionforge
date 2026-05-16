@@ -23,6 +23,7 @@ import {
   buildAvatarSilentPrompt,
   buildBrollPrompt,
   buildAvatarFallbackTextOnlyPrompt,
+  buildConversationSpeechPrompt,
   MAX_RAI_RETRIES,
 } from "@/lib/narrator/prompts";
 import type { NarratorJobState, NarratorSegmentState } from "@/lib/narrator/types";
@@ -398,6 +399,34 @@ async function resubmitSegment(
   if (style === "broll") {
     const prompt = buildBrollPrompt(seg.visualPrompt, undefined, attempt);
     const res = await submitVeoTextOnly(prompt, accessToken);
+    return { opName: res.opName, usedFallback: false };
+  }
+
+  // Conversation: image-to-video com a MESMA foto, prompt isola o speaker.
+  // Attempt mais alto = prompt mais agressivo (reforço + descritor).
+  if (style === "conversation" && seg.speaker) {
+    // Fallback final: foto bloqueada → 1 pessoa genérica do gênero correto.
+    if (hasAvatar && isFallback) {
+      const speakerGender = seg.speaker === "A"
+        ? (state.genderA ?? state.gender)
+        : (state.genderB ?? state.gender);
+      const prompt = buildAvatarFallbackTextOnlyPrompt(seg.text, speakerGender, language);
+      const res = await submitVeoTextOnly(prompt, accessToken);
+      return { opName: res.opName, usedFallback: true };
+    }
+    const image = await getAvatarImage();
+    if (!image) throw new Error("Avatar image não encontrada pra retry conversation");
+    const prompt = buildConversationSpeechPrompt({
+      text: seg.text,
+      speaker: seg.speaker,
+      genderA: state.genderA ?? state.gender,
+      genderB: state.genderB ?? (state.gender === "male" ? "female" : "male"),
+      language,
+      attempt,
+      personDescriptorA: state.personDescriptorA,
+      personDescriptorB: state.personDescriptorB,
+    });
+    const res = await submitVeoWithImage(prompt, image, accessToken);
     return { opName: res.opName, usedFallback: false };
   }
 

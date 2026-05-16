@@ -7,7 +7,7 @@ import { put } from "@vercel/blob";
 import { writeFile, unlink } from "fs/promises";
 import { join } from "path";
 import { randomBytes } from "crypto";
-import { computeTakeCount, planNarratorSegments, planAvatarSegments, planMixedSegments } from "@/lib/narrator/plan";
+import { computeTakeCount, planNarratorSegments, planAvatarSegments, planMixedSegments, planConversationSegments, parseConversationTurns } from "@/lib/narrator/plan";
 import { swapAvatarBackground } from "@/lib/narrator/cutout";
 import {
   submitVeoTextOnly,
@@ -22,9 +22,10 @@ import {
   buildAvatarSilentPrompt,
   buildBrollPrompt,
   buildBrollPromptGeneric,
+  buildConversationSpeechPrompt,
 } from "@/lib/narrator/prompts";
 import { detectLanguage } from "@/lib/narrator/language";
-import type { NarratorJobState, NarratorSegmentState, NarratorAudioMode } from "@/lib/narrator/types";
+import type { NarratorJobState, NarratorSegmentState, NarratorAudioMode, NarratorSpeaker } from "@/lib/narrator/types";
 
 export const maxDuration = 120;
 
@@ -39,8 +40,58 @@ const schema = z.object({
   vibe: z.string().max(200).optional(),
   avatarImageUrl: z.string().url().optional(),
   audioMode: z.enum(["veo_native", "tts_overlay"]).optional(),
-  mixMode: z.enum(["avatar", "broll", "mixed"]).optional(),
+  mixMode: z.enum(["avatar", "broll", "mixed", "conversation"]).optional(),
+  // Modo conversation: gênero de cada pessoa da foto.
+  genderA: z.enum(["male", "female"]).optional(),
+  genderB: z.enum(["male", "female"]).optional(),
 });
+
+// GPT-4o-mini Vision: descreve cada pessoa de uma foto com 2 avatares.
+// Usado nos retries (attempt >= 2) pra desambiguar quem fala quando o prompt
+// posicional left/right não isolou bem. Falha não-fatal — null retorna.
+async function describeTwoPeople(imageUrl: string): Promise<{ left: string; right: string } | null> {
+  const apiKey = process.env.OPENAI_API_KEY;
+  if (!apiKey) return null;
+  try {
+    const res = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model: "gpt-4o-mini",
+        response_format: { type: "json_object" },
+        temperature: 0.2,
+        messages: [
+          {
+            role: "system",
+            content: "You describe two people in a photo. Return JSON: {\"left\": \"...\", \"right\": \"...\"}. Each description is 6-12 words covering distinctive features (hair color/style, top clothing color, glasses, beard, age range, gender). No names. Pure visual differentiators. If you only see one person or cannot tell, return empty strings.",
+          },
+          {
+            role: "user",
+            content: [
+              { type: "text", text: "Describe the LEFT person and the RIGHT person in this image." },
+              { type: "image_url", image_url: { url: imageUrl } },
+            ],
+          },
+        ],
+      }),
+      signal: AbortSignal.timeout(30_000),
+    });
+    if (!res.ok) return null;
+    const data = (await res.json()) as { choices?: Array<{ message?: { content?: string } }> };
+    const content = data.choices?.[0]?.message?.content ?? "";
+    const parsed = JSON.parse(content) as { left?: string; right?: string };
+    const left = parsed.left?.trim() ?? "";
+    const right = parsed.right?.trim() ?? "";
+    if (!left || !right) return null;
+    return { left, right };
+  } catch (err) {
+    console.warn("[narrator] describeTwoPeople falhou:", err);
+    return null;
+  }
+}
 
 async function generateTtsToBlob(script: string, voice: string, jobId: string, suffix = ""): Promise<{ url: string; durationSeconds: number }> {
   const apiKey = process.env.OPENAI_API_KEY;
@@ -104,20 +155,43 @@ export async function POST(request: NextRequest) {
     //  - "avatar" só faz sentido com avatar — força "avatar" se há foto, senão "broll"
     //  - "broll" sempre sem avatar
     //  - "mixed" requer avatar (cutout precisa da foto); senão cai pra "broll"
+    //  - "conversation" requer avatar (foto com 2 pessoas) + tags [A]/[B] na copy
     const hasAvatar = Boolean(avatarImageUrl);
-    let mixMode: "avatar" | "broll" | "mixed" = parsed.data.mixMode ?? (hasAvatar ? "avatar" : "broll");
+    let mixMode: "avatar" | "broll" | "mixed" | "conversation" = parsed.data.mixMode ?? (hasAvatar ? "avatar" : "broll");
     if (!hasAvatar) mixMode = "broll";
+
+    // Validação extra pro modo conversation
+    if (mixMode === "conversation") {
+      const parsedTurns = parseConversationTurns(copy);
+      const aCount = parsedTurns.filter((t) => t.speaker === "A").length;
+      const bCount = parsedTurns.filter((t) => t.speaker === "B").length;
+      if (aCount === 0 || bCount === 0) {
+        return NextResponse.json({
+          error: "Use [A] e [B] na copy pra marcar quem fala cada linha. Exemplo: [A] Oi, tudo bem? [B] Tudo, e voce?",
+        }, { status: 400 });
+      }
+      // Tags exóticas (C, D, ...) — varre direto na copy original.
+      if (/\[\s*[c-zC-Z]\s*\]/.test(copy)) {
+        return NextResponse.json({
+          error: "Apenas tags [A] e [B] são suportadas no modo conversa.",
+        }, { status: 400 });
+      }
+    }
+
+    const genderA = parsed.data.genderA ?? gender;
+    const genderB = parsed.data.genderB ?? (gender === "male" ? "female" : "male");
 
     // audioMode resolution:
     //  - "broll" sem avatar → tts_overlay (legado)
     //  - "mixed" → veo_native nos takes avatar/cutout (lipsync), TTS por take
     //    nos broll. Tratado como "veo_native" no state mas com segment.audioOverlayUrl
     //    populado pros broll.
+    //  - "conversation" → veo_native sempre (TTS por cima de 2 bocas não dá pra lip-sync)
     //  - "avatar" respeita audioMode; default veo_native
     let audioMode: NarratorAudioMode;
     if (mixMode === "broll") {
       audioMode = "tts_overlay";
-    } else if (mixMode === "mixed") {
+    } else if (mixMode === "mixed" || mixMode === "conversation") {
       audioMode = "veo_native";
     } else {
       audioMode = parsed.data.audioMode ?? "veo_native";
@@ -159,15 +233,36 @@ export async function POST(request: NextRequest) {
       //    - "avatar" → planAvatarSegments (split simples; todos style=avatar)
       //    - "broll"  → planNarratorSegments (B-roll cinematográfico)
       //    - "mixed"  → planMixedSegments (LLM classifica cada segment)
-      const takeCount = computeTakeCount(narrationDuration);
+      //    - "conversation" → planConversationSegments (parse tags A/B,
+      //      sub-split de turnos longos). takeCount vem do parser, não de
+      //      narrationDuration.
       type PlannedSegment = {
         text: string;
         visualPrompt: string;
-        style: "avatar" | "broll" | "avatar_cutout";
+        style: "avatar" | "broll" | "avatar_cutout" | "conversation";
         backgroundDescription?: string;
+        speaker?: NarratorSpeaker;
       };
       let segments: PlannedSegment[];
-      if (mixMode === "mixed") {
+      let takeCount: number;
+      if (mixMode === "conversation") {
+        const conv = planConversationSegments(copy);
+        segments = conv.map((s) => ({
+          text: s.text,
+          visualPrompt: "",
+          style: "conversation" as const,
+          speaker: s.speaker,
+        }));
+        takeCount = segments.length;
+        // Recalcula narrationDuration baseado nos turnos parseados (sem tags),
+        // garantindo trim correto no assembly.
+        const totalWords = segments.reduce(
+          (acc, s) => acc + s.text.split(/\s+/).filter(Boolean).length,
+          0,
+        );
+        narrationDuration = Math.max(2, totalWords / 2.8);
+      } else if (mixMode === "mixed") {
+        takeCount = computeTakeCount(narrationDuration);
         const mixed = await planMixedSegments({ copy, takeCount, language });
         segments = mixed.map((s) => ({
           text: s.text,
@@ -176,10 +271,12 @@ export async function POST(request: NextRequest) {
           backgroundDescription: s.backgroundDescription,
         }));
       } else if (mixMode === "avatar") {
+        takeCount = computeTakeCount(narrationDuration);
         segments = planAvatarSegments(copy, takeCount).map((s) => ({
           text: s.text, visualPrompt: s.visualPrompt, style: "avatar" as const,
         }));
       } else {
+        takeCount = computeTakeCount(narrationDuration);
         const broll = await planNarratorSegments({ copy, takeCount, vibe });
         segments = broll.map((s) => ({
           text: s.text, visualPrompt: s.visualPrompt, style: "broll" as const,
@@ -190,11 +287,25 @@ export async function POST(request: NextRequest) {
       //    - avatar → submitVeoWithImage(foto original, prompt fala/silent)
       //    - broll  → submitVeoTextOnly(buildBrollPrompt)
       //    - avatar_cutout → Nano Banana edita foto (troca fundo) → Veo image-to-video
+      //    - conversation → submitVeoWithImage(MESMA foto, prompt fala isolada)
       const accessToken = await getVertexAccessToken();
 
       let avatarImage: VeoImageInput | null = null;
       if (hasAvatar) {
         avatarImage = await fetchImageForVeo(avatarImageUrl!);
+      }
+
+      // Modo conversation: gera descritores das 2 pessoas (best-effort).
+      // Usados pelos prompts no attempt >= 2 dos retries quando o prompt
+      // posicional left/right não isolou bem o falante.
+      let personDescriptorA: string | undefined;
+      let personDescriptorB: string | undefined;
+      if (mixMode === "conversation" && avatarImageUrl) {
+        const desc = await describeTwoPeople(avatarImageUrl);
+        if (desc) {
+          personDescriptorA = desc.left;
+          personDescriptorB = desc.right;
+        }
       }
 
       // PREPS PARALELOS:
@@ -254,6 +365,23 @@ export async function POST(request: NextRequest) {
           if (seg.style === "broll") {
             return submitVeoTextOnly(brollBuilder(seg.visualPrompt, 0), accessToken);
           }
+          // conversation: image-to-video com a MESMA foto, prompt isola o speaker
+          if (seg.style === "conversation") {
+            if (!avatarImage || !seg.speaker) {
+              return submitVeoTextOnly(brollBuilder("Two people having a calm conversation in soft ambient indoor light.", 0), accessToken);
+            }
+            const prompt = buildConversationSpeechPrompt({
+              text: seg.text,
+              speaker: seg.speaker,
+              genderA,
+              genderB,
+              language,
+              attempt: 0,
+              personDescriptorA,
+              personDescriptorB,
+            });
+            return submitVeoWithImage(prompt, avatarImage, accessToken);
+          }
           // avatar OR avatar_cutout — image-to-video
           const image = seg.style === "avatar_cutout" ? cutoutImages[i] ?? avatarImage : avatarImage;
           if (!image) {
@@ -285,6 +413,7 @@ export async function POST(request: NextRequest) {
             style: seg.style,
             editedImageUrl,
             audioOverlayUrl,
+            speaker: seg.speaker,
           };
         }
         return {
@@ -298,6 +427,7 @@ export async function POST(request: NextRequest) {
           style: seg.style,
           editedImageUrl,
           audioOverlayUrl,
+          speaker: seg.speaker,
         };
       });
 
@@ -315,6 +445,12 @@ export async function POST(request: NextRequest) {
         segments: segState,
         finalVideoUrl: null,
         finalErrorMessage: null,
+        ...(mixMode === "conversation" ? {
+          genderA,
+          genderB,
+          personDescriptorA,
+          personDescriptorB,
+        } : {}),
       };
 
       await prisma.generationJob.update({

@@ -369,3 +369,41 @@ export async function planMixedSegments({ copy, takeCount, language }: PlanMixed
 }
 
 export const NARRATOR_SECONDS_PER_TAKE = SECONDS_PER_TAKE;
+
+// ─── MODO CONVERSATION ────────────────────────────────────────────────────
+// Parser puro de tags [A]/[B] vive em ./parse-conversation (client-safe).
+// Aqui só o planner que precisa de SECONDS_PER_TAKE e splitCopyBySentences.
+
+import { parseConversationTurns, type ConversationTurn, type Speaker } from "./parse-conversation";
+export { parseConversationTurns } from "./parse-conversation";
+export type { ConversationTurn, Speaker } from "./parse-conversation";
+
+export interface ConversationSegment {
+  text: string;
+  speaker: Speaker;
+  visualPrompt: string;
+}
+
+// Quebra um turno longo em sub-segmentos preservando speaker, reusando
+// splitCopyBySentences pra cortar em fronteira de frase. Garante que cada
+// sub-segmento caiba em ~7.5s do Veo.
+function splitTurnIfNeeded(turn: ConversationTurn): ConversationTurn[] {
+  const wordsPerSecond = 2.8;
+  const words = turn.text.split(/\s+/).filter(Boolean).length;
+  const estimated = words / wordsPerSecond;
+  if (estimated <= SECONDS_PER_TAKE) return [turn];
+  const subCount = Math.ceil(estimated / SECONDS_PER_TAKE);
+  const sub = splitCopyBySentences(turn.text, subCount);
+  return sub.map((text) => ({ speaker: turn.speaker, text }));
+}
+
+export function planConversationSegments(copy: string): ConversationSegment[] {
+  const turns = parseConversationTurns(copy);
+  const out: ConversationSegment[] = [];
+  for (const t of turns) {
+    for (const sub of splitTurnIfNeeded(t)) {
+      out.push({ text: sub.text, speaker: sub.speaker, visualPrompt: "" });
+    }
+  }
+  return out;
+}
