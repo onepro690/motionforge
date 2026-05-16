@@ -18,7 +18,7 @@ import {
   type VeoImageInput,
 } from "@/lib/narrator/veo";
 import { assembleNarratorVideo } from "@/lib/narrator/assemble";
-import { withQuotaRetry } from "@/lib/narrator/concurrency";
+import { withQuotaRetry, isQuotaError, VEO_MAX_PARALLEL } from "@/lib/narrator/concurrency";
 import {
   buildAvatarSpeechPrompt,
   buildAvatarSilentPrompt,
@@ -110,6 +110,55 @@ export async function GET(
       cachedAvatarImage = await fetchImageForVeo(state.avatarImageUrl);
       return cachedAvatarImage;
     };
+
+    // Scheduler de QUEUED: se há slots livres (PROCESSING < VEO_MAX_PARALLEL),
+    // pega os próximos takes QUEUED (sem opName) e submete via resubmitSegment
+    // com attempt=0 (primeira submissão real). Quota error: deixa QUEUED, na
+    // próxima rodada tenta de novo (depois que outro take liberar quota).
+    {
+      const activeCount = state.segments.filter((s) => s.status === "PROCESSING").length;
+      const freeSlots = VEO_MAX_PARALLEL - activeCount;
+      if (freeSlots > 0) {
+        const queued = state.segments.filter((s) => s.status === "QUEUED").slice(0, freeSlots);
+        if (queued.length > 0) {
+          console.log(`[narrator/[id]] scheduler: ${activeCount} ativos, ${freeSlots} slots, submetendo ${queued.length} QUEUED`);
+        }
+        let scheduled = false;
+        for (const seg of queued) {
+          try {
+            const { opName, usedFallback } = await resubmitSegment(
+              seg,
+              state,
+              0,
+              false,
+              accessToken,
+              getAvatarImage,
+            );
+            seg.opName = opName;
+            seg.status = "PROCESSING";
+            seg.lastSubmittedAt = Date.now();
+            seg.usedFallback = seg.usedFallback || usedFallback;
+            seg.errorMessage = null;
+            scheduled = true;
+          } catch (err) {
+            if (isQuotaError(err)) {
+              console.log(`[narrator/[id]] take ${seg.index + 1} ainda em quota — fica QUEUED pra próxima rodada`);
+              // mantém QUEUED, não muda nada
+            } else {
+              seg.status = "FAILED";
+              seg.errorMessage = err instanceof Error ? err.message : String(err);
+              scheduled = true;
+            }
+          }
+        }
+        if (scheduled) {
+          await prisma.generationJob.update({
+            where: { id: job.id },
+            data: { generatedPrompt: JSON.stringify(state) },
+          });
+        }
+      }
+    }
 
     // Detecção e RETRY de takes "stuck": Vertex AI às vezes não retorna
     // done=true mesmo após muitos minutos. Se um take está PROCESSING há mais

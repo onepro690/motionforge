@@ -16,7 +16,7 @@ type Gender = "male" | "female";
 interface SegmentSummary {
   index: number;
   text: string;
-  status: "PROCESSING" | "COMPLETED" | "FAILED";
+  status: "QUEUED" | "PROCESSING" | "COMPLETED" | "FAILED";
   error?: string | null;
   usedFallback?: boolean;
 }
@@ -720,7 +720,15 @@ export default function NarratorPage() {
                     : `${completed}/${total} takes prontos · ${pct}%`}
                 </p>
                 {narrationDuration !== null && (
-                  <p className="text-white/40 text-xs">Narração de {narrationDuration.toFixed(1)}s</p>
+                  <p className="text-white/40 text-xs">
+                    Narração de {narrationDuration.toFixed(1)}s
+                    {(() => {
+                      const queued = segments.filter((s) => s.status === "QUEUED").length;
+                      const processing = segments.filter((s) => s.status === "PROCESSING").length;
+                      if (queued > 0) return ` · ${processing} processando, ${queued} na fila`;
+                      return "";
+                    })()}
+                  </p>
                 )}
               </div>
             </div>
@@ -741,10 +749,18 @@ export default function NarratorPage() {
                         "w-2 h-2 rounded-full mt-1 flex-shrink-0",
                         s.status === "COMPLETED" && (s.usedFallback ? "bg-amber-400" : "bg-emerald-400"),
                         s.status === "PROCESSING" && "bg-violet-400 animate-pulse",
+                        s.status === "QUEUED" && "bg-white/20",
                         s.status === "FAILED" && "bg-red-400"
                       )}
                     />
-                    <span className="text-white/50 line-clamp-2 flex-1">{s.text}</span>
+                    <span className={cn("line-clamp-2 flex-1", s.status === "QUEUED" ? "text-white/30 italic" : "text-white/50")}>
+                      {s.text || (s.status === "QUEUED" ? "(aguardando vez)" : "")}
+                    </span>
+                    {s.status === "QUEUED" && (
+                      <span className="text-white/30 text-[10px] whitespace-nowrap" title="Aguardando outro take terminar pra liberar quota Vertex">
+                        na fila
+                      </span>
+                    )}
                     {s.usedFallback && (
                       <span className="text-amber-300/80 text-[10px] whitespace-nowrap" title="Filtro Vertex bloqueou a foto — take rodou com avatar genérico">
                         avatar genérico

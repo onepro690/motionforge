@@ -27,7 +27,7 @@ import {
   buildScriptShotPrompt,
 } from "@/lib/narrator/prompts";
 import { detectLanguage } from "@/lib/narrator/language";
-import { settledPool, withQuotaRetry, VEO_SUBMIT_CONCURRENCY } from "@/lib/narrator/concurrency";
+import { settledPool, withQuotaRetry, VEO_SUBMIT_CONCURRENCY, VEO_INITIAL_BURST, isQuotaError } from "@/lib/narrator/concurrency";
 import type { NarratorJobState, NarratorSegmentState, NarratorAudioMode, NarratorSpeaker } from "@/lib/narrator/types";
 
 export const maxDuration = 120;
@@ -372,55 +372,61 @@ export async function POST(request: NextRequest) {
       // (ilustra literalmente sem injetar estética hardcoded).
       const brollBuilder = mixMode === "mixed" ? buildBrollPromptGeneric : (vp: string, attempt: number) => buildBrollPrompt(vp, vibe, attempt);
 
-      // Submete com cap de concorrência + retry exponencial em erro de quota
-      // do Veo (long_running_online_prediction_requests_per_base_model).
-      const submitResults = await settledPool(segments, VEO_SUBMIT_CONCURRENCY, (seg, i) =>
-        withQuotaRetry(() => {
-          if (seg.style === "broll") {
-            return submitVeoTextOnly(brollBuilder(seg.visualPrompt, 0), accessToken);
+      // Builder do prompt + submit pra UM segment. Reutilizado no burst
+      // inicial (aqui) e no scheduler do polling /[id].
+      const submitSegment = (seg: PlannedSegment, i: number) => {
+        if (seg.style === "broll") {
+          return submitVeoTextOnly(brollBuilder(seg.visualPrompt, 0), accessToken);
+        }
+        if (seg.style === "conversation") {
+          if (!avatarImage) {
+            return submitVeoTextOnly(brollBuilder("Two people having a calm conversation in soft ambient indoor light.", 0), accessToken);
           }
-          // conversation: image-to-video com a MESMA foto + shot rico do parser
-          // (dialog com lip-sync isolado, reaction silenciosa, joint_action).
-          if (seg.style === "conversation") {
-            if (!avatarImage) {
-              return submitVeoTextOnly(brollBuilder("Two people having a calm conversation in soft ambient indoor light.", 0), accessToken);
-            }
-            // Reconstrói o ScriptShot a partir do segment armazenado.
-            const shot: ScriptShot = {
-              kind: seg.shotKind ?? "dialog",
-              speaker: seg.speaker ?? null,
-              spokenText: seg.text,
-              visualAction: seg.visualAction ?? "",
-              sceneContext: seg.sceneContext ?? "",
-              cameraDirection: seg.cameraDirection ?? "",
-            };
-            const prompt = buildScriptShotPrompt({
-              shot,
-              genderA,
-              genderB,
-              language,
-              attempt: 0,
-              personDescriptorA,
-              personDescriptorB,
-            });
-            return submitVeoWithImage(prompt, avatarImage, accessToken);
-          }
-          // avatar OR avatar_cutout — image-to-video
-          const image = seg.style === "avatar_cutout" ? cutoutImages[i] ?? avatarImage : avatarImage;
-          if (!image) {
-            return submitVeoTextOnly(brollBuilder(seg.visualPrompt, 0), accessToken);
-          }
-          const prompt =
-            audioMode === "veo_native"
-              ? buildAvatarSpeechPrompt(seg.text, gender, vibe, 0, language)
-              : buildAvatarSilentPrompt(vibe, 0);
-          return submitVeoWithImage(prompt, image, accessToken);
-        }),
+          const shot: ScriptShot = {
+            kind: seg.shotKind ?? "dialog",
+            speaker: seg.speaker ?? null,
+            spokenText: seg.text,
+            visualAction: seg.visualAction ?? "",
+            sceneContext: seg.sceneContext ?? "",
+            cameraDirection: seg.cameraDirection ?? "",
+          };
+          const prompt = buildScriptShotPrompt({
+            shot,
+            genderA,
+            genderB,
+            language,
+            attempt: 0,
+            personDescriptorA,
+            personDescriptorB,
+          });
+          return submitVeoWithImage(prompt, avatarImage, accessToken);
+        }
+        // avatar OR avatar_cutout — image-to-video
+        const image = seg.style === "avatar_cutout" ? cutoutImages[i] ?? avatarImage : avatarImage;
+        if (!image) {
+          return submitVeoTextOnly(brollBuilder(seg.visualPrompt, 0), accessToken);
+        }
+        const prompt =
+          audioMode === "veo_native"
+            ? buildAvatarSpeechPrompt(seg.text, gender, vibe, 0, language)
+            : buildAvatarSilentPrompt(vibe, 0);
+        return submitVeoWithImage(prompt, image, accessToken);
+      };
+
+      // Submete só o BURST inicial (3 takes) em paralelo. Os outros viram
+      // QUEUED e são submetidos pelo /[id] polling conforme slots liberam.
+      // Quota Vertex AI cap é por predictions concorrentes; retry exponencial
+      // não resolve (quota só libera quando outra prediction termina). Esse
+      // scheduler natural é a forma robusta de respeitar a quota.
+      const burstSize = Math.min(VEO_INITIAL_BURST, segments.length);
+      const burstResults = await settledPool(
+        segments.slice(0, burstSize),
+        VEO_SUBMIT_CONCURRENCY,
+        (seg, i) => submitSegment(seg, i),
       );
 
       const submittedAt = Date.now();
       const segState: NarratorSegmentState[] = segments.map((seg, i) => {
-        const r = submitResults[i];
         const editedImageUrl = (seg as PlannedSegment & { editedImageUrl?: string }).editedImageUrl ?? null;
         const audioOverlayUrl = brollTtsUrls[i] ?? null;
         const baseExtra = {
@@ -433,6 +439,22 @@ export async function POST(request: NextRequest) {
           sceneContext: seg.sceneContext,
           cameraDirection: seg.cameraDirection,
         };
+
+        // Itens fora do burst → QUEUED, polling vai submeter.
+        if (i >= burstSize) {
+          return {
+            index: i,
+            text: seg.text,
+            visualPrompt: seg.visualPrompt,
+            opName: null,
+            status: "QUEUED" as const,
+            videoUrl: null,
+            errorMessage: null,
+            ...baseExtra,
+          };
+        }
+
+        const r = burstResults[i];
         if (r.status === "fulfilled") {
           return {
             index: i,
@@ -443,6 +465,20 @@ export async function POST(request: NextRequest) {
             videoUrl: null,
             errorMessage: null,
             lastSubmittedAt: submittedAt,
+            ...baseExtra,
+          };
+        }
+        // Burst falhou — se foi quota, vira QUEUED pra polling tentar de novo.
+        // Outros erros viram FAILED (não vão ficar pendurados).
+        if (isQuotaError(r.reason)) {
+          return {
+            index: i,
+            text: seg.text,
+            visualPrompt: seg.visualPrompt,
+            opName: null,
+            status: "QUEUED" as const,
+            videoUrl: null,
+            errorMessage: null,
             ...baseExtra,
           };
         }

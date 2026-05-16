@@ -80,6 +80,18 @@ export async function withQuotaRetry<T>(
   throw lastErr;
 }
 
-// Cap de concorrência usado em todos os pontos de submit Veo. Conservador
-// (4) pra evitar estourar a quota long_running_online_prediction.
-export const VEO_SUBMIT_CONCURRENCY = 4;
+// Cap de concorrência usado em pontos pontuais (Promise.allSettled paralelo).
+// Conservador (3) pra evitar estourar a quota long_running_online_prediction
+// do Veo3 Fast. Mantido pra compat com generate em modos diferentes de
+// 'conversation' que não usam scheduler.
+export const VEO_SUBMIT_CONCURRENCY = 3;
+
+// Quantos takes o /generate dispara imediatamente ao criar o job. Os outros
+// ficam status='QUEUED' e são submetidos gradualmente pelo polling do
+// /[id] conforme os ativos terminam — vira um scheduler natural respeitando
+// a quota Vertex (que é por predictions concorrentes, não por requests/seg).
+export const VEO_INITIAL_BURST = 3;
+
+// Cap de takes simultâneos em PROCESSING. Polling do /[id] usa esse número
+// pra decidir quantos QUEUED submeter por rodada. Igual ao BURST por simetria.
+export const VEO_MAX_PARALLEL = 3;
