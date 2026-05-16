@@ -18,6 +18,7 @@ import {
   type VeoImageInput,
 } from "@/lib/narrator/veo";
 import { assembleNarratorVideo } from "@/lib/narrator/assemble";
+import { withQuotaRetry } from "@/lib/narrator/concurrency";
 import {
   buildAvatarSpeechPrompt,
   buildAvatarSilentPrompt,
@@ -398,7 +399,7 @@ async function resubmitSegment(
   // B-roll: text-only sempre.
   if (style === "broll") {
     const prompt = buildBrollPrompt(seg.visualPrompt, undefined, attempt);
-    const res = await submitVeoTextOnly(prompt, accessToken);
+    const res = await withQuotaRetry(() => submitVeoTextOnly(prompt, accessToken));
     return { opName: res.opName, usedFallback: false };
   }
 
@@ -411,7 +412,7 @@ async function resubmitSegment(
         ? (state.genderA ?? state.gender)
         : (state.genderB ?? state.gender);
       const prompt = buildAvatarFallbackTextOnlyPrompt(seg.text, speakerGender, language);
-      const res = await submitVeoTextOnly(prompt, accessToken);
+      const res = await withQuotaRetry(() => submitVeoTextOnly(prompt, accessToken));
       return { opName: res.opName, usedFallback: true };
     }
     const image = await getAvatarImage();
@@ -426,7 +427,7 @@ async function resubmitSegment(
       personDescriptorA: state.personDescriptorA,
       personDescriptorB: state.personDescriptorB,
     });
-    const res = await submitVeoWithImage(prompt, image, accessToken);
+    const res = await withQuotaRetry(() => submitVeoWithImage(prompt, image, accessToken));
     return { opName: res.opName, usedFallback: false };
   }
 
@@ -440,7 +441,7 @@ async function resubmitSegment(
             undefined,
             attempt,
           );
-    const res = await submitVeoTextOnly(prompt, accessToken);
+    const res = await withQuotaRetry(() => submitVeoTextOnly(prompt, accessToken));
     return { opName: res.opName, usedFallback: true };
   }
 
@@ -462,12 +463,12 @@ async function resubmitSegment(
       state.audioMode === "veo_native"
         ? buildAvatarSpeechPrompt(seg.text, state.gender, undefined, attempt, language)
         : buildAvatarSilentPrompt(undefined, attempt);
-    const res = await submitVeoWithImage(prompt, image, accessToken);
+    const res = await withQuotaRetry(() => submitVeoWithImage(prompt, image, accessToken));
     return { opName: res.opName, usedFallback: false };
   }
 
   // Sem avatar e style != broll (não deveria acontecer) — cai pra B-roll.
   const prompt = buildBrollPrompt(seg.visualPrompt, undefined, attempt);
-  const res = await submitVeoTextOnly(prompt, accessToken);
+  const res = await withQuotaRetry(() => submitVeoTextOnly(prompt, accessToken));
   return { opName: res.opName, usedFallback: false };
 }

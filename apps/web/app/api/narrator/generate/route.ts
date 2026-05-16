@@ -25,6 +25,7 @@ import {
   buildConversationSpeechPrompt,
 } from "@/lib/narrator/prompts";
 import { detectLanguage } from "@/lib/narrator/language";
+import { settledPool, withQuotaRetry, VEO_SUBMIT_CONCURRENCY } from "@/lib/narrator/concurrency";
 import type { NarratorJobState, NarratorSegmentState, NarratorAudioMode, NarratorSpeaker } from "@/lib/narrator/types";
 
 export const maxDuration = 120;
@@ -360,8 +361,10 @@ export async function POST(request: NextRequest) {
       // (ilustra literalmente sem injetar estética hardcoded).
       const brollBuilder = mixMode === "mixed" ? buildBrollPromptGeneric : (vp: string, attempt: number) => buildBrollPrompt(vp, vibe, attempt);
 
-      const submitResults = await Promise.allSettled(
-        segments.map((seg, i) => {
+      // Submete com cap de concorrência + retry exponencial em erro de quota
+      // do Veo (long_running_online_prediction_requests_per_base_model).
+      const submitResults = await settledPool(segments, VEO_SUBMIT_CONCURRENCY, (seg, i) =>
+        withQuotaRetry(() => {
           if (seg.style === "broll") {
             return submitVeoTextOnly(brollBuilder(seg.visualPrompt, 0), accessToken);
           }
