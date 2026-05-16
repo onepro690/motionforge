@@ -7,7 +7,9 @@ import { put } from "@vercel/blob";
 import { writeFile, unlink } from "fs/promises";
 import { join } from "path";
 import { randomBytes } from "crypto";
-import { computeTakeCount, planNarratorSegments, planAvatarSegments, planMixedSegments, planConversationSegments, parseConversationTurns } from "@/lib/narrator/plan";
+import { computeTakeCount, planNarratorSegments, planAvatarSegments, planMixedSegments } from "@/lib/narrator/plan";
+import { parseScript, speakerCounts } from "@/lib/narrator/script-parser";
+import type { ScriptShot } from "@/lib/narrator/script-types";
 import { swapAvatarBackground } from "@/lib/narrator/cutout";
 import {
   submitVeoTextOnly,
@@ -22,7 +24,7 @@ import {
   buildAvatarSilentPrompt,
   buildBrollPrompt,
   buildBrollPromptGeneric,
-  buildConversationSpeechPrompt,
+  buildScriptShotPrompt,
 } from "@/lib/narrator/prompts";
 import { detectLanguage } from "@/lib/narrator/language";
 import { settledPool, withQuotaRetry, VEO_SUBMIT_CONCURRENCY } from "@/lib/narrator/concurrency";
@@ -161,22 +163,13 @@ export async function POST(request: NextRequest) {
     let mixMode: "avatar" | "broll" | "mixed" | "conversation" = parsed.data.mixMode ?? (hasAvatar ? "avatar" : "broll");
     if (!hasAvatar) mixMode = "broll";
 
-    // Validação extra pro modo conversation
-    if (mixMode === "conversation") {
-      const parsedTurns = parseConversationTurns(copy);
-      const aCount = parsedTurns.filter((t) => t.speaker === "A").length;
-      const bCount = parsedTurns.filter((t) => t.speaker === "B").length;
-      if (aCount === 0 || bCount === 0) {
-        return NextResponse.json({
-          error: "Use [A] e [B] na copy pra marcar quem fala cada linha. Exemplo: [A] Oi, tudo bem? [B] Tudo, e voce?",
-        }, { status: 400 });
-      }
-      // Tags exóticas (C, D, ...) — varre direto na copy original.
-      if (/\[\s*[c-zC-Z]\s*\]/.test(copy)) {
-        return NextResponse.json({
-          error: "Apenas tags [A] e [B] são suportadas no modo conversa.",
-        }, { status: 400 });
-      }
+    // Validação básica de avatar pro modo conversation. A validação rica do
+    // roteiro (presença de A e B, número de shots) acontece após parseScript
+    // dentro do try/catch porque depende de chamada LLM.
+    if (mixMode === "conversation" && !hasAvatar) {
+      return NextResponse.json({
+        error: "Modo Roteiro precisa de uma foto com 2 pessoas.",
+      }, { status: 400 });
     }
 
     const genderA = parsed.data.genderA ?? gender;
@@ -243,25 +236,43 @@ export async function POST(request: NextRequest) {
         style: "avatar" | "broll" | "avatar_cutout" | "conversation";
         backgroundDescription?: string;
         speaker?: NarratorSpeaker;
+        // Campos extras do parser de roteiro (mixMode='conversation')
+        shotKind?: "dialog" | "reaction" | "joint_action";
+        visualAction?: string;
+        sceneContext?: string;
+        cameraDirection?: string;
       };
       let segments: PlannedSegment[];
       let takeCount: number;
+      let scriptShots: ScriptShot[] = [];
       if (mixMode === "conversation") {
-        const conv = planConversationSegments(copy);
-        segments = conv.map((s) => ({
-          text: s.text,
+        // LLM lê o roteiro estruturado (cenas, falas com reação, ações silenciosas,
+        // cortes de câmera) e devolve shots ricos pra alimentar cada take Veo.
+        scriptShots = await parseScript(copy);
+        const { a, b } = speakerCounts(scriptShots);
+        if (scriptShots.length === 0) {
+          throw new Error("Roteiro não produziu nenhum shot válido. Verifique se há ao menos uma fala marcada com [A] ou [B].");
+        }
+        if (a === 0 || b === 0) {
+          throw new Error("Roteiro precisa de ao menos uma fala de [A] E uma fala de [B] pra modo conversa.");
+        }
+        segments = scriptShots.map((shot) => ({
+          text: shot.spokenText,
           visualPrompt: "",
           style: "conversation" as const,
-          speaker: s.speaker,
+          speaker: shot.speaker ?? undefined,
+          shotKind: shot.kind,
+          visualAction: shot.visualAction,
+          sceneContext: shot.sceneContext,
+          cameraDirection: shot.cameraDirection,
         }));
         takeCount = segments.length;
-        // Recalcula narrationDuration baseado nos turnos parseados (sem tags),
-        // garantindo trim correto no assembly.
-        const totalWords = segments.reduce(
-          (acc, s) => acc + s.text.split(/\s+/).filter(Boolean).length,
-          0,
-        );
-        narrationDuration = Math.max(2, totalWords / 2.8);
+        // Estima duração: dialogs por word count, reactions ~3s fixo (silent action).
+        const dialogWords = scriptShots
+          .filter((s) => s.kind === "dialog")
+          .reduce((acc, s) => acc + s.spokenText.split(/\s+/).filter(Boolean).length, 0);
+        const silentShots = scriptShots.filter((s) => s.kind !== "dialog").length;
+        narrationDuration = Math.max(2, dialogWords / 2.8 + silentShots * 3);
       } else if (mixMode === "mixed") {
         takeCount = computeTakeCount(narrationDuration);
         const mixed = await planMixedSegments({ copy, takeCount, language });
@@ -368,14 +379,23 @@ export async function POST(request: NextRequest) {
           if (seg.style === "broll") {
             return submitVeoTextOnly(brollBuilder(seg.visualPrompt, 0), accessToken);
           }
-          // conversation: image-to-video com a MESMA foto, prompt isola o speaker
+          // conversation: image-to-video com a MESMA foto + shot rico do parser
+          // (dialog com lip-sync isolado, reaction silenciosa, joint_action).
           if (seg.style === "conversation") {
-            if (!avatarImage || !seg.speaker) {
+            if (!avatarImage) {
               return submitVeoTextOnly(brollBuilder("Two people having a calm conversation in soft ambient indoor light.", 0), accessToken);
             }
-            const prompt = buildConversationSpeechPrompt({
-              text: seg.text,
-              speaker: seg.speaker,
+            // Reconstrói o ScriptShot a partir do segment armazenado.
+            const shot: ScriptShot = {
+              kind: seg.shotKind ?? "dialog",
+              speaker: seg.speaker ?? null,
+              spokenText: seg.text,
+              visualAction: seg.visualAction ?? "",
+              sceneContext: seg.sceneContext ?? "",
+              cameraDirection: seg.cameraDirection ?? "",
+            };
+            const prompt = buildScriptShotPrompt({
+              shot,
               genderA,
               genderB,
               language,
@@ -403,6 +423,16 @@ export async function POST(request: NextRequest) {
         const r = submitResults[i];
         const editedImageUrl = (seg as PlannedSegment & { editedImageUrl?: string }).editedImageUrl ?? null;
         const audioOverlayUrl = brollTtsUrls[i] ?? null;
+        const baseExtra = {
+          style: seg.style,
+          editedImageUrl,
+          audioOverlayUrl,
+          speaker: seg.speaker,
+          shotKind: seg.shotKind,
+          visualAction: seg.visualAction,
+          sceneContext: seg.sceneContext,
+          cameraDirection: seg.cameraDirection,
+        };
         if (r.status === "fulfilled") {
           return {
             index: i,
@@ -413,10 +443,7 @@ export async function POST(request: NextRequest) {
             videoUrl: null,
             errorMessage: null,
             lastSubmittedAt: submittedAt,
-            style: seg.style,
-            editedImageUrl,
-            audioOverlayUrl,
-            speaker: seg.speaker,
+            ...baseExtra,
           };
         }
         return {
@@ -427,10 +454,7 @@ export async function POST(request: NextRequest) {
           status: "FAILED" as const,
           videoUrl: null,
           errorMessage: r.reason instanceof Error ? r.reason.message : String(r.reason),
-          style: seg.style,
-          editedImageUrl,
-          audioOverlayUrl,
-          speaker: seg.speaker,
+          ...baseExtra,
         };
       });
 

@@ -24,9 +24,10 @@ import {
   buildAvatarSilentPrompt,
   buildBrollPrompt,
   buildAvatarFallbackTextOnlyPrompt,
-  buildConversationSpeechPrompt,
+  buildScriptShotPrompt,
   MAX_RAI_RETRIES,
 } from "@/lib/narrator/prompts";
+import type { ScriptShot } from "@/lib/narrator/script-types";
 import type { NarratorJobState, NarratorSegmentState } from "@/lib/narrator/types";
 
 ffmpeg.setFfmpegPath(ffmpegInstaller.path);
@@ -403,11 +404,13 @@ async function resubmitSegment(
     return { opName: res.opName, usedFallback: false };
   }
 
-  // Conversation: image-to-video com a MESMA foto, prompt isola o speaker.
-  // Attempt mais alto = prompt mais agressivo (reforço + descritor).
-  if (style === "conversation" && seg.speaker) {
-    // Fallback final: foto bloqueada → 1 pessoa genérica do gênero correto.
-    if (hasAvatar && isFallback) {
+  // Conversation: image-to-video com a MESMA foto + shot rico (dialog/reaction/joint).
+  // Attempt mais alto = prompt mais agressivo (reforço + descritor de pessoa).
+  if (style === "conversation") {
+    const shotKind = seg.shotKind ?? "dialog";
+    // Fallback final: foto bloqueada → 1 pessoa genérica do gênero do speaker.
+    // Só vale pra dialog (reaction/joint sem texto não tem como cair em fallback de fala).
+    if (hasAvatar && isFallback && shotKind === "dialog" && seg.speaker) {
       const speakerGender = seg.speaker === "A"
         ? (state.genderA ?? state.gender)
         : (state.genderB ?? state.gender);
@@ -417,9 +420,16 @@ async function resubmitSegment(
     }
     const image = await getAvatarImage();
     if (!image) throw new Error("Avatar image não encontrada pra retry conversation");
-    const prompt = buildConversationSpeechPrompt({
-      text: seg.text,
-      speaker: seg.speaker,
+    const shot: ScriptShot = {
+      kind: shotKind,
+      speaker: seg.speaker ?? null,
+      spokenText: seg.text,
+      visualAction: seg.visualAction ?? "",
+      sceneContext: seg.sceneContext ?? "",
+      cameraDirection: seg.cameraDirection ?? "",
+    };
+    const prompt = buildScriptShotPrompt({
+      shot,
       genderA: state.genderA ?? state.gender,
       genderB: state.genderB ?? (state.gender === "male" ? "female" : "male"),
       language,

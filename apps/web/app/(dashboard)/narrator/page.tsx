@@ -1,13 +1,12 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Mic, Loader2, Download, Sparkles, Upload, X, User, Volume2, MessageSquare } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { toast } from "sonner";
 import { cn } from "@/lib/utils";
 import { upload } from "@vercel/blob/client";
-import { parseConversationTurns } from "@/lib/narrator/parse-conversation";
 
 type Phase = "idle" | "submitting" | "polling" | "done" | "error";
 type AudioMode = "veo_native" | "tts_overlay";
@@ -167,13 +166,13 @@ export default function NarratorPage() {
       toast.error("Copy muito longa (limite 4000 caracteres)");
       return;
     }
-    // Validação extra modo conversation
+    // Validação extra modo conversation: ao menos uma tag [A] e uma [B] na copy.
+    // Validação rica (parser LLM) acontece no servidor.
     if (avatarUrl && mixMode === "conversation") {
-      const turns = parseConversationTurns(trimmed);
-      const aCount = turns.filter((t) => t.speaker === "A").length;
-      const bCount = turns.filter((t) => t.speaker === "B").length;
-      if (aCount === 0 || bCount === 0) {
-        toast.error("Use [A] e [B] na copy pra marcar quem fala cada linha.");
+      const hasA = /\[\s*[aA]\s*\]/.test(trimmed);
+      const hasB = /\[\s*[bB]\s*\]/.test(trimmed);
+      if (!hasA || !hasB) {
+        toast.error("Roteiro precisa de pelo menos uma fala marcada com [A] e uma com [B].");
         return;
       }
     }
@@ -264,33 +263,27 @@ export default function NarratorPage() {
   // Voz genérica única só relevante quando NÃO é conversation (que tem A/B)
   const showSingleVoice = mixMode !== "conversation";
 
-  // Preview de turnos parseados em tempo real (modo conversation)
-  const conversationPreview = useMemo(() => {
-    if (mixMode !== "conversation") return null;
-    const turns = parseConversationTurns(copy);
-    const aCount = turns.filter((t) => t.speaker === "A").length;
-    const bCount = turns.filter((t) => t.speaker === "B").length;
-    const totalWords = turns.reduce((acc, t) => acc + t.text.split(/\s+/).filter(Boolean).length, 0);
-    const estimatedSecs = Math.round(totalWords / 2.8);
-    return { turns, aCount, bCount, estimatedSecs, takes: turns.length };
-  }, [copy, mixMode]);
+  // Quick check sem LLM: copy precisa ao menos de uma tag [A] e uma [B].
+  // Análise rica (cenas, reações, ações) acontece no servidor via GPT-4o-mini.
+  const conversationHasA = mixMode === "conversation" ? /\[\s*[aA]\s*\]/.test(copy) : true;
+  const conversationHasB = mixMode === "conversation" ? /\[\s*[bB]\s*\]/.test(copy) : true;
+  const conversationInvalid = mixMode === "conversation" && (!conversationHasA || !conversationHasB);
 
-  const insertTagAtCursor = (tag: "[A]" | "[B]") => {
+  const insertAtCursor = (snippet: string) => {
     const ta = textareaRef.current;
     if (!ta) {
-      setCopy((prev) => `${prev}${prev && !prev.endsWith(" ") ? " " : ""}${tag} `);
+      setCopy((prev) => `${prev}${prev && !prev.endsWith("\n") ? "\n" : ""}${snippet}`);
       return;
     }
     const start = ta.selectionStart;
     const end = ta.selectionEnd;
     const before = copy.slice(0, start);
     const after = copy.slice(end);
-    const needsSpaceBefore = before.length > 0 && !/\s$/.test(before);
-    const needsSpaceAfter = after.length === 0 || !/^\s/.test(after);
-    const insertion = `${needsSpaceBefore ? " " : ""}${tag}${needsSpaceAfter ? " " : ""}`;
+    const needsNewlineBefore = before.length > 0 && !/\n$/.test(before);
+    const needsSpaceAfterTag = snippet.endsWith("]") && (after.length === 0 || !/^\s/.test(after));
+    const insertion = `${needsNewlineBefore ? "\n" : ""}${snippet}${needsSpaceAfterTag ? " " : ""}`;
     const next = `${before}${insertion}${after}`;
     setCopy(next);
-    // Reposiciona cursor depois do tag (após o RAF do setState)
     requestAnimationFrame(() => {
       if (!textareaRef.current) return;
       const pos = before.length + insertion.length;
@@ -298,10 +291,6 @@ export default function NarratorPage() {
       textareaRef.current.setSelectionRange(pos, pos);
     });
   };
-
-  const conversationInvalid = mixMode === "conversation" && conversationPreview
-    ? conversationPreview.aCount === 0 || conversationPreview.bCount === 0
-    : false;
 
   return (
     <div className="max-w-2xl mx-auto space-y-5">
@@ -418,8 +407,8 @@ export default function NarratorPage() {
                     isLocked && "opacity-50 cursor-not-allowed"
                   )}
                 >
-                  <div className="font-semibold text-sm flex items-center gap-1"><MessageSquare className="w-3 h-3" /> Conversa (2 pessoas)</div>
-                  <div className="text-[10px] text-white/40 mt-0.5">Foto com 2 avatares. Tags [A]/[B] na copy.</div>
+                  <div className="font-semibold text-sm flex items-center gap-1"><MessageSquare className="w-3 h-3" /> Roteiro c/ 2 personagens</div>
+                  <div className="text-[10px] text-white/40 mt-0.5">Roteiro completo: cenas, falas, reações, ações.</div>
                 </button>
                 <button
                   onClick={() => setMixMode("broll")}
@@ -443,7 +432,7 @@ export default function NarratorPage() {
               )}
               {mixMode === "conversation" && (
                 <p className="text-[11px] text-violet-300/70 mt-1.5">
-                  📸 A pessoa à <strong>esquerda</strong> da foto é <strong>A</strong>, à <strong>direita</strong> é <strong>B</strong>. Veo gera lip-sync nativo por take.
+                  📸 Pessoa à <strong>esquerda</strong> da foto = <strong>A</strong>, à <strong>direita</strong> = <strong>B</strong>. GPT-4o-mini interpreta o roteiro (cenas, reações, ações silenciosas) e gera 1 take Veo por shot.
                 </p>
               )}
             </div>
@@ -611,28 +600,58 @@ export default function NarratorPage() {
               </span>
             </label>
             {mixMode === "conversation" && avatarUrl && (
-              <div className="flex items-center gap-2 mb-2">
+              <div className="flex flex-wrap items-center gap-1.5 mb-2">
                 <button
-                  onClick={() => insertTagAtCursor("[A]")}
+                  onClick={() => insertAtCursor("[A] ")}
                   disabled={isLocked}
                   className={cn(
-                    "px-2.5 py-1 rounded-md border border-violet-500/30 bg-violet-500/10 text-violet-200 text-xs font-mono hover:bg-violet-500/20 transition",
+                    "px-2 py-1 rounded-md border border-violet-500/30 bg-violet-500/10 text-violet-200 text-xs font-mono hover:bg-violet-500/20 transition",
                     isLocked && "opacity-50 cursor-not-allowed"
                   )}
                 >
-                  + [A] esquerda
+                  + [A] fala
                 </button>
                 <button
-                  onClick={() => insertTagAtCursor("[B]")}
+                  onClick={() => insertAtCursor("[B] ")}
                   disabled={isLocked}
                   className={cn(
-                    "px-2.5 py-1 rounded-md border border-violet-500/30 bg-violet-500/10 text-violet-200 text-xs font-mono hover:bg-violet-500/20 transition",
+                    "px-2 py-1 rounded-md border border-violet-500/30 bg-violet-500/10 text-violet-200 text-xs font-mono hover:bg-violet-500/20 transition",
                     isLocked && "opacity-50 cursor-not-allowed"
                   )}
                 >
-                  + [B] direita
+                  + [B] fala
                 </button>
-                <span className="text-[10px] text-white/30 ml-auto">Tag inicia uma nova fala</span>
+                <button
+                  onClick={() => insertAtCursor("[Cena — ")}
+                  disabled={isLocked}
+                  className={cn(
+                    "px-2 py-1 rounded-md border border-white/[0.12] bg-white/[0.03] text-white/70 text-xs font-mono hover:bg-white/[0.06] transition",
+                    isLocked && "opacity-50 cursor-not-allowed"
+                  )}
+                >
+                  + Cena
+                </button>
+                <button
+                  onClick={() => insertAtCursor("[Corte direto pra câmera — ")}
+                  disabled={isLocked}
+                  className={cn(
+                    "px-2 py-1 rounded-md border border-white/[0.12] bg-white/[0.03] text-white/70 text-xs font-mono hover:bg-white/[0.06] transition",
+                    isLocked && "opacity-50 cursor-not-allowed"
+                  )}
+                >
+                  + Câmera
+                </button>
+                <button
+                  onClick={() => insertAtCursor("[B faz tal coisa.]")}
+                  disabled={isLocked}
+                  className={cn(
+                    "px-2 py-1 rounded-md border border-white/[0.12] bg-white/[0.03] text-white/70 text-xs font-mono hover:bg-white/[0.06] transition",
+                    isLocked && "opacity-50 cursor-not-allowed"
+                  )}
+                >
+                  + Ação silenciosa
+                </button>
+                <span className="text-[10px] text-white/30 ml-auto">Reação na fala: <code className="text-white/50">[B] (surpresa) ...</code></span>
               </div>
             )}
             <textarea
@@ -640,31 +659,20 @@ export default function NarratorPage() {
               value={copy}
               onChange={(e) => setCopy(e.target.value)}
               disabled={isLocked}
-              rows={8}
+              rows={mixMode === "conversation" ? 14 : 8}
               placeholder={mixMode === "conversation"
-                ? "[A] Voce viu o que aconteceu? [B] Vi sim, foi incrivel. [A] Tambem fiquei chocado."
+                ? `[Cena 1 — A se aproxima de B na rua]\n[A] Posso te fazer uma pergunta?\n[B] (surpresa) Como você sabe?\n[A] Eu sei porque ele tá te procurando.\n[B fecha o olho. Pausa. A abre uma carta na mão dela.]\n[A] Abre o olho. Olha quem é.\n[B] Não acredito… é ele.\n[Corte direto pra câmera — A falando com quem assiste]\n[A] Comenta alma que eu te mando o teste.`
                 : COPY_EXAMPLES[0]}
-              className="w-full bg-white/[0.02] border border-white/[0.08] rounded-lg px-4 py-3 text-white placeholder-white/20 text-sm leading-relaxed focus:outline-none focus:border-violet-500/40 resize-none disabled:opacity-60"
+              className="w-full bg-white/[0.02] border border-white/[0.08] rounded-lg px-4 py-3 text-white placeholder-white/20 text-sm leading-relaxed focus:outline-none focus:border-violet-500/40 resize-none disabled:opacity-60 font-mono"
             />
-            {mixMode === "conversation" && conversationPreview && (
-              <div className={cn(
-                "mt-2 rounded-md border px-3 py-2 text-xs",
-                conversationInvalid
-                  ? "border-amber-500/30 bg-amber-500/5 text-amber-300/80"
-                  : "border-white/[0.08] bg-white/[0.02] text-white/60",
-              )}>
-                {conversationInvalid ? (
-                  <span>⚠ Use ao menos uma fala de <strong>[A]</strong> e uma de <strong>[B]</strong> pra montar a conversa.</span>
-                ) : (
-                  <span>
-                    🎬 <strong>{conversationPreview.takes}</strong> takes · <strong>{conversationPreview.aCount}</strong> falas de A · <strong>{conversationPreview.bCount}</strong> falas de B · ≈{conversationPreview.estimatedSecs}s
-                  </span>
-                )}
+            {mixMode === "conversation" && conversationInvalid && (
+              <div className="mt-2 rounded-md border border-amber-500/30 bg-amber-500/5 px-3 py-2 text-xs text-amber-300/80">
+                ⚠ Roteiro precisa de pelo menos uma fala marcada com <strong>[A]</strong> e uma com <strong>[B]</strong>.
               </div>
             )}
             <p className="text-xs text-white/30 mt-1.5">
               {mixMode === "conversation"
-                ? "Cada turno marcado com [A] ou [B] vira 1 take Veo com a mesma foto. Só a pessoa marcada mexe a boca."
+                ? "GPT-4o-mini lê o roteiro inteiro e identifica cenas, falas, reações (parênteses) e ações silenciosas (colchetes sem [A]/[B]). Cada elemento vira 1 take Veo."
                 : avatarUrl
                   ? "A cada ~7.5s de fala geramos 1 take Veo 3 Fast com o avatar falando o trecho. Cada take parte da mesma foto."
                   : "A cada 8s de narração geramos 1 take Veo 3 Fast. A copy é sempre narrada por inteiro."}

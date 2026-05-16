@@ -39,6 +39,18 @@ export interface NarratorSegmentState {
   audioOverlayUrl?: string | null;
   // Modo conversation: qual avatar fala nesse take. "A" = esquerda, "B" = direita.
   speaker?: NarratorSpeaker;
+  // ─── Campos do parser de roteiro (mixMode='conversation' v2) ───
+  // Tipo do shot. dialog = fala. reaction = ação visual sem fala (1 pessoa).
+  // joint_action = ambos agem juntos sem fala.
+  shotKind?: "dialog" | "reaction" | "joint_action";
+  // Ação visual / expressão facial / gesto (em inglês — entra no prompt Veo).
+  // Em dialog: opcional (descreve reação/expressão durante a fala).
+  // Em reaction/joint_action: obrigatório (descreve o que mostrar).
+  visualAction?: string;
+  // Cena ativa (em inglês). Persiste do [Cena ...] mais recente.
+  sceneContext?: string;
+  // Direção de câmera ativa (em inglês). Persiste do [Corte/câmera ...] mais recente.
+  cameraDirection?: string;
 }
 
 export interface NarratorJobState {
