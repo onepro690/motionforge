@@ -95,4 +95,23 @@ export interface NarratorJobState {
   // left/right não isolou bem o falante.
   personDescriptorA?: string;
   personDescriptorB?: string;
+  // ─── Modo conversation v3 (text-to-video puro) ───
+  // Perfil rico de cada pessoa preenchido pelo usuário no form. Usado pra
+  // construir o PERSON LOCK em todo prompt Veo, garantindo consistência de
+  // identidade entre takes (sem foto base).
+  personA?: PersonProfile;
+  personB?: PersonProfile;
+  // Setting/cenário padrão quando o roteiro não tem [Cena] markers.
+  // Default: "neutral indoor setting".
+  defaultSetting?: string;
+}
+
+export interface PersonProfile {
+  gender: "male" | "female";
+  // Idade aproximada ("28", "around 30", "early 20s"). Free text.
+  age?: string;
+  // Descrição física: cabelo, etnia, traços marcantes. Free text PT/EN.
+  appearance?: string;
+  // Vestuário ("white cropped t-shirt + jeans azul claro"). Free text.
+  outfit?: string;
 }

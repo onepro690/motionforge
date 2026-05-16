@@ -7,6 +7,7 @@
 // automaticamente da copy via `detectLanguage()` em language.ts.
 
 import { languageLabel, forbiddenLanguagesClause, type NarratorLanguage } from "./language";
+import type { PersonProfile } from "./types";
 
 function safetyPrefix(attempt: number): string {
   if (attempt <= 0) return "";
@@ -241,103 +242,122 @@ function dualSilenceLock(): string {
   return "AUDIO LOCK: the audio track is COMPLETELY SILENT — no voice, no speech, no music, no sound effects, no ambient sound. NO subtitles, NO captions, NO on-screen text. Both people stay quiet — neither person speaks, neither mouth opens to vocalize. They communicate only with body language and facial expression.";
 }
 
+// Monta a linha descritiva de UMA pessoa pro PERSON LOCK no prompt Veo.
+// Quanto mais detalhe o usuário deu, melhor a consistência entre takes.
+// Vai pra dentro do prompt sempre, em todo shot, pra Veo regenerar a pessoa
+// com a mesma aparência (text-to-video puro não tem identity inherent).
+function describePerson(label: string, sideHint: "LEFT" | "RIGHT", p: PersonProfile | undefined): string {
+  if (!p) {
+    return `${label} (${sideHint} side): adult person with neutral casual appearance`;
+  }
+  const parts: string[] = [];
+  parts.push(p.gender === "male" ? "adult man" : "adult woman");
+  if (p.age?.trim()) parts.push(`around ${p.age.trim()} years old`);
+  if (p.appearance?.trim()) parts.push(p.appearance.trim());
+  if (p.outfit?.trim()) parts.push(`wearing ${p.outfit.trim()}`);
+  return `${label} (always positioned on the ${sideHint} side of the frame): ${parts.join(", ")}`;
+}
+
+function personLockBlock(personA: PersonProfile | undefined, personB: PersonProfile | undefined): string {
+  return [
+    "CHARACTERS — these two specific people appear in EVERY shot and their identity, face, hair, age, ethnicity, clothing MUST stay IDENTICAL across all shots:",
+    describePerson("PERSON A", "LEFT", personA) + ".",
+    describePerson("PERSON B", "RIGHT", personB) + ".",
+    "ABSOLUTE IDENTITY LOCK: do not invent variations of A or B. Same hair color, same hairstyle, same skin tone, same age, same outfit, same body type as described above — every single shot.",
+  ].join(" ");
+}
+
 export function buildScriptShotPrompt(args: {
   shot: ScriptShot;
-  genderA: "male" | "female";
-  genderB: "male" | "female";
+  personA: PersonProfile | undefined;
+  personB: PersonProfile | undefined;
+  defaultSetting?: string;
   language?: NarratorLanguage;
   attempt?: number;
-  personDescriptorA?: string;
-  personDescriptorB?: string;
 }): string {
-  const { shot, genderA, genderB, language = "pt-BR", attempt = 0, personDescriptorA, personDescriptorB } = args;
+  const { shot, personA, personB, defaultSetting, language = "pt-BR", attempt = 0 } = args;
   const lang = languageLabel(language);
 
+  const personLock = personLockBlock(personA, personB);
   const sceneLine = shot.sceneContext
-    ? `SCENE CONTEXT: ${shot.sceneContext}.`
-    : "";
+    ? `SCENE: ${shot.sceneContext}.`
+    : defaultSetting?.trim()
+      ? `SCENE: ${defaultSetting.trim()}.`
+      : "SCENE: neutral well-lit indoor environment, simple realistic background.";
   const cameraLine = shot.cameraDirection
     ? `CAMERA: ${shot.cameraDirection}.`
-    : "CAMERA: medium two-shot, both people fully visible in vertical 9:16 frame.";
+    : "CAMERA: medium two-shot, both people fully visible in vertical 9:16 frame, slight handheld feel.";
 
   // ──────────────────────────── DIALOG ────────────────────────────────
   if (shot.kind === "dialog" && shot.speaker) {
     const sides = sideOf(shot.speaker);
-    const speakerGender = shot.speaker === "A" ? genderA : genderB;
-    const speakerDesc = shot.speaker === "A" ? personDescriptorA : personDescriptorB;
-    const otherDesc = shot.speaker === "A" ? personDescriptorB : personDescriptorA;
+    const speakerPerson = shot.speaker === "A" ? personA : personB;
+    const speakerGender = speakerPerson?.gender ?? "female";
 
     // Reforço progressivo de isolamento de boca conforme o attempt sobe.
     const isolationBlocks: string[] = [];
     isolationBlocks.push(
-      `MOUTH ISOLATION LOCK — CRITICAL: Only ONE mouth may move — the mouth of the person on the ${sides.speaker}. The mouth of the person on the ${sides.other} is FROZEN CLOSED throughout. ZERO mouth movement, ZERO jaw movement on the ${sides.other} person.`,
+      `MOUTH ISOLATION LOCK — CRITICAL: Only ONE mouth may move in this shot — the mouth of PERSON ${shot.speaker} (on the ${sides.speaker}). The mouth of the OTHER person (on the ${sides.other}) is FROZEN CLOSED throughout. ZERO mouth movement, ZERO jaw movement on the listener.`,
     );
     if (attempt >= 1) {
       isolationBlocks.push(
         `LISTENER LOCK: The person on the ${sides.other} is LISTENING ONLY — closed neutral lips, natural blinks and small attentive head movements, mouth NEVER opens, NEVER vocalizes.`,
       );
       isolationBlocks.push(
-        `SPEAKER LOCK: ONLY the person on the ${sides.speaker} speaks. Their mouth moves naturally in tight sync with the spoken words.`,
-      );
-    }
-    if (attempt >= 2 && speakerDesc && otherDesc) {
-      isolationBlocks.push(
-        `IDENTITY LOCK: The ${speakerDesc} (${sides.speaker} side) speaks. The ${otherDesc} (${sides.other} side) stays SILENT with closed mouth.`,
+        `SPEAKER LOCK: ONLY PERSON ${shot.speaker} (${sides.speaker} side) speaks. Their mouth moves naturally in tight sync with the spoken words.`,
       );
     }
 
     const visualActionLine = shot.visualAction
-      ? `SPEAKER EXPRESSION: while the ${sides.speaker} person speaks, their face/body conveys: ${shot.visualAction}. The ${sides.other} person reacts subtly to this (matching emotional register) but stays silent.`
+      ? `SPEAKER EXPRESSION: while PERSON ${shot.speaker} speaks, their face/body conveys: ${shot.visualAction}. The other person reacts subtly (matching emotional register) but stays silent.`
       : "";
 
     return [
       safetyPrefix(attempt),
+      personLock,
       sceneLine,
       cameraLine,
-      `Two people are visible in the same vertical frame (the source image shows both). The person on the ${sides.speaker} speaks DIRECTLY in this shot saying EXACTLY these words in ${lang} and NOTHING ELSE: "${shot.spokenText}". The person on the ${sides.other} stays silent and listens/reacts.`,
+      `PERSON ${shot.speaker} (on the ${sides.speaker}) speaks DIRECTLY in this shot saying EXACTLY these words in ${lang} and NOTHING ELSE: "${shot.spokenText}". The other person stays silent and reacts naturally.`,
       visualActionLine,
       isolationBlocks.join(" "),
       pronunciationLock(shot.spokenText, language),
       voiceLock(speakerGender, language),
       audioNegativeLock(),
       visualPurityLock(),
-      "Identity, hair, skin tone, clothing of BOTH people stay EXACTLY identical to the source image — change nothing except the speaker's lips, eyes and natural micro head movement required to speak, and the subtle reactive expression of the other person.",
-      `Lips of the ${sides.speaker} person MUST be in tight sync with the spoken ${lang} words. The ${sides.other} person's lips MUST stay closed and motionless.`,
-      "STRICTLY VERTICAL 9:16, 1080x1920, full-frame composition that keeps BOTH people clearly visible (unless the CAMERA line above explicitly requests a close-up of one of them).",
+      `Lips of PERSON ${shot.speaker} MUST be in tight sync with the spoken ${lang} words. The other person's lips MUST stay closed and motionless.`,
+      "STRICTLY VERTICAL 9:16, 1080x1920, full-frame composition that keeps BOTH people clearly visible unless the CAMERA line explicitly calls for a close-up.",
       `STRICT NEGATIVE: no subtitles, no captions, no on-screen text, no watermarks. ${forbiddenLanguagesClause(language)}`,
       audioNegativeLock(),
       visualPurityLock(),
-      `FINAL PRONUNCIATION LOCK: every word of "${shot.spokenText}" must be spoken IN FULL, in ${lang}, audibly, by the ${sides.speaker} person only. NO word omitted, skipped or mumbled. The ${sides.other} person remains MUTE throughout. ${audioNegativeLock()}`,
+      `FINAL PRONUNCIATION LOCK: every word of "${shot.spokenText}" must be spoken IN FULL, in ${lang}, audibly, by PERSON ${shot.speaker} only. NO word omitted, skipped or mumbled. The other person remains MUTE throughout. ${audioNegativeLock()}`,
     ].filter(Boolean).join(" ");
   }
 
   // ──────────────────────────── REACTION ──────────────────────────────
   if (shot.kind === "reaction" && shot.speaker) {
     const sides = sideOf(shot.speaker);
-    const subjectDesc = shot.speaker === "A" ? personDescriptorA : personDescriptorB;
     return [
       safetyPrefix(attempt),
+      personLock,
       sceneLine,
       cameraLine,
-      `Two people are visible in the same vertical frame. The person on the ${sides.speaker}${subjectDesc ? ` (${subjectDesc})` : ""} performs this exact action: ${shot.visualAction}.`,
-      `The person on the ${sides.other} is present in the frame and reacts subtly to the action of the ${sides.speaker} person (small head turn, attentive look, micro-expression matching the moment), but does NOT perform any major action.`,
+      `PERSON ${shot.speaker} (on the ${sides.speaker}) performs this exact action in this shot: ${shot.visualAction}.`,
+      `The OTHER person (on the ${sides.other}) is present in the frame and reacts subtly to PERSON ${shot.speaker}'s action (small head turn, attentive look, micro-expression matching the moment), but does NOT perform any major action of their own.`,
       dualSilenceLock(),
-      "Identity, hair, skin tone, clothing of BOTH people stay EXACTLY identical to the source image — only allow the natural micro-movements required by the described action.",
-      "STRICTLY VERTICAL 9:16, 1080x1920, full-frame composition that keeps BOTH people visible (unless the CAMERA line above explicitly requests a close-up).",
+      "STRICTLY VERTICAL 9:16, 1080x1920, full-frame composition that keeps BOTH people visible unless the CAMERA line explicitly requests a close-up.",
       `STRICT NEGATIVE: no subtitles, no captions, no on-screen text, no watermarks, no logos. ${forbiddenLanguagesClause(language)}`,
       visualPurityLock(),
     ].filter(Boolean).join(" ");
   }
 
   // ────────────────────────── JOINT ACTION ────────────────────────────
-  // joint_action ou fallback (shot inválido)
   return [
     safetyPrefix(attempt),
+    personLock,
     sceneLine,
     cameraLine,
-    `Two people are visible in the same vertical frame. Both perform this combined action together: ${shot.visualAction || "they look at each other in a meaningful pause"}.`,
+    `Both PERSON A and PERSON B perform this combined action together in this shot: ${shot.visualAction || "they look at each other in a meaningful pause"}.`,
     dualSilenceLock(),
-    "Identity, hair, skin tone, clothing of BOTH people stay EXACTLY identical to the source image — only allow the natural micro-movements required by the described action.",
     "STRICTLY VERTICAL 9:16, 1080x1920, full-frame composition that keeps BOTH people visible.",
     `STRICT NEGATIVE: no subtitles, no captions, no on-screen text, no watermarks, no logos. ${forbiddenLanguagesClause(language)}`,
     visualPurityLock(),

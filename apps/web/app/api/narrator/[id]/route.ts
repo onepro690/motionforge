@@ -453,22 +453,10 @@ async function resubmitSegment(
     return { opName: res.opName, usedFallback: false };
   }
 
-  // Conversation: image-to-video com a MESMA foto + shot rico (dialog/reaction/joint).
-  // Attempt mais alto = prompt mais agressivo (reforço + descritor de pessoa).
+  // Conversation v3: text-to-video puro (sem foto). PersonProfile no state
+  // alimenta o PERSON LOCK do prompt.
   if (style === "conversation") {
     const shotKind = seg.shotKind ?? "dialog";
-    // Fallback final: foto bloqueada → 1 pessoa genérica do gênero do speaker.
-    // Só vale pra dialog (reaction/joint sem texto não tem como cair em fallback de fala).
-    if (hasAvatar && isFallback && shotKind === "dialog" && seg.speaker) {
-      const speakerGender = seg.speaker === "A"
-        ? (state.genderA ?? state.gender)
-        : (state.genderB ?? state.gender);
-      const prompt = buildAvatarFallbackTextOnlyPrompt(seg.text, speakerGender, language);
-      const res = await withQuotaRetry(() => submitVeoTextOnly(prompt, accessToken));
-      return { opName: res.opName, usedFallback: true };
-    }
-    const image = await getAvatarImage();
-    if (!image) throw new Error("Avatar image não encontrada pra retry conversation");
     const shot: ScriptShot = {
       kind: shotKind,
       speaker: seg.speaker ?? null,
@@ -479,14 +467,13 @@ async function resubmitSegment(
     };
     const prompt = buildScriptShotPrompt({
       shot,
-      genderA: state.genderA ?? state.gender,
-      genderB: state.genderB ?? (state.gender === "male" ? "female" : "male"),
+      personA: state.personA,
+      personB: state.personB,
+      defaultSetting: state.defaultSetting,
       language,
       attempt,
-      personDescriptorA: state.personDescriptorA,
-      personDescriptorB: state.personDescriptorB,
     });
-    const res = await withQuotaRetry(() => submitVeoWithImage(prompt, image, accessToken));
+    const res = await withQuotaRetry(() => submitVeoTextOnly(prompt, accessToken));
     return { opName: res.opName, usedFallback: false };
   }
 

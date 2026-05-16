@@ -28,7 +28,7 @@ import {
 } from "@/lib/narrator/prompts";
 import { detectLanguage } from "@/lib/narrator/language";
 import { settledPool, withQuotaRetry, VEO_SUBMIT_CONCURRENCY, VEO_INITIAL_BURST, isQuotaError } from "@/lib/narrator/concurrency";
-import type { NarratorJobState, NarratorSegmentState, NarratorAudioMode, NarratorSpeaker } from "@/lib/narrator/types";
+import type { NarratorJobState, NarratorSegmentState, NarratorAudioMode, NarratorSpeaker, PersonProfile } from "@/lib/narrator/types";
 
 export const maxDuration = 120;
 
@@ -37,6 +37,13 @@ const VOICES_BY_GENDER = {
   female: { id: "nova",  label: "Nova (feminina, jovem)" },
 } as const;
 
+const personSchema = z.object({
+  gender: z.enum(["male", "female"]),
+  age: z.string().max(40).optional(),
+  appearance: z.string().max(500).optional(),
+  outfit: z.string().max(200).optional(),
+});
+
 const schema = z.object({
   copy: z.string().min(20).max(4000),
   gender: z.enum(["male", "female"]),
@@ -44,9 +51,14 @@ const schema = z.object({
   avatarImageUrl: z.string().url().optional(),
   audioMode: z.enum(["veo_native", "tts_overlay"]).optional(),
   mixMode: z.enum(["avatar", "broll", "mixed", "conversation"]).optional(),
-  // Modo conversation: gênero de cada pessoa da foto.
+  // Modo conversation v2 (foto): gênero de cada pessoa.
   genderA: z.enum(["male", "female"]).optional(),
   genderB: z.enum(["male", "female"]).optional(),
+  // Modo conversation v3 (text-to-video): perfil rico de cada pessoa +
+  // cenário padrão quando o roteiro não tem [Cena] marker.
+  personA: personSchema.optional(),
+  personB: personSchema.optional(),
+  defaultSetting: z.string().max(300).optional(),
 });
 
 // GPT-4o-mini Vision: descreve cada pessoa de uma foto com 2 avatares.
@@ -163,17 +175,20 @@ export async function POST(request: NextRequest) {
     let mixMode: "avatar" | "broll" | "mixed" | "conversation" = parsed.data.mixMode ?? (hasAvatar ? "avatar" : "broll");
     if (!hasAvatar) mixMode = "broll";
 
-    // Validação básica de avatar pro modo conversation. A validação rica do
-    // roteiro (presença de A e B, número de shots) acontece após parseScript
-    // dentro do try/catch porque depende de chamada LLM.
-    if (mixMode === "conversation" && !hasAvatar) {
+    // Modo conversation v3: text-to-video puro (sem foto). Veo gera tudo
+    // do zero descrevendo as 2 pessoas via PERSON LOCK no prompt.
+    // Validação rica do roteiro (A + B presentes) roda após parseScript LLM.
+    const personA: PersonProfile | undefined = parsed.data.personA;
+    const personB: PersonProfile | undefined = parsed.data.personB;
+    const defaultSetting = parsed.data.defaultSetting?.trim() || undefined;
+    if (mixMode === "conversation" && (!personA || !personB)) {
       return NextResponse.json({
-        error: "Modo Roteiro precisa de uma foto com 2 pessoas.",
+        error: "Modo Roteiro precisa de descrição das 2 pessoas (Pessoa A e Pessoa B).",
       }, { status: 400 });
     }
 
-    const genderA = parsed.data.genderA ?? gender;
-    const genderB = parsed.data.genderB ?? (gender === "male" ? "female" : "male");
+    const genderA = personA?.gender ?? parsed.data.genderA ?? gender;
+    const genderB = personB?.gender ?? parsed.data.genderB ?? (gender === "male" ? "female" : "male");
 
     // audioMode resolution:
     //  - "broll" sem avatar → tts_overlay (legado)
@@ -307,18 +322,7 @@ export async function POST(request: NextRequest) {
         avatarImage = await fetchImageForVeo(avatarImageUrl!);
       }
 
-      // Modo conversation: gera descritores das 2 pessoas (best-effort).
-      // Usados pelos prompts no attempt >= 2 dos retries quando o prompt
-      // posicional left/right não isolou bem o falante.
-      let personDescriptorA: string | undefined;
-      let personDescriptorB: string | undefined;
-      if (mixMode === "conversation" && avatarImageUrl) {
-        const desc = await describeTwoPeople(avatarImageUrl);
-        if (desc) {
-          personDescriptorA = desc.left;
-          personDescriptorB = desc.right;
-        }
-      }
+      // Modo conversation v3: text-to-video. Sem descritores via Vision (não tem foto).
 
       // PREPS PARALELOS:
       //  1. Pra cutouts: Nano Banana edita foto (troca fundo).
@@ -379,9 +383,6 @@ export async function POST(request: NextRequest) {
           return submitVeoTextOnly(brollBuilder(seg.visualPrompt, 0), accessToken);
         }
         if (seg.style === "conversation") {
-          if (!avatarImage) {
-            return submitVeoTextOnly(brollBuilder("Two people having a calm conversation in soft ambient indoor light.", 0), accessToken);
-          }
           const shot: ScriptShot = {
             kind: seg.shotKind ?? "dialog",
             speaker: seg.speaker ?? null,
@@ -392,14 +393,14 @@ export async function POST(request: NextRequest) {
           };
           const prompt = buildScriptShotPrompt({
             shot,
-            genderA,
-            genderB,
+            personA,
+            personB,
+            defaultSetting,
             language,
             attempt: 0,
-            personDescriptorA,
-            personDescriptorB,
           });
-          return submitVeoWithImage(prompt, avatarImage, accessToken);
+          // text-to-video puro: zero foto, Veo cria os personagens do prompt
+          return submitVeoTextOnly(prompt, accessToken);
         }
         // avatar OR avatar_cutout — image-to-video
         const image = seg.style === "avatar_cutout" ? cutoutImages[i] ?? avatarImage : avatarImage;
@@ -511,8 +512,9 @@ export async function POST(request: NextRequest) {
         ...(mixMode === "conversation" ? {
           genderA,
           genderB,
-          personDescriptorA,
-          personDescriptorB,
+          personA,
+          personB,
+          defaultSetting,
         } : {}),
       };
 

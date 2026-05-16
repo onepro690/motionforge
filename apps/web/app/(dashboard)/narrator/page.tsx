@@ -52,9 +52,20 @@ export default function NarratorPage() {
   const [uploadingAvatar, setUploadingAvatar] = useState(false);
   const [audioMode, setAudioMode] = useState<AudioMode>("veo_native");
   const [mixMode, setMixMode] = useState<MixMode>("avatar");
-  // Modo conversation: gênero da pessoa à esquerda (A) e à direita (B)
-  const [genderA, setGenderA] = useState<Gender>("male");
-  const [genderB, setGenderB] = useState<Gender>("female");
+  // Modo conversation v3: perfil rico das 2 pessoas (text-to-video puro, sem foto)
+  const [personA, setPersonA] = useState<{ gender: Gender; age: string; appearance: string; outfit: string }>({
+    gender: "female",
+    age: "",
+    appearance: "",
+    outfit: "",
+  });
+  const [personB, setPersonB] = useState<{ gender: Gender; age: string; appearance: string; outfit: string }>({
+    gender: "male",
+    age: "",
+    appearance: "",
+    outfit: "",
+  });
+  const [defaultSetting, setDefaultSetting] = useState("");
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
 
@@ -166,13 +177,17 @@ export default function NarratorPage() {
       toast.error("Copy muito longa (limite 4000 caracteres)");
       return;
     }
-    // Validação extra modo conversation: ao menos uma tag [A] e uma [B] na copy.
-    // Validação rica (parser LLM) acontece no servidor.
-    if (avatarUrl && mixMode === "conversation") {
+    // Modo conversation: valida ao menos uma tag [A] e uma [B] + descrição
+    // mínima das 2 pessoas. Parser LLM rico roda no servidor.
+    if (mixMode === "conversation") {
       const hasA = /\[\s*[aA]\s*\]/.test(trimmed);
       const hasB = /\[\s*[bB]\s*\]/.test(trimmed);
       if (!hasA || !hasB) {
         toast.error("Roteiro precisa de pelo menos uma fala marcada com [A] e uma com [B].");
+        return;
+      }
+      if (!personA.appearance.trim() || !personB.appearance.trim()) {
+        toast.error("Descreva a aparência das 2 pessoas (cabelo, etnia, traços) pra Veo gerar com consistência.");
         return;
       }
     }
@@ -183,16 +198,34 @@ export default function NarratorPage() {
     setProgress(null);
     setNarrationDuration(null);
     try {
+      // No modo conversation, NÃO mandamos avatarImageUrl mesmo se o usuário
+      // tiver carregado uma foto (v3 é text-to-video puro). A foto fica
+      // ignorada — Veo gera tudo do prompt.
+      const sendAvatar = avatarUrl && mixMode !== "conversation";
       const res = await fetch("/api/narrator/generate", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           copy: trimmed,
           gender,
-          avatarImageUrl: avatarUrl ?? undefined,
-          audioMode: avatarUrl ? audioMode : undefined,
-          mixMode: avatarUrl ? mixMode : "broll",
-          ...(avatarUrl && mixMode === "conversation" ? { genderA, genderB } : {}),
+          avatarImageUrl: sendAvatar ? avatarUrl : undefined,
+          audioMode: sendAvatar ? audioMode : undefined,
+          mixMode: mixMode === "conversation" ? "conversation" : (avatarUrl ? mixMode : "broll"),
+          ...(mixMode === "conversation" ? {
+            personA: {
+              gender: personA.gender,
+              age: personA.age.trim() || undefined,
+              appearance: personA.appearance.trim() || undefined,
+              outfit: personA.outfit.trim() || undefined,
+            },
+            personB: {
+              gender: personB.gender,
+              age: personB.age.trim() || undefined,
+              appearance: personB.appearance.trim() || undefined,
+              outfit: personB.outfit.trim() || undefined,
+            },
+            defaultSetting: defaultSetting.trim() || undefined,
+          } : {}),
         }),
       });
       const data = await res.json();
@@ -306,7 +339,8 @@ export default function NarratorPage() {
 
       <Card className="bg-white/[0.03] border-white/[0.08]">
         <CardContent className="p-5 space-y-4">
-          {/* Avatar (opcional) */}
+          {/* Avatar — escondido no modo Roteiro (que é text-to-video puro) */}
+          {mixMode !== "conversation" && (
           <div>
             <label className="text-xs uppercase tracking-wider text-white/50 font-medium mb-2 flex items-center justify-between">
               <span className="flex items-center gap-1.5"><User className="w-3.5 h-3.5" /> Avatar (opcional)</span>
@@ -360,9 +394,10 @@ export default function NarratorPage() {
               </label>
             )}
           </div>
+          )}
 
-          {/* Modo de produção (só quando há avatar) */}
-          {avatarUrl && (
+          {/* Modo de produção: sempre visível. Avatar/Mixed exigem foto. */}
+          {true && (
             <div>
               <label className="text-xs uppercase tracking-wider text-white/50 font-medium mb-2 block">
                 Modo de produção
@@ -370,31 +405,33 @@ export default function NarratorPage() {
               <div className="grid grid-cols-2 gap-2">
                 <button
                   onClick={() => setMixMode("avatar")}
-                  disabled={isLocked}
+                  disabled={isLocked || !avatarUrl}
+                  title={!avatarUrl ? "Suba uma foto pra usar este modo" : undefined}
                   className={cn(
                     "px-2 py-3 rounded-lg border text-xs font-medium transition-all text-left",
                     mixMode === "avatar"
                       ? "bg-violet-500/20 border-violet-500/50 text-violet-200"
                       : "bg-white/[0.02] border-white/[0.08] text-white/60 hover:bg-white/[0.05]",
-                    isLocked && "opacity-50 cursor-not-allowed"
+                    (isLocked || !avatarUrl) && "opacity-40 cursor-not-allowed"
                   )}
                 >
                   <div className="font-semibold text-sm">Só avatar</div>
-                  <div className="text-[10px] text-white/40 mt-0.5">Avatar falando do começo ao fim.</div>
+                  <div className="text-[10px] text-white/40 mt-0.5">Avatar falando do começo ao fim. Precisa foto.</div>
                 </button>
                 <button
                   onClick={() => setMixMode("mixed")}
-                  disabled={isLocked}
+                  disabled={isLocked || !avatarUrl}
+                  title={!avatarUrl ? "Suba uma foto pra usar este modo" : undefined}
                   className={cn(
                     "px-2 py-3 rounded-lg border text-xs font-medium transition-all text-left",
                     mixMode === "mixed"
                       ? "bg-violet-500/20 border-violet-500/50 text-violet-200"
                       : "bg-white/[0.02] border-white/[0.08] text-white/60 hover:bg-white/[0.05]",
-                    isLocked && "opacity-50 cursor-not-allowed"
+                    (isLocked || !avatarUrl) && "opacity-40 cursor-not-allowed"
                   )}
                 >
                   <div className="font-semibold text-sm">Misturado</div>
-                  <div className="text-[10px] text-white/40 mt-0.5">Avatar + B-roll + avatar recortado em cenário.</div>
+                  <div className="text-[10px] text-white/40 mt-0.5">Avatar + B-roll + recorte em cenário. Precisa foto.</div>
                 </button>
                 <button
                   onClick={() => setMixMode("conversation")}
@@ -408,7 +445,7 @@ export default function NarratorPage() {
                   )}
                 >
                   <div className="font-semibold text-sm flex items-center gap-1"><MessageSquare className="w-3 h-3" /> Roteiro c/ 2 personagens</div>
-                  <div className="text-[10px] text-white/40 mt-0.5">Roteiro completo: cenas, falas, reações, ações.</div>
+                  <div className="text-[10px] text-white/40 mt-0.5">Você descreve as 2 pessoas. Veo cria do zero.</div>
                 </button>
                 <button
                   onClick={() => setMixMode("broll")}
@@ -432,82 +469,88 @@ export default function NarratorPage() {
               )}
               {mixMode === "conversation" && (
                 <p className="text-[11px] text-violet-300/70 mt-1.5">
-                  📸 Pessoa à <strong>esquerda</strong> da foto = <strong>A</strong>, à <strong>direita</strong> = <strong>B</strong>. GPT-4o-mini interpreta o roteiro (cenas, reações, ações silenciosas) e gera 1 take Veo por shot.
+                  ✨ Sem foto. Você descreve as 2 pessoas (A=esquerda, B=direita) e o roteiro. GPT-4o-mini interpreta cenas/reações/falas, Veo gera cada shot do zero.
                 </p>
               )}
             </div>
           )}
 
-          {/* Gêneros por pessoa — modo conversation */}
-          {avatarUrl && mixMode === "conversation" && (
-            <div className="grid grid-cols-2 gap-3">
-              <div>
-                <label className="text-xs uppercase tracking-wider text-white/50 font-medium mb-2 block">
-                  Voz pessoa A (esquerda)
-                </label>
-                <div className="grid grid-cols-2 gap-1.5">
-                  <button
-                    onClick={() => setGenderA("male")}
-                    disabled={isLocked}
-                    className={cn(
-                      "px-2 py-2 rounded-md border text-xs font-medium transition-all",
-                      genderA === "male"
-                        ? "bg-violet-500/20 border-violet-500/50 text-violet-200"
-                        : "bg-white/[0.02] border-white/[0.08] text-white/60 hover:bg-white/[0.05]",
-                      isLocked && "opacity-50 cursor-not-allowed"
-                    )}
-                  >
-                    Masc.
-                  </button>
-                  <button
-                    onClick={() => setGenderA("female")}
-                    disabled={isLocked}
-                    className={cn(
-                      "px-2 py-2 rounded-md border text-xs font-medium transition-all",
-                      genderA === "female"
-                        ? "bg-violet-500/20 border-violet-500/50 text-violet-200"
-                        : "bg-white/[0.02] border-white/[0.08] text-white/60 hover:bg-white/[0.05]",
-                      isLocked && "opacity-50 cursor-not-allowed"
-                    )}
-                  >
-                    Fem.
-                  </button>
-                </div>
+          {/* Cards das 2 pessoas — modo conversation v3 (text-to-video) */}
+          {mixMode === "conversation" && (
+            <>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                {([
+                  { label: "Pessoa A · esquerda", value: personA, set: setPersonA, key: "A" },
+                  { label: "Pessoa B · direita", value: personB, set: setPersonB, key: "B" },
+                ] as const).map((p) => (
+                  <div key={p.key} className="rounded-lg border border-white/[0.08] bg-white/[0.02] p-3 space-y-2">
+                    <div className="flex items-center justify-between">
+                      <span className="text-xs uppercase tracking-wider text-white/50 font-medium">{p.label}</span>
+                      <div className="flex gap-1">
+                        <button
+                          onClick={() => p.set({ ...p.value, gender: "male" })}
+                          disabled={isLocked}
+                          className={cn(
+                            "px-2 py-0.5 rounded text-[10px] font-medium",
+                            p.value.gender === "male"
+                              ? "bg-violet-500/20 border border-violet-500/50 text-violet-200"
+                              : "bg-white/[0.03] border border-white/[0.08] text-white/50",
+                          )}
+                        >M</button>
+                        <button
+                          onClick={() => p.set({ ...p.value, gender: "female" })}
+                          disabled={isLocked}
+                          className={cn(
+                            "px-2 py-0.5 rounded text-[10px] font-medium",
+                            p.value.gender === "female"
+                              ? "bg-violet-500/20 border border-violet-500/50 text-violet-200"
+                              : "bg-white/[0.03] border border-white/[0.08] text-white/50",
+                          )}
+                        >F</button>
+                      </div>
+                    </div>
+                    <input
+                      type="text"
+                      value={p.value.age}
+                      onChange={(e) => p.set({ ...p.value, age: e.target.value })}
+                      disabled={isLocked}
+                      placeholder="Idade (ex: 28)"
+                      className="w-full bg-white/[0.02] border border-white/[0.08] rounded px-2 py-1.5 text-white placeholder-white/20 text-xs focus:outline-none focus:border-violet-500/40"
+                    />
+                    <textarea
+                      value={p.value.appearance}
+                      onChange={(e) => p.set({ ...p.value, appearance: e.target.value })}
+                      disabled={isLocked}
+                      rows={2}
+                      placeholder="Aparência: cabelo, etnia, traços (ex: cabelo loiro longo cacheado, pele clara, olhos verdes)"
+                      className="w-full bg-white/[0.02] border border-white/[0.08] rounded px-2 py-1.5 text-white placeholder-white/20 text-xs leading-snug focus:outline-none focus:border-violet-500/40 resize-none"
+                    />
+                    <input
+                      type="text"
+                      value={p.value.outfit}
+                      onChange={(e) => p.set({ ...p.value, outfit: e.target.value })}
+                      disabled={isLocked}
+                      placeholder="Roupa (ex: camiseta branca + jeans)"
+                      className="w-full bg-white/[0.02] border border-white/[0.08] rounded px-2 py-1.5 text-white placeholder-white/20 text-xs focus:outline-none focus:border-violet-500/40"
+                    />
+                  </div>
+                ))}
               </div>
               <div>
                 <label className="text-xs uppercase tracking-wider text-white/50 font-medium mb-2 block">
-                  Voz pessoa B (direita)
+                  Cenário padrão (opcional)
                 </label>
-                <div className="grid grid-cols-2 gap-1.5">
-                  <button
-                    onClick={() => setGenderB("male")}
-                    disabled={isLocked}
-                    className={cn(
-                      "px-2 py-2 rounded-md border text-xs font-medium transition-all",
-                      genderB === "male"
-                        ? "bg-violet-500/20 border-violet-500/50 text-violet-200"
-                        : "bg-white/[0.02] border-white/[0.08] text-white/60 hover:bg-white/[0.05]",
-                      isLocked && "opacity-50 cursor-not-allowed"
-                    )}
-                  >
-                    Masc.
-                  </button>
-                  <button
-                    onClick={() => setGenderB("female")}
-                    disabled={isLocked}
-                    className={cn(
-                      "px-2 py-2 rounded-md border text-xs font-medium transition-all",
-                      genderB === "female"
-                        ? "bg-violet-500/20 border-violet-500/50 text-violet-200"
-                        : "bg-white/[0.02] border-white/[0.08] text-white/60 hover:bg-white/[0.05]",
-                      isLocked && "opacity-50 cursor-not-allowed"
-                    )}
-                  >
-                    Fem.
-                  </button>
-                </div>
+                <input
+                  type="text"
+                  value={defaultSetting}
+                  onChange={(e) => setDefaultSetting(e.target.value)}
+                  disabled={isLocked}
+                  placeholder="Ex: calçada arborizada urbana ao entardecer · cozinha moderna · café noturno"
+                  className="w-full bg-white/[0.02] border border-white/[0.08] rounded px-3 py-2 text-white placeholder-white/20 text-xs focus:outline-none focus:border-violet-500/40"
+                />
+                <p className="text-[10px] text-white/30 mt-1">Usado nos shots sem marcação [Cena]. Pode deixar vazio se todas as cenas estão no roteiro.</p>
               </div>
-            </div>
+            </>
           )}
 
           {/* Modo de áudio (só relevante em mixMode='avatar') */}
